@@ -9,6 +9,7 @@ from .tools import (
     handle_browse_region,
     handle_get_coverage,
     handle_get_variants,
+    handle_jump_to,
     handle_list_contigs,
 )
 
@@ -81,6 +82,27 @@ TOOLS = [
             "required": ["file_path"],
         },
     ),
+    Tool(
+        name="jump_to",
+        description="Jump to a specific genomic position and view surrounding reads",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Path to BAM/CRAM file"},
+                "position": {"type": "integer", "description": "Genomic position to center on"},
+                "contig": {
+                    "type": "string",
+                    "description": "Chromosome/contig name (default: chr1)",
+                },
+                "window": {
+                    "type": "integer",
+                    "description": "Window size in bp around position",
+                },
+                "reference": {"type": "string", "description": "Reference FASTA path"},
+            },
+            "required": ["file_path", "position"],
+        },
+    ),
 ]
 
 TOOL_HANDLERS = {
@@ -88,6 +110,7 @@ TOOL_HANDLERS = {
     "get_variants": handle_get_variants,
     "get_coverage": handle_get_coverage,
     "list_contigs": handle_list_contigs,
+    "jump_to": handle_jump_to,
 }
 
 
@@ -117,7 +140,7 @@ def create_server(config: BAMCPConfig | None = None) -> Server:
             Resource(
                 uri="ui://bamcp/viewer",
                 name="BAMCP Alignment Viewer",
-                mimeType="text/html",
+                mimeType="text/html+mcp",
                 description="Interactive BAM/CRAM alignment visualization",
             )
         ]

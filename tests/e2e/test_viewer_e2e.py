@@ -391,6 +391,81 @@ class TestEmptyState:
         assert rows.count() == 0
 
 
+class TestSoftClipRendering:
+    """E2E tests for soft-clip visualization."""
+
+    @pytest.mark.e2e
+    def test_parse_soft_clips_method_exists(self, viewer_page: Page):
+        """Viewer should have parseSoftClips method."""
+        send_init_data(viewer_page)
+        exists = viewer_page.evaluate("() => typeof viewer.parseSoftClips === 'function'")
+        assert exists
+
+    @pytest.mark.e2e
+    def test_parse_soft_clips_no_clips(self, viewer_page: Page):
+        """Should return zero clips for simple CIGAR."""
+        send_init_data(viewer_page)
+        result = viewer_page.evaluate("() => viewer.parseSoftClips('50M')")
+        assert result["left"] == 0
+        assert result["right"] == 0
+
+    @pytest.mark.e2e
+    def test_parse_soft_clips_left(self, viewer_page: Page):
+        """Should detect left soft-clip."""
+        send_init_data(viewer_page)
+        result = viewer_page.evaluate("() => viewer.parseSoftClips('5S45M')")
+        assert result["left"] == 5
+        assert result["right"] == 0
+
+    @pytest.mark.e2e
+    def test_parse_soft_clips_right(self, viewer_page: Page):
+        """Should detect right soft-clip."""
+        send_init_data(viewer_page)
+        result = viewer_page.evaluate("() => viewer.parseSoftClips('45M5S')")
+        assert result["left"] == 0
+        assert result["right"] == 5
+
+    @pytest.mark.e2e
+    def test_parse_soft_clips_both(self, viewer_page: Page):
+        """Should detect both soft-clips."""
+        send_init_data(viewer_page)
+        result = viewer_page.evaluate("() => viewer.parseSoftClips('3S44M3S')")
+        assert result["left"] == 3
+        assert result["right"] == 3
+
+    @pytest.mark.e2e
+    def test_parse_soft_clips_empty(self, viewer_page: Page):
+        """Should handle empty CIGAR."""
+        send_init_data(viewer_page)
+        result = viewer_page.evaluate("() => viewer.parseSoftClips('')")
+        assert result["left"] == 0
+        assert result["right"] == 0
+
+    @pytest.mark.e2e
+    def test_soft_clip_rendering_no_error(self, viewer_page: Page):
+        """Rendering reads with soft-clips should not cause errors."""
+        soft_clip_data = {
+            **SAMPLE_DATA,
+            "reads": [
+                {
+                    "name": "clip_read",
+                    "sequence": "NNNNN" + "ACGTACGTAC" * 5,
+                    "cigar": "5S50M",
+                    "position": 100,
+                    "end_position": 150,
+                    "mapping_quality": 60,
+                    "is_reverse": False,
+                    "mismatches": [],
+                }
+            ],
+        }
+        errors = []
+        viewer_page.on("pageerror", lambda err: errors.append(str(err)))
+        send_init_data(viewer_page, soft_clip_data)
+        viewer_page.wait_for_timeout(200)
+        assert len(errors) == 0
+
+
 class TestCanvasRendering:
     """E2E tests verifying canvas rendering occurs."""
 

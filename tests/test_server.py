@@ -11,12 +11,12 @@ class TestToolDefinitions:
 
     @pytest.mark.unit
     def test_tool_count(self):
-        assert len(TOOLS) == 4
+        assert len(TOOLS) == 5
 
     @pytest.mark.unit
     def test_tool_names(self):
         names = {t.name for t in TOOLS}
-        assert names == {"browse_region", "get_variants", "get_coverage", "list_contigs"}
+        assert names == {"browse_region", "get_variants", "get_coverage", "list_contigs", "jump_to"}
 
     @pytest.mark.unit
     def test_browse_region_schema(self):
@@ -47,6 +47,17 @@ class TestToolDefinitions:
         tool = next(t for t in TOOLS if t.name == "list_contigs")
         schema = tool.inputSchema
         assert schema["required"] == ["file_path"]
+
+    @pytest.mark.unit
+    def test_jump_to_schema(self):
+        tool = next(t for t in TOOLS if t.name == "jump_to")
+        schema = tool.inputSchema
+        assert "file_path" in schema["properties"]
+        assert "position" in schema["properties"]
+        assert "contig" in schema["properties"]
+        assert "window" in schema["properties"]
+        assert "reference" in schema["properties"]
+        assert set(schema["required"]) == {"file_path", "position"}
 
     @pytest.mark.unit
     def test_all_tools_have_descriptions(self):

@@ -109,6 +109,41 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
     return {"content": [{"type": "text", "text": json.dumps({"contigs": contigs})}]}
 
 
+async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
+    """
+    Handle jump_to tool call.
+
+    Centers the viewer on a specific genomic position with a configurable window.
+    """
+    file_path = args["file_path"]
+    position = args["position"]
+    contig = args.get("contig", "chr1")
+    window = args.get("window", config.default_window)
+    reference = args.get("reference", config.reference)
+
+    start = max(0, position - window // 2)
+    end = position + window // 2
+    region = f"{contig}:{start}-{end}"
+
+    data = fetch_region(
+        file_path,
+        region,
+        reference,
+        max_reads=config.max_reads,
+        min_mapq=config.min_mapq,
+    )
+
+    payload = _serialize_region_data(data)
+
+    return {
+        "content": [{"type": "text", "text": json.dumps(payload)}],
+        "_meta": {
+            "ui/resourceUri": "ui://bamcp/viewer",
+            "ui/init": payload,
+        },
+    }
+
+
 def _serialize_region_data(data: RegionData) -> dict:
     """Serialize RegionData to a JSON-compatible dict."""
     return {
@@ -119,6 +154,7 @@ def _serialize_region_data(data: RegionData) -> dict:
             {
                 "name": r.name,
                 "sequence": r.sequence,
+                "qualities": r.qualities,
                 "cigar": r.cigar,
                 "position": r.position,
                 "end_position": r.end_position,

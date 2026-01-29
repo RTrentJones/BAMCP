@@ -343,6 +343,28 @@ def get_viewer_html() -> str:
 
             if (x + w < 0 || x > this.readsCanvas.width) return;
 
+            // Parse soft-clips from CIGAR
+            const softClips = this.parseSoftClips(read.cigar);
+
+            // Draw soft-clipped regions (semi-transparent with amber border)
+            if (softClips.left > 0) {
+                const clipW = softClips.left * scale;
+                ctx.fillStyle = read.is_reverse ? 'rgba(167,139,250,0.3)' : 'rgba(96,165,250,0.3)';
+                ctx.fillRect(x - clipW, y, clipW, READ_HEIGHT);
+                ctx.strokeStyle = '#f59e0b';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x - clipW, y, clipW, READ_HEIGHT);
+            }
+            if (softClips.right > 0) {
+                const clipW = softClips.right * scale;
+                ctx.fillStyle = read.is_reverse ? 'rgba(167,139,250,0.3)' : 'rgba(96,165,250,0.3)';
+                ctx.fillRect(x + w, y, clipW, READ_HEIGHT);
+                ctx.strokeStyle = '#f59e0b';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x + w, y, clipW, READ_HEIGHT);
+            }
+
+            // Draw aligned read body
             ctx.fillStyle = read.is_reverse ? '#a78bfa' : '#60a5fa';
             ctx.fillRect(x, y, w, READ_HEIGHT);
 
@@ -360,6 +382,16 @@ def get_viewer_html() -> str:
             if (w > 15) {
                 ctx.fillText(arrow, read.is_reverse ? x + 2 : x + w - 10, y + 9);
             }
+        }
+
+        parseSoftClips(cigar) {
+            let left = 0, right = 0;
+            if (!cigar) return { left, right };
+            const ops = cigar.match(/\\d+[MIDNSHP=X]/g);
+            if (!ops || ops.length === 0) return { left, right };
+            if (ops[0].endsWith('S')) left = parseInt(ops[0]);
+            if (ops.length > 1 && ops[ops.length - 1].endsWith('S')) right = parseInt(ops[ops.length - 1]);
+            return { left, right };
         }
 
         getScale() {

@@ -9,6 +9,7 @@ from bamcp.tools import (
     handle_browse_region,
     handle_get_coverage,
     handle_get_variants,
+    handle_jump_to,
     handle_list_contigs,
 )
 from bamcp.parsers import AlignedRead, RegionData
@@ -73,6 +74,7 @@ class TestSerializeRegionData:
         assert r["position"] == 100
         assert r["end_position"] == 104
         assert r["mapping_quality"] == 60
+        assert r["qualities"] == [30, 30, 30, 30]
         assert r["is_reverse"] is False
         assert len(r["mismatches"]) == 1
 
@@ -287,3 +289,70 @@ class TestHandleListContigs:
     async def test_nonexistent_file(self, config):
         with pytest.raises(Exception):
             await handle_list_contigs({"file_path": "/nonexistent.bam"}, config)
+
+
+class TestHandleJumpTo:
+    """Tests for handle_jump_to tool handler."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_returns_ui_metadata(self, small_bam_path, config):
+        result = await handle_jump_to(
+            {"file_path": small_bam_path, "position": 150, "contig": "chr1"}, config
+        )
+        assert "_meta" in result
+        assert result["_meta"]["ui/resourceUri"] == "ui://bamcp/viewer"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_centers_on_position(self, small_bam_path, config):
+        result = await handle_jump_to(
+            {"file_path": small_bam_path, "position": 150, "contig": "chr1"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["contig"] == "chr1"
+        # Position 150 should be within the returned start-end range
+        assert payload["start"] <= 150 <= payload["end"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_custom_window(self, small_bam_path, config):
+        result = await handle_jump_to(
+            {"file_path": small_bam_path, "position": 150, "contig": "chr1", "window": 100},
+            config,
+        )
+        payload = json.loads(result["content"][0]["text"])
+        span = payload["end"] - payload["start"]
+        assert span == 100
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_default_window_from_config(self, small_bam_path):
+        config = BAMCPConfig(default_window=200)
+        result = await handle_jump_to(
+            {"file_path": small_bam_path, "position": 300, "contig": "chr1"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        span = payload["end"] - payload["start"]
+        assert span == 200
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_default_contig(self, small_bam_path, config):
+        """Without contig arg, defaults to chr1."""
+        result = await handle_jump_to(
+            {"file_path": small_bam_path, "position": 150}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["contig"] == "chr1"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_reads_returned(self, small_bam_path, config):
+        result = await handle_jump_to(
+            {"file_path": small_bam_path, "position": 150, "contig": "chr1", "window": 200},
+            config,
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert "reads" in payload
+        assert len(payload["reads"]) > 0

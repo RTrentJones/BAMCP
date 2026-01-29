@@ -9,6 +9,7 @@ from bamcp.tools import (
     handle_browse_region,
     handle_get_coverage,
     handle_get_variants,
+    handle_jump_to,
     handle_list_contigs,
 )
 
@@ -46,10 +47,11 @@ class TestBrowseRegionIntegration:
         # Verify read structure
         read = payload["reads"][0]
         required_fields = {
-            "name", "sequence", "cigar", "position",
+            "name", "sequence", "qualities", "cigar", "position",
             "end_position", "mapping_quality", "is_reverse", "mismatches",
         }
         assert set(read.keys()) == required_fields
+        assert isinstance(read["qualities"], list)
 
         # Verify coverage length
         assert len(payload["coverage"]) == 110
@@ -193,3 +195,43 @@ class TestMultiToolWorkflow:
             payload = json.loads(result["content"][0]["text"])
             assert "reads" in payload
             assert "coverage" in payload
+
+
+class TestJumpToIntegration:
+    """Integration tests for jump_to tool."""
+
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_jump_to_returns_centered_data(self, small_bam_path):
+        """jump_to should return data centered on the given position."""
+        config = BAMCPConfig()
+
+        result = await handle_jump_to(
+            {"file_path": small_bam_path, "position": 150, "contig": "chr1", "window": 200},
+            config,
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["contig"] == "chr1"
+        assert payload["start"] <= 150 <= payload["end"]
+        assert payload["end"] - payload["start"] == 200
+
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_jump_then_browse_same_region(self, small_bam_path):
+        """jump_to and browse_region for the same region should return the same reads."""
+        config = BAMCPConfig()
+
+        jump_result = await handle_jump_to(
+            {"file_path": small_bam_path, "position": 150, "contig": "chr1", "window": 200},
+            config,
+        )
+        jump_payload = json.loads(jump_result["content"][0]["text"])
+
+        region = f"chr1:{jump_payload['start']}-{jump_payload['end']}"
+        browse_result = await handle_browse_region(
+            {"file_path": small_bam_path, "region": region}, config
+        )
+        browse_payload = json.loads(browse_result["content"][0]["text"])
+
+        # Same region should yield same number of reads
+        assert len(jump_payload["reads"]) == len(browse_payload["reads"])

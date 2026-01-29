@@ -107,6 +107,13 @@ class TestGetViewerHtml:
         assert "showTooltip" in html
 
     @pytest.mark.unit
+    def test_contains_soft_clip_rendering(self):
+        """HTML should contain soft-clip rendering logic."""
+        html = get_viewer_html()
+        assert "parseSoftClips" in html
+        assert "softClips" in html
+
+    @pytest.mark.unit
     def test_css_styles_present(self):
         """HTML should include CSS styles."""
         html = get_viewer_html()

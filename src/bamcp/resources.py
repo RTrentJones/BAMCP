@@ -430,7 +430,10 @@ def get_viewer_html() -> str:
             const genomePos = Math.floor(this.viewport.start + x / scale);
             const rowIdx = Math.floor(y / (READ_HEIGHT + READ_GAP));
 
-            if (rowIdx >= this.packedRows.length) return;
+            if (rowIdx >= this.packedRows.length) {
+                this.tooltip.style.display = 'none';
+                return;
+            }
 
             const read = this.packedRows[rowIdx].find(r =>
                 r.position <= genomePos && r.end_position >= genomePos

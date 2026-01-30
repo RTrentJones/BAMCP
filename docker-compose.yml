@@ -1,0 +1,114 @@
+# ============================================================================
+# BAMCP Docker Compose
+#
+# Profiles:
+#   dev   — Development: mounts source, runs tests, hot-reload friendly
+#   beta  — Pre-release: production image with debug logging
+#   prod  — Production: optimized, non-root, minimal surface
+#
+# Usage:
+#   docker compose --profile dev up         # Run dev tests
+#   docker compose --profile dev run test   # Run unit+integration tests
+#   docker compose --profile dev run e2e    # Run Playwright E2E tests
+#   docker compose --profile beta up        # Run beta server
+#   docker compose --profile prod up        # Run production server
+# ============================================================================
+
+services:
+  # --------------------------------------------------------------------------
+  # Development: test runner with source mounts
+  # --------------------------------------------------------------------------
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    profiles: ["dev"]
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+    command: >
+      python -m pytest tests/ --ignore=tests/e2e
+      -v --cov=bamcp --cov-report=term-missing
+    environment:
+      - BAMCP_REFERENCE=
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+
+  e2e:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    profiles: ["dev"]
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+    command: >
+      python -m pytest tests/e2e/ -v
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+
+  lint:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    profiles: ["dev"]
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+    command: >
+      sh -c "black --check src tests && ruff check src tests && mypy src"
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+
+  # --------------------------------------------------------------------------
+  # Beta: production image with verbose logging
+  # --------------------------------------------------------------------------
+  beta:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["beta"]
+    stdin_open: true
+    volumes:
+      - bamcp-data:/data
+    environment:
+      - BAMCP_REFERENCE=/data/reference.fa
+      - BAMCP_MAX_READS=10000
+      - BAMCP_DEFAULT_WINDOW=500
+      - BAMCP_MIN_VAF=0.1
+      - BAMCP_MIN_DEPTH=10
+      - BAMCP_MIN_MAPQ=0
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # Production: locked-down, optimized
+  # --------------------------------------------------------------------------
+  prod:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["prod"]
+    stdin_open: true
+    volumes:
+      - bamcp-data:/data:ro
+    environment:
+      - BAMCP_REFERENCE=/data/reference.fa
+      - BAMCP_MAX_READS=10000
+      - BAMCP_DEFAULT_WINDOW=500
+      - BAMCP_MIN_VAF=0.1
+      - BAMCP_MIN_DEPTH=10
+      - BAMCP_MIN_MAPQ=0
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    security_opt:
+      - no-new-privileges:true
+    restart: always
+
+volumes:
+  bamcp-data:
+    driver: local

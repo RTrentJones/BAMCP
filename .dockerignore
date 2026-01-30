@@ -1,0 +1,56 @@
+# Git
+.git
+.gitignore
+
+# Python artifacts
+__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+*.egg
+dist
+build
+.eggs
+
+# Test / coverage
+.pytest_cache
+.coverage
+.coverage.*
+htmlcov
+coverage.xml
+.tox
+.nox
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Environments
+.env
+.envrc
+.venv
+venv
+env
+
+# Docker-in-Docker
+Dockerfile*
+docker-compose*.yml
+docker/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs (not needed at runtime)
+docs/
+CONTRIBUTING.md
+LICENSE
+README.md
+
+# Mypy / Ruff caches
+.mypy_cache
+.ruff_cache
+.dmypy.json

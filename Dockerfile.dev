@@ -38,16 +38,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install dependencies first (layer caching)
-COPY pyproject.toml ./
+# Copy source and metadata (hatchling editable install needs src/ present)
+COPY pyproject.toml README.md ./
+COPY src/ src/
+COPY tests/ tests/
+
+# Editable install with dev extras
 RUN pip install --no-cache-dir -e ".[dev]"
 
 # Install Playwright browsers
 RUN playwright install chromium
-
-# Copy source and tests
-COPY src/ src/
-COPY tests/ tests/
 
 # Generate test fixtures if not present
 RUN python tests/create_fixtures.py

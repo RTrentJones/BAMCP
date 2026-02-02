@@ -26,6 +26,11 @@ services:
       - ./src:/app/src:ro
       - ./tests:/app/tests:ro
       - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./Dockerfile:/app/Dockerfile:ro
+      - ./Dockerfile.dev:/app/Dockerfile.dev:ro
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
+      - ./docker:/app/docker:ro
+      - ./.dockerignore:/app/.dockerignore:ro
     command: >
       python -m pytest tests/ --ignore=tests/e2e
       -v --cov=bamcp --cov-report=term-missing

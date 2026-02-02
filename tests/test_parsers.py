@@ -292,7 +292,7 @@ class TestFetchRegion:
     @pytest.mark.unit
     def test_nonexistent_file(self):
         """Should raise error for nonexistent BAM file."""
-        with pytest.raises(Exception):
+        with pytest.raises((FileNotFoundError, OSError)):
             fetch_region("/nonexistent/file.bam", "chr1:100-200")
 
     @pytest.mark.unit

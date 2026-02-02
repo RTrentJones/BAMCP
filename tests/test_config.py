@@ -1,6 +1,7 @@
 """Unit tests for bamcp.config module."""
 
 import os
+
 import pytest
 
 from bamcp.config import BAMCPConfig
@@ -19,6 +20,11 @@ class TestBAMCPConfig:
         assert config.min_vaf == 0.1
         assert config.min_depth == 10
         assert config.min_mapq == 0
+        assert config.transport == "stdio"
+        assert config.host == "0.0.0.0"
+        assert config.port == 8000
+        assert config.auth_enabled is False
+        assert config.token_expiry == 3600
 
     @pytest.mark.unit
     def test_custom_values(self):
@@ -85,3 +91,50 @@ class TestBAMCPConfig:
         assert config.max_reads == 500
         assert config.reference is None  # default
         assert config.min_vaf == 0.1  # default
+
+    @pytest.mark.unit
+    def test_from_env_transport_fields(self, monkeypatch):
+        """from_env should read transport-related env vars."""
+        for key in list(os.environ.keys()):
+            if key.startswith("BAMCP_"):
+                monkeypatch.delenv(key, raising=False)
+
+        monkeypatch.setenv("BAMCP_TRANSPORT", "sse")
+        monkeypatch.setenv("BAMCP_HOST", "127.0.0.1")
+        monkeypatch.setenv("BAMCP_PORT", "9000")
+
+        config = BAMCPConfig.from_env()
+        assert config.transport == "sse"
+        assert config.host == "127.0.0.1"
+        assert config.port == 9000
+
+    @pytest.mark.unit
+    def test_from_env_auth_fields(self, monkeypatch):
+        """from_env should read auth-related env vars."""
+        for key in list(os.environ.keys()):
+            if key.startswith("BAMCP_"):
+                monkeypatch.delenv(key, raising=False)
+
+        monkeypatch.setenv("BAMCP_AUTH_ENABLED", "true")
+        monkeypatch.setenv("BAMCP_ISSUER_URL", "https://auth.example.com")
+        monkeypatch.setenv("BAMCP_RESOURCE_SERVER_URL", "https://mcp.example.com")
+        monkeypatch.setenv("BAMCP_REQUIRED_SCOPES", "read,write")
+        monkeypatch.setenv("BAMCP_TOKEN_EXPIRY", "7200")
+
+        config = BAMCPConfig.from_env()
+        assert config.auth_enabled is True
+        assert config.issuer_url == "https://auth.example.com"
+        assert config.resource_server_url == "https://mcp.example.com"
+        assert config.required_scopes == ["read", "write"]
+        assert config.token_expiry == 7200
+
+    @pytest.mark.unit
+    def test_from_env_auth_disabled_by_default(self, monkeypatch):
+        """Auth should be disabled when env var is empty."""
+        for key in list(os.environ.keys()):
+            if key.startswith("BAMCP_"):
+                monkeypatch.delenv(key, raising=False)
+
+        config = BAMCPConfig.from_env()
+        assert config.auth_enabled is False
+        assert config.required_scopes is None

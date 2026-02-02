@@ -38,17 +38,15 @@ env
 # Docker-in-Docker
 Dockerfile*
 docker-compose*.yml
-docker/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Docs (not needed at runtime)
+# Docs (not needed at runtime, except README.md which hatchling needs for metadata)
 docs/
 CONTRIBUTING.md
 LICENSE
-README.md
 
 # Mypy / Ruff caches
 .mypy_cache

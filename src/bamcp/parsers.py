@@ -1,7 +1,6 @@
 """BAM/CRAM file parsing using pysam."""
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 import pysam
 
@@ -31,7 +30,7 @@ class RegionData:
     reads: list[AlignedRead]
     coverage: list[int]
     variants: list[dict]
-    reference_sequence: Optional[str] = None
+    reference_sequence: str | None = None
 
 
 def parse_region(region: str) -> tuple[str, int, int]:
@@ -71,7 +70,7 @@ def parse_region(region: str) -> tuple[str, int, int]:
 def fetch_region(
     bam_path: str,
     region: str,
-    reference_path: Optional[str] = None,
+    reference_path: str | None = None,
     max_reads: int = 10000,
     min_mapq: int = 0,
 ) -> RegionData:
@@ -90,14 +89,14 @@ def fetch_region(
     """
     contig, start, end = parse_region(region)
 
-    mode = "rc" if bam_path.endswith(".cram") else "rb"
-    samfile = pysam.AlignmentFile(bam_path, mode, reference_filename=reference_path)
+    mode: str = "rc" if bam_path.endswith(".cram") else "rb"
+    samfile = pysam.AlignmentFile(bam_path, mode, reference_filename=reference_path)  # type: ignore[arg-type]
 
     reads: list[AlignedRead] = []
     coverage = [0] * (end - start)
     base_counts: list[dict[str, int]] = [{} for _ in range(end - start)]
 
-    ref_seq: Optional[str] = None
+    ref_seq: str | None = None
     if reference_path:
         with pysam.FastaFile(reference_path) as fasta:
             ref_seq = fasta.fetch(contig, start, end)
@@ -133,9 +132,7 @@ def fetch_region(
                 if start <= rpos < end:
                     query_base = read.query_sequence[qpos]
                     if ref_base and query_base != ref_base.upper():
-                        mismatches.append(
-                            {"pos": rpos, "ref": ref_base.upper(), "alt": query_base}
-                        )
+                        mismatches.append({"pos": rpos, "ref": ref_base.upper(), "alt": query_base})
                     idx = rpos - start
                     if 0 <= idx < len(base_counts):
                         base_counts[idx][query_base] = base_counts[idx].get(query_base, 0) + 1
@@ -149,7 +146,7 @@ def fetch_region(
 
         reads.append(
             AlignedRead(
-                name=read.query_name,
+                name=read.query_name or "",
                 sequence=read.query_sequence or "",
                 qualities=list(read.query_qualities or []),
                 cigar=read.cigarstring or "",
@@ -178,7 +175,7 @@ def fetch_region(
 
 def detect_variants(
     base_counts: list[dict[str, int]],
-    ref_seq: Optional[str],
+    ref_seq: str | None,
     contig: str,
     start: int,
     min_vaf: float = 0.1,

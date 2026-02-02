@@ -1,6 +1,7 @@
 """Shared test fixtures for BAMCP tests."""
 
 import os
+
 import pytest
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")

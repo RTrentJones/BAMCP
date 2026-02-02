@@ -6,7 +6,7 @@ from typing import Any
 import pysam
 
 from .config import BAMCPConfig
-from .parsers import AlignedRead, RegionData, fetch_region
+from .parsers import RegionData, fetch_region
 
 
 async def handle_browse_region(args: dict[str, Any], config: BAMCPConfig) -> dict:
@@ -96,12 +96,12 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
     file_path = args["file_path"]
     reference = args.get("reference", config.reference)
 
-    mode = "rc" if file_path.endswith(".cram") else "rb"
-    samfile = pysam.AlignmentFile(file_path, mode, reference_filename=reference)
+    mode: str = "rc" if file_path.endswith(".cram") else "rb"
+    samfile = pysam.AlignmentFile(file_path, mode, reference_filename=reference)  # type: ignore[arg-type]
 
     contigs = [
         {"name": name, "length": length}
-        for name, length in zip(samfile.references, samfile.lengths)
+        for name, length in zip(samfile.references, samfile.lengths, strict=True)
     ]
 
     samfile.close()

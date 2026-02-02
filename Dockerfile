@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 COPY src/ src/
 
 # Install the package and its dependencies into a prefix we can copy later.
@@ -63,9 +63,16 @@ ENV BAMCP_DEFAULT_WINDOW="500"
 ENV BAMCP_MIN_VAF="0.1"
 ENV BAMCP_MIN_DEPTH="10"
 ENV BAMCP_MIN_MAPQ="0"
+ENV BAMCP_TRANSPORT="sse"
+ENV BAMCP_HOST="0.0.0.0"
+ENV BAMCP_PORT="8000"
+ENV BAMCP_AUTH_ENABLED=""
 
 # Volume for BAM/CRAM data
 VOLUME ["/data"]
+
+# HTTP transport port
+EXPOSE 8000
 
 # Health check using the dedicated script
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

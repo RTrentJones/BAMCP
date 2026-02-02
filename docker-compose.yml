@@ -3,15 +3,14 @@
 #
 # Profiles:
 #   dev   — Development: mounts source, runs tests, hot-reload friendly
-#   beta  — Pre-release: production image with debug logging
-#   prod  — Production: optimized, non-root, minimal surface
+#   beta  — Pre-release: SSE transport with debug logging, no auth
+#   prod  — Production: SSE transport, OAuth enabled, locked-down
 #
 # Usage:
-#   docker compose --profile dev up         # Run dev tests
-#   docker compose --profile dev run test   # Run unit+integration tests
-#   docker compose --profile dev run e2e    # Run Playwright E2E tests
-#   docker compose --profile beta up        # Run beta server
-#   docker compose --profile prod up        # Run production server
+#   docker compose --profile dev run test    # Run unit+integration tests
+#   docker compose --profile dev run e2e     # Run Playwright E2E tests
+#   docker compose --profile beta up         # Run beta server on :8000
+#   docker compose --profile prod up         # Run production server on :8000
 # ============================================================================
 
 services:
@@ -59,19 +58,20 @@ services:
       - ./src:/app/src:ro
       - ./tests:/app/tests:ro
     command: >
-      sh -c "black --check src tests && ruff check src tests && mypy src"
+      sh -c "ruff format --check src tests && ruff check src tests && mypy src"
     environment:
       - PYTHONDONTWRITEBYTECODE=1
 
   # --------------------------------------------------------------------------
-  # Beta: production image with verbose logging
+  # Beta: SSE transport, no auth, verbose logging
   # --------------------------------------------------------------------------
   beta:
     build:
       context: .
       dockerfile: Dockerfile
     profiles: ["beta"]
-    stdin_open: true
+    ports:
+      - "8000:8000"
     volumes:
       - bamcp-data:/data
     environment:
@@ -81,18 +81,23 @@ services:
       - BAMCP_MIN_VAF=0.1
       - BAMCP_MIN_DEPTH=10
       - BAMCP_MIN_MAPQ=0
+      - BAMCP_TRANSPORT=sse
+      - BAMCP_HOST=0.0.0.0
+      - BAMCP_PORT=8000
+      - BAMCP_AUTH_ENABLED=
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
 
   # --------------------------------------------------------------------------
-  # Production: locked-down, optimized
+  # Production: SSE transport, OAuth enabled, locked-down
   # --------------------------------------------------------------------------
   prod:
     build:
       context: .
       dockerfile: Dockerfile
     profiles: ["prod"]
-    stdin_open: true
+    ports:
+      - "8000:8000"
     volumes:
       - bamcp-data:/data:ro
     environment:
@@ -102,6 +107,12 @@ services:
       - BAMCP_MIN_VAF=0.1
       - BAMCP_MIN_DEPTH=10
       - BAMCP_MIN_MAPQ=0
+      - BAMCP_TRANSPORT=sse
+      - BAMCP_HOST=0.0.0.0
+      - BAMCP_PORT=8000
+      - BAMCP_AUTH_ENABLED=true
+      - BAMCP_ISSUER_URL=http://localhost:8000
+      - BAMCP_RESOURCE_SERVER_URL=http://localhost:8000
     read_only: true
     tmpfs:
       - /tmp:noexec,nosuid,size=64m

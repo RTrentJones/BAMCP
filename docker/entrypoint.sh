@@ -9,7 +9,7 @@ if [ "${1#-}" != "$1" ]; then
     set -- python -m bamcp "$@"
 fi
 
-# If the command is the default server, run a quick health check first.
+# If the command is the default server, run a quick pre-flight check.
 if [ "$1" = "python" ] && [ "$2" = "-m" ] && [ "$3" = "bamcp" ]; then
     echo "Running pre-flight health check..." >&2
     python /app/docker/healthcheck.py || {
@@ -17,6 +17,13 @@ if [ "$1" = "python" ] && [ "$2" = "-m" ] && [ "$3" = "bamcp" ]; then
         exit 1
     }
     echo "Health check passed." >&2
+
+    transport="${BAMCP_TRANSPORT:-stdio}"
+    if [ "$transport" != "stdio" ]; then
+        echo "Starting BAMCP (transport=${transport}, port=${BAMCP_PORT:-8000})..." >&2
+    else
+        echo "Starting BAMCP (transport=stdio)..." >&2
+    fi
 fi
 
 exec "$@"

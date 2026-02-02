@@ -19,9 +19,10 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def read_project_file(name: str) -> str:
     path = os.path.join(PROJECT_ROOT, name)
-    with open(path, "r") as f:
+    with open(path) as f:
         return f.read()
 
 
@@ -32,6 +33,7 @@ def project_file_exists(name: str) -> bool:
 # ===========================================================================
 # Dockerfile (production) tests
 # ===========================================================================
+
 
 class TestDockerfileProd:
     """Validate the production Dockerfile structure and best practices."""
@@ -63,10 +65,7 @@ class TestDockerfileProd:
         """Should use slim base images to reduce attack surface."""
         from_lines = re.findall(r"^FROM\s+(.+)$", self.content, re.MULTILINE)
         for line in from_lines:
-            if "AS" in line:
-                base = line.split(" AS")[0].strip()
-            else:
-                base = line.strip()
+            base = line.split(" AS")[0].strip() if "AS" in line else line.strip()
             assert "slim" in base, f"Base image should be slim, got: {base}"
 
     @pytest.mark.unit
@@ -156,6 +155,7 @@ class TestDockerfileProd:
 # Dockerfile.dev tests
 # ===========================================================================
 
+
 class TestDockerfileDev:
     """Validate the development Dockerfile."""
 
@@ -218,6 +218,7 @@ class TestDockerfileDev:
 # docker-compose.yml tests
 # ===========================================================================
 
+
 class TestDockerCompose:
     """Validate docker-compose.yml profiles and service definitions."""
 
@@ -273,7 +274,7 @@ class TestDockerCompose:
     def test_prod_tmpfs(self):
         """Production should have a tmpfs for /tmp (read-only rootfs needs it)."""
         assert "tmpfs:" in self.content
-        assert "/tmp" in self.content
+        assert "/tmp" in self.content  # noqa: S108
 
     @pytest.mark.unit
     def test_dev_uses_dev_dockerfile(self):
@@ -308,20 +309,20 @@ class TestDockerCompose:
 
     @pytest.mark.unit
     def test_lint_service_runs_formatters(self):
-        """Lint service should run black, ruff, mypy."""
-        assert "black" in self.content
+        """Lint service should run ruff and mypy."""
         assert "ruff" in self.content
         assert "mypy" in self.content
 
     @pytest.mark.unit
-    def test_stdin_open_for_mcp_server(self):
-        """MCP server services need stdin_open for stdio transport."""
-        assert "stdin_open: true" in self.content
+    def test_http_services_expose_port(self):
+        """Beta and prod services should expose port 8000."""
+        assert '"8000:8000"' in self.content
 
 
 # ===========================================================================
 # .dockerignore tests
 # ===========================================================================
+
 
 class TestDockerignore:
     """Validate .dockerignore excludes unnecessary files."""
@@ -373,19 +374,28 @@ class TestDockerignore:
     @pytest.mark.unit
     def test_does_not_exclude_src(self):
         """src/ must NOT be excluded — it's the actual application."""
-        lines = [l.strip() for l in self.content.splitlines() if l.strip() and not l.startswith("#")]
+        lines = [
+            line.strip()
+            for line in self.content.splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
         assert "src" not in lines and "src/" not in lines
 
     @pytest.mark.unit
     def test_does_not_exclude_pyproject(self):
         """pyproject.toml must NOT be excluded."""
-        lines = [l.strip() for l in self.content.splitlines() if l.strip() and not l.startswith("#")]
+        lines = [
+            line.strip()
+            for line in self.content.splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
         assert "pyproject.toml" not in lines
 
 
 # ===========================================================================
 # Health check script tests
 # ===========================================================================
+
 
 class TestHealthCheck:
     """Test the Docker health check script runs correctly."""
@@ -399,7 +409,8 @@ class TestHealthCheck:
         """Health check module should be importable."""
         sys.path.insert(0, os.path.join(PROJECT_ROOT, "docker"))
         try:
-            import healthcheck
+            import healthcheck  # type: ignore[import-not-found]
+
             assert hasattr(healthcheck, "check_health")
         finally:
             sys.path.pop(0)
@@ -407,7 +418,7 @@ class TestHealthCheck:
     @pytest.mark.integration
     def test_health_check_passes(self):
         """Running the health check should succeed in the test environment."""
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603
             [sys.executable, os.path.join(PROJECT_ROOT, "docker", "healthcheck.py")],
             capture_output=True,
             text=True,
@@ -420,7 +431,8 @@ class TestHealthCheck:
         """Health check should verify the package version is set."""
         sys.path.insert(0, os.path.join(PROJECT_ROOT, "docker"))
         try:
-            from healthcheck import check_health
+            from healthcheck import check_health  # type: ignore[import-not-found]
+
             assert check_health() is True
         finally:
             sys.path.pop(0)
@@ -430,7 +442,8 @@ class TestHealthCheck:
         """Health check should instantiate the server."""
         sys.path.insert(0, os.path.join(PROJECT_ROOT, "docker"))
         try:
-            from healthcheck import check_health
+            from healthcheck import check_health  # type: ignore[import-not-found]
+
             result = check_health()
             assert result is True
         finally:
@@ -440,6 +453,7 @@ class TestHealthCheck:
 # ===========================================================================
 # Entrypoint script tests
 # ===========================================================================
+
 
 class TestEntrypoint:
     """Test the Docker entrypoint shell script."""
@@ -481,6 +495,7 @@ class TestEntrypoint:
 # Cross-file consistency tests
 # ===========================================================================
 
+
 class TestDockerConsistency:
     """Tests that verify Docker files are consistent with each other and with
     the main project configuration."""
@@ -498,6 +513,7 @@ class TestDockerConsistency:
     def test_env_vars_match_config(self):
         """Dockerfile env vars should match BAMCPConfig fields."""
         from bamcp.config import BAMCPConfig
+
         dockerfile = read_project_file("Dockerfile")
         config = BAMCPConfig()
 
@@ -510,7 +526,7 @@ class TestDockerConsistency:
             "BAMCP_MIN_MAPQ": str(config.min_mapq),
         }
 
-        for var, expected_default in env_map.items():
+        for var, _expected_default in env_map.items():
             assert var in dockerfile, f"Dockerfile missing ENV {var}"
 
     @pytest.mark.unit
@@ -541,8 +557,11 @@ class TestDockerConsistency:
         (Dockerfile.dev does COPY tests/ and .dockerignore excludes Docker*
         so the .dockerignore applies to the prod build context primarily.)"""
         dockerignore = read_project_file(".dockerignore")
-        lines = [l.strip() for l in dockerignore.splitlines()
-                 if l.strip() and not l.startswith("#")]
+        lines = [
+            line.strip()
+            for line in dockerignore.splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
         assert "tests" not in lines and "tests/" not in lines, (
             "tests/ must not be in .dockerignore — Dockerfile.dev needs it"
         )

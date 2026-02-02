@@ -1,36 +1,64 @@
 #!/usr/bin/env python3
 """Docker health check script for BAMCP.
 
-Verifies:
-  1. bamcp package is importable
-  2. pysam is available
-  3. MCP server can be instantiated
-  4. Config loads from environment
+For stdio transport:
+  Verifies bamcp, pysam, config, and server are importable/functional.
+
+For HTTP transports (sse, streamable-http):
+  Hits the local HTTP endpoint to verify the server is responding.
 
 Exit 0 = healthy, Exit 1 = unhealthy.
 """
 
+import os
 import sys
 
 
 def check_health() -> bool:
+    transport = os.environ.get("BAMCP_TRANSPORT", "stdio")
+
+    if transport in ("sse", "streamable-http"):
+        return _check_http()
+    return _check_imports()
+
+
+def _check_http() -> bool:
+    """Verify the HTTP server is responding."""
+    import urllib.request
+
+    port = os.environ.get("BAMCP_PORT", "8000")
+    url = f"http://127.0.0.1:{port}/sse"
+    try:
+        req = urllib.request.Request(url, method="GET")  # noqa: S310
+        with urllib.request.urlopen(req, timeout=3) as resp:  # noqa: S310
+            return resp.status == 200
+    except Exception as exc:
+        print(f"HTTP health check failed: {exc}", file=sys.stderr)
+        return False
+
+
+def _check_imports() -> bool:
+    """Verify bamcp package is importable and functional."""
     try:
         from bamcp import __version__
+
         assert __version__, "Version string is empty"
 
         import pysam  # noqa: F401
 
         from bamcp.config import BAMCPConfig
+
         config = BAMCPConfig.from_env()
         assert config.max_reads > 0, "max_reads must be positive"
 
         from bamcp.server import create_server
+
         server = create_server(config)
         assert server.name == "bamcp", f"Unexpected server name: {server.name}"
 
         return True
-    except Exception as e:
-        print(f"Health check failed: {e}", file=sys.stderr)
+    except Exception as exc:
+        print(f"Health check failed: {exc}", file=sys.stderr)
         return False
 
 

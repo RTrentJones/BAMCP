@@ -1,10 +1,10 @@
 """Integration tests for BAMCP - testing full tool call workflows."""
 
 import json
+
 import pytest
 
 from bamcp.config import BAMCPConfig
-from bamcp.server import create_server
 from bamcp.tools import (
     handle_browse_region,
     handle_get_coverage,
@@ -47,8 +47,15 @@ class TestBrowseRegionIntegration:
         # Verify read structure
         read = payload["reads"][0]
         required_fields = {
-            "name", "sequence", "qualities", "cigar", "position",
-            "end_position", "mapping_quality", "is_reverse", "mismatches",
+            "name",
+            "sequence",
+            "qualities",
+            "cigar",
+            "position",
+            "end_position",
+            "mapping_quality",
+            "is_reverse",
+            "mismatches",
         }
         assert set(read.keys()) == required_fields
         assert isinstance(read["qualities"], list)
@@ -135,9 +142,7 @@ class TestContigListIntegration:
         """Contigs from list_contigs should be usable in browse_region."""
         config = BAMCPConfig()
 
-        contigs_result = await handle_list_contigs(
-            {"file_path": small_bam_path}, config
-        )
+        contigs_result = await handle_list_contigs({"file_path": small_bam_path}, config)
         contigs = json.loads(contigs_result["content"][0]["text"])["contigs"]
 
         # Browse each contig
@@ -161,11 +166,9 @@ class TestMultiToolWorkflow:
     async def test_list_browse_coverage_workflow(self, small_bam_path, config_with_ref):
         """Simulate typical user workflow: list -> browse -> coverage."""
         # Step 1: List contigs
-        contigs = await handle_list_contigs(
-            {"file_path": small_bam_path}, config_with_ref
-        )
+        contigs = await handle_list_contigs({"file_path": small_bam_path}, config_with_ref)
         contig_data = json.loads(contigs["content"][0]["text"])
-        chr1 = next(c for c in contig_data["contigs"] if c["name"] == "chr1")
+        next(c for c in contig_data["contigs"] if c["name"] == "chr1")
 
         # Step 2: Browse a region
         browse = await handle_browse_region(

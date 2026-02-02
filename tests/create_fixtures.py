@@ -1,6 +1,7 @@
 """Script to create test BAM and FASTA fixtures for testing."""
 
 import os
+
 import pysam
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -43,7 +44,7 @@ def create_small_bam(ref_path: str):
         a.reference_id = 0  # chr1
         a.reference_start = 100
         a.mapping_quality = 60
-        a.cigar = [(0, 50)]  # 50M
+        a.cigartuples = [(0, 50)]  # 50M
         a.query_qualities = pysam.qualitystring_to_array("I" * 50)
         outf.write(a)
 
@@ -55,7 +56,7 @@ def create_small_bam(ref_path: str):
         a.reference_id = 0
         a.reference_start = 120
         a.mapping_quality = 50
-        a.cigar = [(0, 50)]
+        a.cigartuples = [(0, 50)]
         a.query_qualities = pysam.qualitystring_to_array("I" * 50)
         outf.write(a)
 
@@ -69,7 +70,7 @@ def create_small_bam(ref_path: str):
         a.reference_id = 0
         a.reference_start = 130
         a.mapping_quality = 40
-        a.cigar = [(0, 50)]
+        a.cigartuples = [(0, 50)]
         a.query_qualities = pysam.qualitystring_to_array("I" * 50)
         outf.write(a)
 
@@ -81,7 +82,7 @@ def create_small_bam(ref_path: str):
         a.reference_id = 0
         a.reference_start = 200
         a.mapping_quality = 55
-        a.cigar = [(0, 10), (1, 2), (0, 40)]  # 10M2I40M
+        a.cigartuples = [(0, 10), (1, 2), (0, 40)]  # 10M2I40M
         a.query_qualities = pysam.qualitystring_to_array("I" * 52)
         outf.write(a)
 
@@ -93,7 +94,7 @@ def create_small_bam(ref_path: str):
         a.reference_id = 0
         a.reference_start = 300
         a.mapping_quality = 45
-        a.cigar = [(0, 25), (2, 3), (0, 25)]  # 25M3D25M
+        a.cigartuples = [(0, 25), (2, 3), (0, 25)]  # 25M3D25M
         a.query_qualities = pysam.qualitystring_to_array("I" * 50)
         outf.write(a)
 
@@ -105,7 +106,7 @@ def create_small_bam(ref_path: str):
         a.reference_id = 0
         a.reference_start = 100
         a.mapping_quality = 5
-        a.cigar = [(0, 30)]
+        a.cigartuples = [(0, 30)]
         a.query_qualities = pysam.qualitystring_to_array("I" * 30)
         outf.write(a)
 
@@ -117,7 +118,7 @@ def create_small_bam(ref_path: str):
         a.reference_id = 0
         a.reference_start = 400
         a.mapping_quality = 30
-        a.cigar = [(0, 30)]
+        a.cigartuples = [(0, 30)]
         a.query_qualities = pysam.qualitystring_to_array("I" * 30)
         outf.write(a)
 
@@ -129,7 +130,7 @@ def create_small_bam(ref_path: str):
         a.reference_id = 1  # chr2
         a.reference_start = 50
         a.mapping_quality = 60
-        a.cigar = [(0, 30)]
+        a.cigartuples = [(0, 30)]
         a.query_qualities = pysam.qualitystring_to_array("I" * 30)
         outf.write(a)
 
@@ -151,7 +152,7 @@ def create_small_bam(ref_path: str):
             a.reference_id = 0
             a.reference_start = 500 + i * 5
             a.mapping_quality = 60
-            a.cigar = [(0, 50)]
+            a.cigartuples = [(0, 50)]
             a.query_qualities = pysam.qualitystring_to_array("I" * 50)
             outf.write(a)
 
@@ -175,7 +176,7 @@ def create_empty_bam():
         "SQ": [{"SN": "chr1", "LN": 1000}],
     }
 
-    with pysam.AlignmentFile(bam_path, "wb", header=header) as outf:
+    with pysam.AlignmentFile(bam_path, "wb", header=header):
         pass  # No reads
 
     pysam.index(bam_path)

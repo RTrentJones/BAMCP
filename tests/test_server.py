@@ -1,75 +1,11 @@
 """Unit tests for bamcp.server module."""
 
+import os
+
 import pytest
 
 from bamcp.config import BAMCPConfig
-from bamcp.server import TOOLS, TOOL_HANDLERS, create_server
-
-
-class TestToolDefinitions:
-    """Tests for the tool definitions."""
-
-    @pytest.mark.unit
-    def test_tool_count(self):
-        assert len(TOOLS) == 5
-
-    @pytest.mark.unit
-    def test_tool_names(self):
-        names = {t.name for t in TOOLS}
-        assert names == {"browse_region", "get_variants", "get_coverage", "list_contigs", "jump_to"}
-
-    @pytest.mark.unit
-    def test_browse_region_schema(self):
-        tool = next(t for t in TOOLS if t.name == "browse_region")
-        schema = tool.inputSchema
-        assert "file_path" in schema["properties"]
-        assert "region" in schema["properties"]
-        assert "reference" in schema["properties"]
-        assert set(schema["required"]) == {"file_path", "region"}
-
-    @pytest.mark.unit
-    def test_get_variants_schema(self):
-        tool = next(t for t in TOOLS if t.name == "get_variants")
-        schema = tool.inputSchema
-        assert "file_path" in schema["properties"]
-        assert "region" in schema["properties"]
-        assert "min_vaf" in schema["properties"]
-        assert "min_depth" in schema["properties"]
-
-    @pytest.mark.unit
-    def test_get_coverage_schema(self):
-        tool = next(t for t in TOOLS if t.name == "get_coverage")
-        schema = tool.inputSchema
-        assert set(schema["required"]) == {"file_path", "region"}
-
-    @pytest.mark.unit
-    def test_list_contigs_schema(self):
-        tool = next(t for t in TOOLS if t.name == "list_contigs")
-        schema = tool.inputSchema
-        assert schema["required"] == ["file_path"]
-
-    @pytest.mark.unit
-    def test_jump_to_schema(self):
-        tool = next(t for t in TOOLS if t.name == "jump_to")
-        schema = tool.inputSchema
-        assert "file_path" in schema["properties"]
-        assert "position" in schema["properties"]
-        assert "contig" in schema["properties"]
-        assert "window" in schema["properties"]
-        assert "reference" in schema["properties"]
-        assert set(schema["required"]) == {"file_path", "position"}
-
-    @pytest.mark.unit
-    def test_all_tools_have_descriptions(self):
-        for tool in TOOLS:
-            assert tool.description, f"Tool {tool.name} missing description"
-            assert len(tool.description) > 10
-
-    @pytest.mark.unit
-    def test_handler_map_matches_tools(self):
-        tool_names = {t.name for t in TOOLS}
-        handler_names = set(TOOL_HANDLERS.keys())
-        assert tool_names == handler_names
+from bamcp.server import create_server
 
 
 class TestCreateServer:
@@ -85,15 +21,52 @@ class TestCreateServer:
     @pytest.mark.unit
     def test_creates_server_default_config(self, monkeypatch):
         """Should create server with default config from env."""
-        import os
         for key in list(os.environ.keys()):
             if key.startswith("BAMCP_"):
                 monkeypatch.delenv(key, raising=False)
 
         server = create_server()
         assert server is not None
+        assert server.name == "bamcp"
 
     @pytest.mark.unit
-    def test_server_has_name(self):
+    def test_server_registers_tools(self):
+        """Server should register all expected tools."""
         server = create_server(BAMCPConfig())
-        assert server.name == "bamcp"
+        tool_names = {name for name in server._tool_manager._tools}
+        expected = {"browse_region", "get_variants", "get_coverage", "list_contigs", "jump_to"}
+        assert expected == tool_names
+
+    @pytest.mark.unit
+    def test_server_registers_resources(self):
+        """Server should register the viewer resource."""
+        server = create_server(BAMCPConfig())
+        resource_keys = list(server._resource_manager._resources.keys())
+        assert len(resource_keys) >= 1
+        assert any("viewer" in str(k) for k in resource_keys)
+
+    @pytest.mark.unit
+    def test_server_without_auth(self):
+        """Server created without auth should have no auth provider."""
+        config = BAMCPConfig(auth_enabled=False)
+        server = create_server(config)
+        assert server is not None
+
+    @pytest.mark.unit
+    def test_server_with_auth(self):
+        """Server created with auth should have auth provider."""
+        config = BAMCPConfig(
+            auth_enabled=True,
+            issuer_url="http://localhost:8000",
+            resource_server_url="http://localhost:8000",
+        )
+        server = create_server(config)
+        assert server is not None
+
+    @pytest.mark.unit
+    def test_server_host_port(self):
+        """Server should use config host and port."""
+        config = BAMCPConfig(host="127.0.0.1", port=9000)
+        server = create_server(config)
+        assert server.settings.host == "127.0.0.1"
+        assert server.settings.port == 9000

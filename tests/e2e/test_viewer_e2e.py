@@ -1,11 +1,9 @@
 """End-to-end Playwright tests for the BAMCP viewer UI."""
 
-import json
 import pytest
 from playwright.sync_api import Page, expect
 
 from bamcp.resources import get_viewer_html
-
 
 SAMPLE_DATA = {
     "contig": "chr1",
@@ -71,9 +69,7 @@ SAMPLE_DATA = {
 for i in range(500):
     if 0 <= i < 70:
         SAMPLE_DATA["coverage"][i] = 2
-    elif 70 <= i < 100:
-        SAMPLE_DATA["coverage"][i] = 1
-    elif 100 <= i < 150:
+    elif 70 <= i < 100 or 100 <= i < 150:
         SAMPLE_DATA["coverage"][i] = 1
 
 
@@ -179,12 +175,8 @@ class TestDataLoading:
     def test_canvas_has_dimensions(self, viewer_page: Page):
         """Canvases should have non-zero dimensions after load."""
         send_init_data(viewer_page)
-        cov_width = viewer_page.locator("#coverage-canvas").evaluate(
-            "el => el.width"
-        )
-        reads_width = viewer_page.locator("#reads-canvas").evaluate(
-            "el => el.width"
-        )
+        cov_width = viewer_page.locator("#coverage-canvas").evaluate("el => el.width")
+        reads_width = viewer_page.locator("#reads-canvas").evaluate("el => el.width")
         assert cov_width > 0
         assert reads_width > 0
 
@@ -219,15 +211,11 @@ class TestNavigation:
         send_init_data(viewer_page)
 
         # Get initial viewport via JS
-        initial_span = viewer_page.evaluate(
-            "() => viewer.viewport.end - viewer.viewport.start"
-        )
+        initial_span = viewer_page.evaluate("() => viewer.viewport.end - viewer.viewport.start")
 
         viewer_page.locator("#zoom-in").click()
 
-        new_span = viewer_page.evaluate(
-            "() => viewer.viewport.end - viewer.viewport.start"
-        )
+        new_span = viewer_page.evaluate("() => viewer.viewport.end - viewer.viewport.start")
 
         assert new_span < initial_span
 
@@ -236,15 +224,11 @@ class TestNavigation:
         """Zoom out button should widen the viewport."""
         send_init_data(viewer_page)
 
-        initial_span = viewer_page.evaluate(
-            "() => viewer.viewport.end - viewer.viewport.start"
-        )
+        initial_span = viewer_page.evaluate("() => viewer.viewport.end - viewer.viewport.start")
 
         viewer_page.locator("#zoom-out").click()
 
-        new_span = viewer_page.evaluate(
-            "() => viewer.viewport.end - viewer.viewport.start"
-        )
+        new_span = viewer_page.evaluate("() => viewer.viewport.end - viewer.viewport.start")
 
         assert new_span > initial_span
 
@@ -259,9 +243,7 @@ class TestNavigation:
 
         viewer_page.locator("#zoom-in").click()
 
-        new_center = viewer_page.evaluate(
-            "() => (viewer.viewport.start + viewer.viewport.end) / 2"
-        )
+        new_center = viewer_page.evaluate("() => (viewer.viewport.start + viewer.viewport.end) / 2")
 
         # Center should be approximately the same (within rounding)
         assert abs(new_center - initial_center) < 2
@@ -271,14 +253,12 @@ class TestNavigation:
         """Clicking a variant row should jump to that position."""
         send_init_data(viewer_page)
 
-        initial_start = viewer_page.evaluate("() => viewer.viewport.start")
+        viewer_page.evaluate("() => viewer.viewport.start")
 
         # Click the second variant row (position 250)
         viewer_page.locator("#variant-table tr").nth(1).click()
 
-        new_center = viewer_page.evaluate(
-            "() => (viewer.viewport.start + viewer.viewport.end) / 2"
-        )
+        new_center = viewer_page.evaluate("() => (viewer.viewport.start + viewer.viewport.end) / 2")
 
         # Center should be near position 250
         assert abs(new_center - 250) < 10
@@ -334,8 +314,7 @@ class TestReadPacking:
         """Reads in the same row should not overlap."""
         send_init_data(viewer_page)
 
-        no_overlap = viewer_page.evaluate(
-            """() => {
+        no_overlap = viewer_page.evaluate("""() => {
                 for (const row of viewer.packedRows) {
                     for (let i = 0; i < row.length - 1; i++) {
                         if (row[i].end_position >= row[i + 1].position) {
@@ -344,8 +323,7 @@ class TestReadPacking:
                     }
                 }
                 return true;
-            }"""
-        )
+            }""")
         assert no_overlap
 
 
@@ -475,8 +453,7 @@ class TestCanvasRendering:
         send_init_data(viewer_page)
 
         # Check if canvas has non-transparent pixels
-        has_content = viewer_page.evaluate(
-            """() => {
+        has_content = viewer_page.evaluate("""() => {
                 const canvas = document.getElementById('coverage-canvas');
                 const ctx = canvas.getContext('2d');
                 const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
@@ -484,8 +461,7 @@ class TestCanvasRendering:
                     if (data[i] > 0) return true;
                 }
                 return false;
-            }"""
-        )
+            }""")
         assert has_content
 
     @pytest.mark.e2e
@@ -493,8 +469,7 @@ class TestCanvasRendering:
         """Reads canvas should have pixels drawn after data load."""
         send_init_data(viewer_page)
 
-        has_content = viewer_page.evaluate(
-            """() => {
+        has_content = viewer_page.evaluate("""() => {
                 const canvas = document.getElementById('reads-canvas');
                 const ctx = canvas.getContext('2d');
                 const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
@@ -502,8 +477,7 @@ class TestCanvasRendering:
                     if (data[i] > 0) return true;
                 }
                 return false;
-            }"""
-        )
+            }""")
         assert has_content
 
     @pytest.mark.e2e
@@ -556,16 +530,14 @@ class TestMCPBridge:
     def test_go_button_sends_tools_call(self, viewer_page: Page):
         """Clicking Go should send a tools/call message."""
         # Set up message capture
-        viewer_page.evaluate(
-            """() => {
+        viewer_page.evaluate("""() => {
                 window.__outgoing = [];
                 const origPost = window.parent.postMessage.bind(window.parent);
                 window.parent.postMessage = (msg, origin) => {
                     window.__outgoing.push(msg);
                     origPost(msg, origin);
                 };
-            }"""
-        )
+            }""")
 
         viewer_page.locator("#region-input").fill("chr1:5000-6000")
         viewer_page.locator("#go-btn").click()
@@ -709,9 +681,7 @@ class TestWheelZoom:
         """Scrolling down should zoom out (increase span)."""
         send_init_data(viewer_page)
 
-        initial_span = viewer_page.evaluate(
-            "() => viewer.viewport.end - viewer.viewport.start"
-        )
+        initial_span = viewer_page.evaluate("() => viewer.viewport.end - viewer.viewport.start")
 
         canvas = viewer_page.locator("#reads-canvas")
         box = canvas.bounding_box()
@@ -721,9 +691,7 @@ class TestWheelZoom:
         viewer_page.mouse.wheel(0, 100)  # deltaY > 0 → zoom out (factor 1.2)
         viewer_page.wait_for_timeout(200)
 
-        new_span = viewer_page.evaluate(
-            "() => viewer.viewport.end - viewer.viewport.start"
-        )
+        new_span = viewer_page.evaluate("() => viewer.viewport.end - viewer.viewport.start")
         assert new_span > initial_span
 
     @pytest.mark.e2e
@@ -731,9 +699,7 @@ class TestWheelZoom:
         """Scrolling up should zoom in (decrease span)."""
         send_init_data(viewer_page)
 
-        initial_span = viewer_page.evaluate(
-            "() => viewer.viewport.end - viewer.viewport.start"
-        )
+        initial_span = viewer_page.evaluate("() => viewer.viewport.end - viewer.viewport.start")
 
         canvas = viewer_page.locator("#reads-canvas")
         box = canvas.bounding_box()
@@ -743,9 +709,7 @@ class TestWheelZoom:
         viewer_page.mouse.wheel(0, -100)  # deltaY < 0 → zoom in (factor 0.8)
         viewer_page.wait_for_timeout(200)
 
-        new_span = viewer_page.evaluate(
-            "() => viewer.viewport.end - viewer.viewport.start"
-        )
+        new_span = viewer_page.evaluate("() => viewer.viewport.end - viewer.viewport.start")
         assert new_span < initial_span
 
 
@@ -760,8 +724,7 @@ class TestMismatchRendering:
         # With 50bp in ~1024px, scale is ~20px/bp, well above the >2 threshold.
         # Mismatch is at position 125, alt='T' → color #ef4444 (red).
         # Pixel x = (125 - 100) * scale = 25 * scale.
-        mismatch_color = viewer_page.evaluate(
-            """() => {
+        mismatch_color = viewer_page.evaluate("""() => {
                 const canvas = document.getElementById('reads-canvas');
                 const ctx = canvas.getContext('2d');
                 const scale = canvas.width / (viewer.viewport.end - viewer.viewport.start);
@@ -769,13 +732,13 @@ class TestMismatchRendering:
                 // Sample row 0 (y=0..12), middle at y=6
                 const pixel = ctx.getImageData(mx + 1, 6, 1, 1).data;
                 return { r: pixel[0], g: pixel[1], b: pixel[2], a: pixel[3] };
-            }"""
-        )
+            }""")
         # #ef4444 = rgb(239, 68, 68) — the T mismatch color.
         # We just verify the red channel is dominant (not the default blue read color).
         assert mismatch_color["a"] > 0, "Mismatch pixel should be opaque"
         assert mismatch_color["r"] > mismatch_color["b"], (
-            f"Mismatch should be red-dominant (T color), got r={mismatch_color['r']} b={mismatch_color['b']}"
+            f"Mismatch should be red-dominant (T color), "
+            f"got r={mismatch_color['r']} b={mismatch_color['b']}"
         )
 
     @pytest.mark.e2e
@@ -797,21 +760,20 @@ class TestMismatchRendering:
         assert scale <= 2, f"Scale should be <= 2 for this test, got {scale}"
 
         # Sample pixel at mismatch position 125: should be the read body color, not mismatch red
-        pixel = viewer_page.evaluate(
-            """() => {
+        pixel = viewer_page.evaluate("""() => {
                 const canvas = document.getElementById('reads-canvas');
                 const ctx = canvas.getContext('2d');
                 const scale = canvas.width / (viewer.viewport.end - viewer.viewport.start);
                 const mx = Math.floor((125 - viewer.viewport.start) * scale);
                 const p = ctx.getImageData(mx, 6, 1, 1).data;
                 return { r: p[0], g: p[1], b: p[2], a: p[3] };
-            }"""
-        )
+            }""")
         # At low zoom, mismatch should not override — pixel should be blue read color
         # #60a5fa = rgb(96, 165, 250) for forward reads
         if pixel["a"] > 0:
             assert pixel["b"] >= pixel["r"], (
-                f"At low zoom, should be blue read color not red mismatch, got r={pixel['r']} b={pixel['b']}"
+                f"At low zoom, should be blue read color not red mismatch, "
+                f"got r={pixel['r']} b={pixel['b']}"
             )
 
 
@@ -823,8 +785,7 @@ class TestReadColors:
         """Forward-strand reads should be blue (#60a5fa)."""
         send_init_data(viewer_page, NARROW_DATA)
 
-        pixel = viewer_page.evaluate(
-            """() => {
+        pixel = viewer_page.evaluate("""() => {
                 const canvas = document.getElementById('reads-canvas');
                 const ctx = canvas.getContext('2d');
                 const scale = canvas.width / (viewer.viewport.end - viewer.viewport.start);
@@ -832,12 +793,12 @@ class TestReadColors:
                 const x = Math.floor((110 - viewer.viewport.start) * scale);
                 const p = ctx.getImageData(x, 3, 1, 1).data;
                 return { r: p[0], g: p[1], b: p[2], a: p[3] };
-            }"""
-        )
+            }""")
         assert pixel["a"] > 0, "Pixel should be drawn"
         # #60a5fa: r=96, g=165, b=250 → blue dominant
         assert pixel["b"] > pixel["r"], (
-            f"Forward read should be blue-dominant, got r={pixel['r']} g={pixel['g']} b={pixel['b']}"
+            f"Forward read should be blue-dominant, "
+            f"got r={pixel['r']} g={pixel['g']} b={pixel['b']}"
         )
 
     @pytest.mark.e2e
@@ -845,8 +806,7 @@ class TestReadColors:
         """Reverse-strand reads should be purple (#a78bfa)."""
         send_init_data(viewer_page, NARROW_DATA)
 
-        pixel = viewer_page.evaluate(
-            """() => {
+        pixel = viewer_page.evaluate("""() => {
                 const canvas = document.getElementById('reads-canvas');
                 const ctx = canvas.getContext('2d');
                 const scale = canvas.width / (viewer.viewport.end - viewer.viewport.start);
@@ -854,8 +814,7 @@ class TestReadColors:
                 const x = Math.floor((110 - viewer.viewport.start) * scale);
                 const p = ctx.getImageData(x, 20, 1, 1).data;
                 return { r: p[0], g: p[1], b: p[2], a: p[3] };
-            }"""
-        )
+            }""")
         assert pixel["a"] > 0, "Pixel should be drawn"
         # #a78bfa: r=167, g=139, b=250 → blue dominant but also significant red
         assert pixel["b"] > pixel["g"], (
@@ -870,8 +829,7 @@ class TestReadColors:
         """Forward and reverse reads should be visually distinct colors."""
         send_init_data(viewer_page, NARROW_DATA)
 
-        colors = viewer_page.evaluate(
-            """() => {
+        colors = viewer_page.evaluate("""() => {
                 const canvas = document.getElementById('reads-canvas');
                 const ctx = canvas.getContext('2d');
                 const scale = canvas.width / (viewer.viewport.end - viewer.viewport.start);
@@ -882,12 +840,14 @@ class TestReadColors:
                     fwd: { r: fwd[0], g: fwd[1], b: fwd[2] },
                     rev: { r: rev[0], g: rev[1], b: rev[2] },
                 };
-            }"""
-        )
+            }""")
         # Colors should differ — at minimum the red channel differs significantly
         # Forward (#60a5fa): r=96, Reverse (#a78bfa): r=167
-        assert colors["fwd"]["r"] != colors["rev"]["r"] or colors["fwd"]["g"] != colors["rev"]["g"], (
-            f"Forward and reverse should have different colors: fwd={colors['fwd']} rev={colors['rev']}"
+        assert (
+            colors["fwd"]["r"] != colors["rev"]["r"] or colors["fwd"]["g"] != colors["rev"]["g"]
+        ), (
+            f"Forward and reverse should have different colors: "
+            f"fwd={colors['fwd']} rev={colors['rev']}"
         )
 
 
@@ -921,8 +881,7 @@ class TestSoftClipPixelVerification:
 
         # The left soft-clip is 10bp before position 100 (genome coords ~90-100)
         # At scale ~14.6 px/bp (1024 / 70), clip region starts at x=0
-        pixel = viewer_page.evaluate(
-            """() => {
+        pixel = viewer_page.evaluate("""() => {
                 const canvas = document.getElementById('reads-canvas');
                 const ctx = canvas.getContext('2d');
                 const scale = canvas.width / (viewer.viewport.end - viewer.viewport.start);
@@ -930,8 +889,7 @@ class TestSoftClipPixelVerification:
                 const x = Math.floor((95 - viewer.viewport.start) * scale);
                 const p = ctx.getImageData(x, 6, 1, 1).data;
                 return { r: p[0], g: p[1], b: p[2], a: p[3] };
-            }"""
-        )
+            }""")
         assert pixel["a"] > 0, "Soft-clip region should have pixels drawn"
 
     @pytest.mark.e2e
@@ -961,8 +919,7 @@ class TestSoftClipPixelVerification:
 
         # The border is drawn with strokeRect. Sample the top edge of the clip
         # region at position 95 (well inside the clip). The top border is at y=0.
-        border_pixel = viewer_page.evaluate(
-            """() => {
+        border_pixel = viewer_page.evaluate("""() => {
                 const canvas = document.getElementById('reads-canvas');
                 const ctx = canvas.getContext('2d');
                 const scale = canvas.width / (viewer.viewport.end - viewer.viewport.start);
@@ -970,13 +927,13 @@ class TestSoftClipPixelVerification:
                 // Top border pixel at y=0
                 const p = ctx.getImageData(x, 0, 1, 1).data;
                 return { r: p[0], g: p[1], b: p[2], a: p[3] };
-            }"""
-        )
+            }""")
         # #f59e0b = rgb(245, 158, 11) — amber border.
         # At least verify the pixel is drawn and has warm (orange/amber) tones.
         assert border_pixel["a"] > 0, "Border should be drawn"
         assert border_pixel["r"] > border_pixel["b"], (
-            f"Amber border should be warm-toned (r > b), got r={border_pixel['r']} b={border_pixel['b']}"
+            f"Amber border should be warm-toned (r > b), "
+            f"got r={border_pixel['r']} b={border_pixel['b']}"
         )
 
 
@@ -989,18 +946,15 @@ class TestOffScreenCulling:
         send_init_data(viewer_page, NARROW_DATA)
 
         # Zoom in tight then pan far away so reads at 100-150 are off-screen
-        viewer_page.evaluate(
-            """() => {
+        viewer_page.evaluate("""() => {
                 viewer.viewport.start = 500;
                 viewer.viewport.end = 550;
                 viewer.render();
-            }"""
-        )
+            }""")
         viewer_page.wait_for_timeout(100)
 
         # The reads canvas should be empty (reads are at 100-150, viewport is 500-550)
-        has_content = viewer_page.evaluate(
-            """() => {
+        has_content = viewer_page.evaluate("""() => {
                 const canvas = document.getElementById('reads-canvas');
                 const ctx = canvas.getContext('2d');
                 const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
@@ -1008,8 +962,7 @@ class TestOffScreenCulling:
                     if (data[i] > 0) return true;
                 }
                 return false;
-            }"""
-        )
+            }""")
         assert not has_content, "No read pixels should be drawn when reads are off-screen"
 
 
@@ -1021,7 +974,7 @@ class TestResizeHandler:
         """Resizing the window should update canvas dimensions."""
         send_init_data(viewer_page)
 
-        initial_width = viewer_page.evaluate("() => viewer.readsCanvas.width")
+        viewer_page.evaluate("() => viewer.readsCanvas.width")
 
         # Resize the viewport
         viewer_page.set_viewport_size({"width": 800, "height": 600})
@@ -1043,8 +996,7 @@ class TestResizeHandler:
         viewer_page.set_viewport_size({"width": 600, "height": 400})
         viewer_page.wait_for_timeout(300)
 
-        has_content = viewer_page.evaluate(
-            """() => {
+        has_content = viewer_page.evaluate("""() => {
                 const canvas = document.getElementById('reads-canvas');
                 const ctx = canvas.getContext('2d');
                 const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
@@ -1052,8 +1004,7 @@ class TestResizeHandler:
                     if (data[i] > 0) return true;
                 }
                 return false;
-            }"""
-        )
+            }""")
         assert has_content, "Canvas should still have content after resize"
 
 
@@ -1069,8 +1020,7 @@ class TestCoverageLabel:
         # We can't easily read text from canvas, but we can check that
         # the top-left corner of the coverage canvas has opaque pixels
         # where the label should be.
-        has_label_pixels = viewer_page.evaluate(
-            """() => {
+        has_label_pixels = viewer_page.evaluate("""() => {
                 const canvas = document.getElementById('coverage-canvas');
                 const ctx = canvas.getContext('2d');
                 // Sample the area where 'Max: 2x' is drawn (x=5..60, y=2..14)
@@ -1080,8 +1030,7 @@ class TestCoverageLabel:
                     if (data[i] > 0) opaqueCount++;
                 }
                 return opaqueCount;
-            }"""
-        )
+            }""")
         # The text "Max: 2x" should produce at least some opaque pixels in that region
         assert has_label_pixels > 5, (
             f"Coverage label should produce opaque pixels, got {has_label_pixels}"
@@ -1092,7 +1041,5 @@ class TestCoverageLabel:
         """The coverage max value should match the actual data max."""
         send_init_data(viewer_page)
 
-        max_cov = viewer_page.evaluate(
-            "() => Math.max(...viewer.data.coverage)"
-        )
+        max_cov = viewer_page.evaluate("() => Math.max(...viewer.data.coverage)")
         assert max_cov == 2  # Our SAMPLE_DATA has max coverage of 2

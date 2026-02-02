@@ -1,9 +1,11 @@
 """Unit tests for bamcp.tools module."""
 
 import json
+
 import pytest
 
 from bamcp.config import BAMCPConfig
+from bamcp.parsers import AlignedRead, RegionData
 from bamcp.tools import (
     _serialize_region_data,
     handle_browse_region,
@@ -12,7 +14,6 @@ from bamcp.tools import (
     handle_jump_to,
     handle_list_contigs,
 )
-from bamcp.parsers import AlignedRead, RegionData
 
 
 @pytest.fixture
@@ -86,7 +87,17 @@ class TestSerializeRegionData:
             end=10,
             reads=[],
             coverage=[0] * 10,
-            variants=[{"contig": "chr1", "position": 5, "ref": "A", "alt": "T", "vaf": 0.5, "depth": 20, "alt_count": 10}],
+            variants=[
+                {
+                    "contig": "chr1",
+                    "position": 5,
+                    "ref": "A",
+                    "alt": "T",
+                    "vaf": 0.5,
+                    "depth": 20,
+                    "alt_count": 10,
+                }
+            ],
             reference_sequence="ACGTACGTAC",
         )
         result = _serialize_region_data(data)
@@ -145,9 +156,7 @@ class TestHandleBrowseRegion:
     @pytest.mark.asyncio
     async def test_invalid_region(self, small_bam_path, config):
         with pytest.raises(ValueError):
-            await handle_browse_region(
-                {"file_path": small_bam_path, "region": "invalid"}, config
-            )
+            await handle_browse_region({"file_path": small_bam_path, "region": "invalid"}, config)
 
 
 class TestHandleGetVariants:
@@ -287,7 +296,7 @@ class TestHandleListContigs:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_nonexistent_file(self, config):
-        with pytest.raises(Exception):
+        with pytest.raises((FileNotFoundError, OSError)):
             await handle_list_contigs({"file_path": "/nonexistent.bam"}, config)
 
 
@@ -340,9 +349,7 @@ class TestHandleJumpTo:
     @pytest.mark.asyncio
     async def test_default_contig(self, small_bam_path, config):
         """Without contig arg, defaults to chr1."""
-        result = await handle_jump_to(
-            {"file_path": small_bam_path, "position": 150}, config
-        )
+        result = await handle_jump_to({"file_path": small_bam_path, "position": 150}, config)
         payload = json.loads(result["content"][0]["text"])
         assert payload["contig"] == "chr1"
 

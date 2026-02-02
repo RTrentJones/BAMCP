@@ -1,22 +1,31 @@
 """Entry point for running BAMCP as a module: python -m bamcp."""
 
-import asyncio
 import sys
-
-from mcp.server.stdio import stdio_server
+from typing import Literal, get_args
 
 from .config import BAMCPConfig
 from .server import create_server
 
+Transport = Literal["stdio", "sse", "streamable-http"]
+VALID_TRANSPORTS: tuple[str, ...] = get_args(Transport)
 
-async def main() -> None:
-    """Run the BAMCP MCP server over stdio."""
+
+def main() -> None:
+    """Run the BAMCP MCP server."""
     config = BAMCPConfig.from_env()
-    app = create_server(config)
 
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
+    if config.transport not in VALID_TRANSPORTS:
+        print(
+            f"Invalid BAMCP_TRANSPORT={config.transport!r}. "
+            f"Must be one of: {', '.join(VALID_TRANSPORTS)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    transport: Transport = config.transport  # type: ignore[assignment]
+    server = create_server(config)
+    server.run(transport=transport)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

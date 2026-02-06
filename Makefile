@@ -1,6 +1,9 @@
-.PHONY: install test test-e2e lint format typecheck docker-build docker-test clean coverage
+.PHONY: install test test-e2e lint format typecheck docker-build docker-test clean coverage build-viewer
 
-install:
+build-viewer:
+	cd src/bamcp/static && npm install && npm run build
+
+install: build-viewer
 	pip install -e ".[dev]"
 
 test:
@@ -31,6 +34,7 @@ docker-test:
 
 clean:
 	rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage .coverage.* dist build *.egg-info
+	rm -rf src/bamcp/static/dist src/bamcp/static/node_modules
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
 coverage:

@@ -57,61 +57,10 @@ class TestGetViewerHtml:
         assert "<th>Depth</th>" in html
 
     @pytest.mark.unit
-    def test_contains_base_colors(self):
-        """HTML should define base colors for A, T, G, C, N."""
-        html = get_viewer_html()
-        assert "BASE_COLORS" in html
-        assert "'A'" in html
-        assert "'T'" in html
-        assert "'G'" in html
-        assert "'C'" in html
-        assert "'N'" in html
-
-    @pytest.mark.unit
-    def test_contains_viewer_class(self):
-        """HTML should define the BAMCPViewer class."""
-        html = get_viewer_html()
-        assert "class BAMCPViewer" in html
-
-    @pytest.mark.unit
-    def test_contains_mcp_bridge(self):
-        """HTML should have the MCP postMessage bridge."""
-        html = get_viewer_html()
-        assert "setupMCPBridge" in html
-        assert "postMessage" in html
-        assert "bamcp/init" in html
-
-    @pytest.mark.unit
-    def test_contains_rendering_methods(self):
-        """HTML should have rendering methods."""
-        html = get_viewer_html()
-        assert "renderCoverage" in html
-        assert "renderReads" in html
-        assert "renderRead" in html
-        assert "renderVariantTable" in html
-
-    @pytest.mark.unit
-    def test_contains_navigation_methods(self):
-        """HTML should have navigation methods."""
-        html = get_viewer_html()
-        assert "zoom" in html
-        assert "pan" in html
-        assert "jumpTo" in html
-        assert "packReads" in html
-
-    @pytest.mark.unit
     def test_contains_tooltip(self):
         """HTML should contain tooltip elements."""
         html = get_viewer_html()
         assert 'id="tooltip"' in html
-        assert "showTooltip" in html
-
-    @pytest.mark.unit
-    def test_contains_soft_clip_rendering(self):
-        """HTML should contain soft-clip rendering logic."""
-        html = get_viewer_html()
-        assert "parseSoftClips" in html
-        assert "softClips" in html
 
     @pytest.mark.unit
     def test_css_styles_present(self):
@@ -121,3 +70,40 @@ class TestGetViewerHtml:
         assert "#container" in html
         assert "#toolbar" in html
         assert "#viewer" in html
+
+    @pytest.mark.unit
+    def test_has_inline_script(self):
+        """Bundled HTML should have inline JavaScript (not external CDN)."""
+        html = get_viewer_html()
+        assert '<script type="module"' in html
+        # Should NOT have external CDN references
+        assert "esm.sh" not in html
+        assert "cdn.jsdelivr.net" not in html
+        assert "unpkg.com" not in html
+
+    @pytest.mark.unit
+    def test_no_external_script_src(self):
+        """Bundled HTML should not load scripts from external URLs."""
+        html = get_viewer_html()
+        # Check that we don't have src= pointing to http/https URLs
+        import re
+        external_scripts = re.findall(r'<script[^>]+src=["\']https?://', html)
+        assert len(external_scripts) == 0, f"Found external script sources: {external_scripts}"
+
+    @pytest.mark.unit
+    def test_contains_mcp_app_functionality(self):
+        """Bundled HTML should contain MCP Apps SDK functionality (even if minified)."""
+        html = get_viewer_html()
+        # These strings should survive minification since they're API method names
+        assert "ontoolresult" in html
+        assert "structuredContent" in html
+        # connect() should be present (may be minified but method name preserved)
+        assert ".connect(" in html
+
+    @pytest.mark.unit
+    def test_bundled_size_reasonable(self):
+        """Bundled HTML should be a reasonable size (SDK is ~100KB bundled)."""
+        html = get_viewer_html()
+        # Should be > 50KB (SDK + viewer code) but < 1MB
+        assert len(html) > 50_000, "HTML seems too small, SDK may not be bundled"
+        assert len(html) < 1_000_000, "HTML seems too large"

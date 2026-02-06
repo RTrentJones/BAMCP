@@ -10,9 +10,13 @@ from bamcp.tools import (
     _serialize_region_data,
     handle_browse_region,
     handle_get_coverage,
+    handle_get_region_summary,
     handle_get_variants,
     handle_jump_to,
     handle_list_contigs,
+    handle_lookup_clinvar,
+    handle_lookup_gnomad,
+    handle_visualize_region,
 )
 
 
@@ -363,3 +367,209 @@ class TestHandleJumpTo:
         payload = json.loads(result["content"][0]["text"])
         assert "reads" in payload
         assert len(payload["reads"]) > 0
+
+
+class TestHandleVisualizeRegion:
+    """Tests for handle_visualize_region tool handler."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_returns_ui_metadata(self, small_bam_path, config):
+        result = await handle_visualize_region(
+            {"file_path": small_bam_path, "region": "chr1:90-200"}, config
+        )
+        assert "content" in result
+        assert "_meta" in result
+        assert result["_meta"]["ui/resourceUri"] == "ui://bamcp/viewer"
+        assert "ui/init" in result["_meta"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_content_is_json(self, small_bam_path, config):
+        result = await handle_visualize_region(
+            {"file_path": small_bam_path, "region": "chr1:90-200"}, config
+        )
+        text = result["content"][0]["text"]
+        payload = json.loads(text)
+        assert "contig" in payload
+        assert "reads" in payload
+        assert "coverage" in payload
+
+
+class TestHandleGetRegionSummary:
+    """Tests for handle_get_region_summary tool handler."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_returns_text_summary(self, small_bam_path, config):
+        result = await handle_get_region_summary(
+            {"file_path": small_bam_path, "region": "chr1:90-200"}, config
+        )
+        assert "content" in result
+        assert "_meta" not in result
+        text = result["content"][0]["text"]
+        assert "Region:" in text
+        assert "Reads:" in text
+        assert "Coverage:" in text
+        assert "Variants detected:" in text
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_summary_includes_stats(self, small_bam_path, config):
+        result = await handle_get_region_summary(
+            {"file_path": small_bam_path, "region": "chr1:90-200"}, config
+        )
+        text = result["content"][0]["text"]
+        assert "chr1:90-200" in text
+        assert "mean=" in text
+        assert "max=" in text
+
+
+class TestHandleLookupClinvar:
+    """Tests for handle_lookup_clinvar tool handler."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_returns_annotation(self, config, monkeypatch):
+        """Mock ClinVarClient to return a known result."""
+        from bamcp.clinvar import ClinVarResult
+
+        async def mock_lookup(self, chrom, pos, ref, alt):
+            return ClinVarResult(
+                variation_id=12345,
+                clinical_significance="Pathogenic",
+                review_status="criteria provided, multiple submitters, no conflicts",
+                stars=2,
+                conditions=["Li-Fraumeni syndrome"],
+                last_evaluated="2023-01-15",
+                gene="TP53",
+                variant_name="NM_000546.6(TP53):c.743G>A",
+            )
+
+        from bamcp import clinvar
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", mock_lookup)
+
+        result = await handle_lookup_clinvar(
+            {"chrom": "chr17", "pos": 7674220, "ref": "G", "alt": "A"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["clinical_significance"] == "Pathogenic"
+        assert payload["gene"] == "TP53"
+        assert payload["stars"] == 2
+        assert "disclaimer" in payload
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_includes_disclaimer(self, config, monkeypatch):
+        from bamcp.clinvar import ClinVarResult
+
+        async def mock_lookup(self, chrom, pos, ref, alt):
+            return ClinVarResult(
+                variation_id=1,
+                clinical_significance="Benign",
+                review_status="no assertion criteria provided",
+                stars=0,
+                conditions=[],
+                last_evaluated=None,
+                gene=None,
+                variant_name=None,
+            )
+
+        from bamcp import clinvar
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", mock_lookup)
+
+        result = await handle_lookup_clinvar(
+            {"chrom": "chr1", "pos": 100, "ref": "A", "alt": "T"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert (
+            "not for clinical" in payload["disclaimer"].lower()
+            or "not intended" in payload["disclaimer"].lower()
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_not_found(self, config, monkeypatch):
+        async def mock_lookup(self, chrom, pos, ref, alt):
+            return None
+
+        from bamcp import clinvar
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", mock_lookup)
+
+        result = await handle_lookup_clinvar(
+            {"chrom": "chr99", "pos": 1, "ref": "A", "alt": "T"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["found"] is False
+        assert "disclaimer" in payload
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_error_handling(self, config, monkeypatch):
+        async def mock_lookup(self, chrom, pos, ref, alt):
+            raise ConnectionError("API unavailable")
+
+        from bamcp import clinvar
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", mock_lookup)
+
+        result = await handle_lookup_clinvar(
+            {"chrom": "chr1", "pos": 100, "ref": "A", "alt": "T"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert "error" in payload
+
+
+class TestHandleLookupGnomad:
+    """Tests for handle_lookup_gnomad tool handler."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_returns_frequency(self, config, monkeypatch):
+        from bamcp.gnomad import GnomadResult, PopulationFrequency
+
+        async def mock_lookup(self, chrom, pos, ref, alt):
+            return GnomadResult(
+                variant_id="17-7674220-G-A",
+                global_af=3.28e-05,
+                ac=5,
+                an=152312,
+                homozygote_count=0,
+                populations=[
+                    PopulationFrequency(id="afr", ac=2, an=41406, homozygote_count=0, af=4.83e-05),
+                ],
+                filters=["PASS"],
+                source="genome",
+            )
+
+        from bamcp import gnomad
+
+        monkeypatch.setattr(gnomad.GnomadClient, "lookup", mock_lookup)
+
+        result = await handle_lookup_gnomad(
+            {"chrom": "chr17", "pos": 7674220, "ref": "G", "alt": "A"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["global_af"] == pytest.approx(3.28e-05)
+        assert payload["source"] == "genome"
+        assert "disclaimer" in payload
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_not_found(self, config, monkeypatch):
+        async def mock_lookup(self, chrom, pos, ref, alt):
+            return None
+
+        from bamcp import gnomad
+
+        monkeypatch.setattr(gnomad.GnomadClient, "lookup", mock_lookup)
+
+        result = await handle_lookup_gnomad(
+            {"chrom": "chr99", "pos": 1, "ref": "A", "alt": "T"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["found"] is False
+        assert "disclaimer" in payload

@@ -28,6 +28,13 @@ class BAMCPConfig:
     required_scopes: list[str] | None = None
     token_expiry: int = 3600
 
+    # External database settings
+    ncbi_api_key: str | None = None
+    clinvar_enabled: bool = True
+    gnomad_enabled: bool = True
+    gnomad_dataset: str = "gnomad_r4"
+    genome_build: str = "GRCh38"
+
     @classmethod
     def from_env(cls) -> "BAMCPConfig":
         """Create config from environment variables."""
@@ -51,4 +58,9 @@ class BAMCPConfig:
             ),
             required_scopes=scopes,
             token_expiry=int(os.environ.get("BAMCP_TOKEN_EXPIRY", "3600")),
+            ncbi_api_key=os.environ.get("BAMCP_NCBI_API_KEY"),
+            clinvar_enabled=os.environ.get("BAMCP_CLINVAR_ENABLED", "true").lower() == "true",
+            gnomad_enabled=os.environ.get("BAMCP_GNOMAD_ENABLED", "true").lower() == "true",
+            gnomad_dataset=os.environ.get("BAMCP_GNOMAD_DATASET", "gnomad_r4"),
+            genome_build=os.environ.get("BAMCP_GENOME_BUILD", "GRCh38"),
         )

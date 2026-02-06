@@ -205,3 +205,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# BAMCP Viewer build artifacts
+src/bamcp/static/node_modules/
+src/bamcp/static/dist/

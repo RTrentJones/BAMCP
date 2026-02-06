@@ -7,6 +7,8 @@ Interactive BAM/CRAM variant visualization MCP server with MCP Apps UI.
 ```
 FastMCP server (server.py)
   ├── Tool handlers (tools.py) → pysam parsers (parsers.py)
+  ├── ClinVar client (clinvar.py) → NCBI E-utilities API
+  ├── gnomAD client (gnomad.py) → gnomAD GraphQL API
   ├── UI resource (resources.py → static/viewer.html)
   ├── Auth provider (auth.py) — opt-in OAuth 2.0
   └── Config (config.py) — all settings from env vars
@@ -19,8 +21,10 @@ FastMCP server (server.py)
 | Module | Role |
 |--------|------|
 | `server.py` | FastMCP setup, tool/resource registration, auth wiring |
-| `tools.py` | `handle_browse_region`, `handle_get_variants`, `handle_get_coverage`, `handle_list_contigs`, `handle_jump_to` |
+| `tools.py` | All tool handlers (browse, variants, coverage, contigs, jump, visualize, summary, ClinVar, gnomAD) |
 | `parsers.py` | `fetch_region()` — pysam BAM/CRAM parsing, read extraction, coverage, variant detection |
+| `clinvar.py` | `ClinVarClient` — async NCBI E-utilities client for variant clinical significance |
+| `gnomad.py` | `GnomadClient` — async gnomAD GraphQL client for population allele frequencies |
 | `resources.py` | `get_viewer_html()` — serves bundled HTML from `static/viewer.html` |
 | `config.py` | `BAMCPConfig` dataclass with `from_env()` classmethod |
 | `auth.py` | `BAMCPAuthProvider` (in-memory OAuth 2.0), `build_auth_settings()` |
@@ -34,6 +38,10 @@ FastMCP server (server.py)
 | `get_coverage` | Calculate depth of coverage statistics |
 | `list_contigs` | List chromosomes/contigs in BAM/CRAM header |
 | `jump_to` | Jump to a specific genomic position with configurable window |
+| `visualize_region` | MCP Apps-aware region visualization (same as browse_region, App-centric name) |
+| `get_region_summary` | Text-only region summary for LLM reasoning (no UI) |
+| `lookup_clinvar` | Look up variant in ClinVar for clinical significance and conditions |
+| `lookup_gnomad` | Look up variant in gnomAD for population allele frequency data |
 
 ## Transport Modes
 
@@ -60,6 +68,8 @@ Transport: `BAMCP_TRANSPORT`, `BAMCP_HOST`, `BAMCP_PORT`
 
 Auth: `BAMCP_AUTH_ENABLED`, `BAMCP_ISSUER_URL`, `BAMCP_RESOURCE_SERVER_URL`, `BAMCP_REQUIRED_SCOPES`, `BAMCP_TOKEN_EXPIRY`
 
+External databases: `BAMCP_NCBI_API_KEY`, `BAMCP_CLINVAR_ENABLED`, `BAMCP_GNOMAD_ENABLED`, `BAMCP_GNOMAD_DATASET`, `BAMCP_GENOME_BUILD`
+
 ## Commands
 
 ```bash
@@ -81,6 +91,7 @@ make clean        # remove build artifacts
 - Async tests use `pytest-asyncio` with `asyncio_mode = "auto"`
 - Fixtures in `tests/fixtures/` (small.bam, ref.fa, empty.bam)
 - Fixture generator: `tests/create_fixtures.py` (creates test BAM/FASTA with known reads)
+- HTTP mocking: `pytest-httpx` for ClinVar/gnomAD API tests
 - Coverage threshold: 80% (fail_under in pyproject.toml)
 - E2E tests use Playwright (sync API, run separately from async tests)
 
@@ -97,11 +108,13 @@ make clean        # remove build artifacts
 ```
 src/bamcp/
   __init__.py, __main__.py, server.py, tools.py, parsers.py,
+  clinvar.py, gnomad.py,
   resources.py, config.py, auth.py, static/viewer.html
 tests/
   conftest.py, create_fixtures.py, fixtures/,
   test_parsers.py, test_tools.py, test_server.py, test_config.py,
   test_auth.py, test_resources.py, test_integration.py, test_docker.py,
+  test_clinvar.py, test_gnomad.py,
   e2e/conftest.py, e2e/test_viewer_e2e.py
 docker/
   entrypoint.sh, healthcheck.py
@@ -114,3 +127,4 @@ docker/
 
 - `BAMCP_Strategy.md` — MCP Apps architecture, viewer design, ClinVar/gnomAD integration roadmap
 - `BAMCP_EVAL_HARNESS.md` — LLM genomic reasoning evaluation framework (classify_variant, ACMG scaffolds, failure mode detection, ground truth benchmarks)
+- `BAMCP_IMPLEMENTATION_PLAN.md` — Full implementation schedule for Phases 1-4

@@ -34,7 +34,17 @@ class TestCreateServer:
         """Server should register all expected tools."""
         server = create_server(BAMCPConfig())
         tool_names = {name for name in server._tool_manager._tools}
-        expected = {"browse_region", "get_variants", "get_coverage", "list_contigs", "jump_to"}
+        expected = {
+            "browse_region",
+            "get_variants",
+            "get_coverage",
+            "list_contigs",
+            "jump_to",
+            "visualize_region",
+            "get_region_summary",
+            "lookup_clinvar",
+            "lookup_gnomad",
+        }
         assert expected == tool_names
 
     @pytest.mark.unit

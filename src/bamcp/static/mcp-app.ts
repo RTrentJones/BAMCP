@@ -252,13 +252,17 @@ class BAMCPViewer {
         const btn = document.getElementById('fullscreen-btn')!;
         btn.classList.toggle('active', this.isFullscreen);
 
-        if (this.app) {
+        // Use browser's native fullscreen API (works in iframe with allow="fullscreen")
+        const container = document.getElementById('container');
+        if (container) {
             try {
-                await this.app.requestDisplayMode(
-                    this.isFullscreen ? 'fullscreen' : 'inline'
-                );
+                if (this.isFullscreen && !document.fullscreenElement) {
+                    await container.requestFullscreen();
+                } else if (!this.isFullscreen && document.fullscreenElement) {
+                    await document.exitFullscreen();
+                }
             } catch {
-                // Ignore errors
+                // Fullscreen not supported or denied - just toggle the button state
             }
         }
     }

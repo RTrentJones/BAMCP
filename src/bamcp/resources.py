@@ -20,10 +20,7 @@ def get_viewer_html() -> str:
 
     # Fall back to importlib.resources for installed package
     try:
-        bundled = (
-            importlib.resources.files("bamcp")
-            .joinpath("static/dist/viewer.html")
-        )
+        bundled = importlib.resources.files("bamcp").joinpath("static/dist/viewer.html")
         if bundled.is_file():
             return bundled.read_text(encoding="utf-8")
     except (TypeError, FileNotFoundError):

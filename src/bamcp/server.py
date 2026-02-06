@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -26,9 +25,7 @@ _VIEWER_URI = "ui://bamcp/viewer"
 _VIEWER_META: dict = {"ui": {"resourceUri": _VIEWER_URI}}
 
 # MCP Apps extension capability (SEP-1865)
-_MCP_APPS_EXPERIMENTAL: dict[str, dict[str, Any]] = {
-    "io.modelcontextprotocol/ui": {}
-}
+_MCP_APPS_EXPERIMENTAL: dict[str, dict[str, Any]] = {"io.modelcontextprotocol/ui": {}}
 
 
 def create_server(config: BAMCPConfig | None = None) -> FastMCP:

@@ -1,6 +1,13 @@
 /**
  * BAMCP Alignment Viewer - MCP Apps client
  *
+ * Production-quality BAM/CRAM visualization with:
+ * - Reference sequence track with semantic zoom
+ * - Position ruler with genomic coordinates
+ * - MAPQ-based read opacity
+ * - Insertion/deletion visualization from CIGAR
+ * - Keyboard shortcuts for navigation
+ *
  * This module is bundled into viewer.html by Vite.
  */
 
@@ -43,28 +50,47 @@ interface ToolResultParams {
     content?: Array<{ type: string; text?: string }>;
 }
 
-// Color scheme for nucleotides
+interface CigarOp {
+    op: string;
+    len: number;
+}
+
+// Color scheme for nucleotides (IGV-inspired)
 const BASE_COLORS: Record<string, string> = {
-    'A': '#22c55e',
-    'T': '#ef4444',
-    'G': '#f97316',
-    'C': '#3b82f6',
-    'N': '#9ca3af'
+    'A': '#22c55e',  // Green
+    'T': '#ef4444',  // Red
+    'G': '#f97316',  // Orange
+    'C': '#3b82f6',  // Blue
+    'N': '#9ca3af'   // Gray
 };
 
+// Track heights
+const RULER_HEIGHT = 20;
+const REFERENCE_HEIGHT = 24;
+const COVERAGE_HEIGHT = 60;
 const READ_HEIGHT = 12;
 const READ_GAP = 2;
-const COVERAGE_HEIGHT = 60;
+const HEADER_OFFSET = RULER_HEIGHT + REFERENCE_HEIGHT;  // 44px
 const CONTEXT_UPDATE_DEBOUNCE_MS = 300;
 
 class BAMCPViewer {
+    // Canvas elements
+    private rulerCanvas: HTMLCanvasElement;
+    private referenceCanvas: HTMLCanvasElement;
     private coverageCanvas: HTMLCanvasElement;
     private readsCanvas: HTMLCanvasElement;
+
+    // Canvas contexts
+    private rulerCtx: CanvasRenderingContext2D;
+    private referenceCtx: CanvasRenderingContext2D;
     private coverageCtx: CanvasRenderingContext2D;
     private readsCtx: CanvasRenderingContext2D;
+
+    // DOM elements
     private tooltip: HTMLElement;
     private variantTable: HTMLElement;
 
+    // State
     private data: RegionData | null = null;
     private viewport = { start: 0, end: 1000 };
     private packedRows: Read[][] = [];
@@ -73,14 +99,22 @@ class BAMCPViewer {
     private _contextUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 
     constructor() {
+        // Initialize canvases
+        this.rulerCanvas = document.getElementById('ruler-canvas') as HTMLCanvasElement;
+        this.referenceCanvas = document.getElementById('reference-canvas') as HTMLCanvasElement;
         this.coverageCanvas = document.getElementById('coverage-canvas') as HTMLCanvasElement;
         this.readsCanvas = document.getElementById('reads-canvas') as HTMLCanvasElement;
+
+        this.rulerCtx = this.rulerCanvas.getContext('2d')!;
+        this.referenceCtx = this.referenceCanvas.getContext('2d')!;
         this.coverageCtx = this.coverageCanvas.getContext('2d')!;
         this.readsCtx = this.readsCanvas.getContext('2d')!;
+
         this.tooltip = document.getElementById('tooltip')!;
         this.variantTable = document.getElementById('variant-table')!;
 
         this.setupEventListeners();
+        this.setupKeyboardShortcuts();
         this.initApp();
         this.resize();
 
@@ -93,11 +127,9 @@ class BAMCPViewer {
 
             // Set ontoolresult BEFORE connect() to receive the initial tool result
             this.app.ontoolresult = (params: ToolResultParams) => {
-                // Prefer structuredContent (hidden from LLM, full data for UI)
                 if (params.structuredContent) {
                     this.loadData(params.structuredContent);
                 } else if (params.content) {
-                    // Fall back to parsing from text content
                     const text = params.content.find(c => c.type === 'text');
                     if (text?.text) {
                         this.loadData(JSON.parse(text.text));
@@ -107,8 +139,6 @@ class BAMCPViewer {
 
             await this.app.connect();
         } catch (e) {
-            // SDK not available or connect failed — viewer still works
-            // when data is loaded directly via loadData()
             console.warn('MCP Apps SDK init failed:', e);
         }
     }
@@ -126,6 +156,7 @@ class BAMCPViewer {
             this.toggleFullscreen();
         });
 
+        // Pan via drag on reads canvas
         let isDragging = false;
         let lastX = 0;
 
@@ -143,6 +174,7 @@ class BAMCPViewer {
 
         window.addEventListener('mouseup', () => isDragging = false);
 
+        // Tooltips
         this.readsCanvas.addEventListener('mousemove', (e) => {
             if (isDragging) return;
             this.showTooltip(e);
@@ -152,6 +184,7 @@ class BAMCPViewer {
             this.tooltip.style.display = 'none';
         });
 
+        // Mouse wheel zoom
         this.readsCanvas.addEventListener('wheel', (e) => {
             e.preventDefault();
             const factor = e.deltaY > 0 ? 1.2 : 0.8;
@@ -159,10 +192,48 @@ class BAMCPViewer {
         });
     }
 
+    private setupKeyboardShortcuts(): void {
+        document.addEventListener('keydown', (e) => {
+            // Don't capture if typing in input
+            if (e.target instanceof HTMLInputElement) return;
+
+            switch (e.key) {
+                case 'ArrowLeft':
+                    this.pan(50);
+                    e.preventDefault();
+                    break;
+                case 'ArrowRight':
+                    this.pan(-50);
+                    e.preventDefault();
+                    break;
+                case '+':
+                case '=':
+                    this.zoom(0.5);
+                    e.preventDefault();
+                    break;
+                case '-':
+                    this.zoom(2);
+                    e.preventDefault();
+                    break;
+                case 'Home':
+                    if (this.data) {
+                        this.jumpTo(this.data.start);
+                        e.preventDefault();
+                    }
+                    break;
+                case 'End':
+                    if (this.data) {
+                        this.jumpTo(this.data.end);
+                        e.preventDefault();
+                    }
+                    break;
+            }
+        });
+    }
+
     private async requestRegion(region: string): Promise<void> {
         if (this.app) {
             try {
-                // MCP Apps UI cannot call tools directly - ask the LLM to do it
                 await this.app.sendMessage({
                     role: 'user',
                     content: [{
@@ -186,7 +257,6 @@ class BAMCPViewer {
 
         this.packReads();
         this.renderVariantTable();
-        // Resize adjusts canvas height based on packed rows
         this.resize();
         this.scheduleContextUpdate();
     }
@@ -252,7 +322,6 @@ class BAMCPViewer {
         const btn = document.getElementById('fullscreen-btn')!;
         btn.classList.toggle('active', this.isFullscreen);
 
-        // Use browser's native fullscreen API (works in iframe with allow="fullscreen")
         const container = document.getElementById('container');
         if (container) {
             try {
@@ -262,7 +331,7 @@ class BAMCPViewer {
                     await document.exitFullscreen();
                 }
             } catch {
-                // Fullscreen not supported or denied - just toggle the button state
+                // Fullscreen not supported or denied
             }
         }
     }
@@ -293,17 +362,26 @@ class BAMCPViewer {
     private resize(): void {
         const container = document.getElementById('viewer')!;
         const width = Math.max(container.clientWidth, 300);
-        // Ensure minimum height for reads display (at least 200px for reads)
-        const containerHeight = Math.max(container.clientHeight, COVERAGE_HEIGHT + 200);
-        const height = containerHeight - COVERAGE_HEIGHT;
+        const containerHeight = Math.max(container.clientHeight, HEADER_OFFSET + COVERAGE_HEIGHT + 200);
 
+        // Ruler canvas
+        this.rulerCanvas.width = width;
+        this.rulerCanvas.height = RULER_HEIGHT;
+
+        // Reference canvas
+        this.referenceCanvas.width = width;
+        this.referenceCanvas.height = REFERENCE_HEIGHT;
+
+        // Coverage canvas
         this.coverageCanvas.width = width;
         this.coverageCanvas.height = COVERAGE_HEIGHT;
 
+        // Reads canvas - remaining height
         this.readsCanvas.width = width;
-        this.readsCanvas.height = height;
+        const readsHeight = containerHeight - HEADER_OFFSET - COVERAGE_HEIGHT;
+        this.readsCanvas.height = readsHeight;
 
-        // If we have packed reads, ensure canvas is tall enough to show them
+        // Expand if needed for packed reads
         if (this.packedRows.length > 0) {
             const neededHeight = this.packedRows.length * (READ_HEIGHT + READ_GAP);
             if (neededHeight > this.readsCanvas.height) {
@@ -314,10 +392,224 @@ class BAMCPViewer {
         this.render();
     }
 
+    private getScale(): number {
+        return this.readsCanvas.width / (this.viewport.end - this.viewport.start);
+    }
+
+    private getZoomLevel(): 'nucleotide' | 'read' | 'overview' {
+        const scale = this.getScale();
+        if (scale >= 8) return 'nucleotide';
+        if (scale >= 0.5) return 'read';
+        return 'overview';
+    }
+
     private render(): void {
+        this.renderRuler();
+        this.renderReference();
         this.renderCoverage();
         this.renderReads();
     }
+
+    // ==================== RULER TRACK ====================
+
+    private renderRuler(): void {
+        const ctx = this.rulerCtx;
+        const width = this.rulerCanvas.width;
+        const height = this.rulerCanvas.height;
+
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = '#fafafa';
+        ctx.fillRect(0, 0, width, height);
+
+        if (!this.data) return;
+
+        const scale = this.getScale();
+        const span = this.viewport.end - this.viewport.start;
+        const tickInterval = this.calculateTickInterval(span);
+
+        ctx.fillStyle = '#374151';
+        ctx.font = '10px monospace';
+        ctx.strokeStyle = '#9ca3af';
+        ctx.lineWidth = 1;
+
+        // Draw region label
+        ctx.fillStyle = '#6b7280';
+        ctx.font = 'bold 10px sans-serif';
+        ctx.fillText(this.data.contig, 4, 12);
+
+        ctx.font = '10px monospace';
+        ctx.fillStyle = '#374151';
+
+        const startTick = Math.ceil(this.viewport.start / tickInterval) * tickInterval;
+        for (let pos = startTick; pos <= this.viewport.end; pos += tickInterval) {
+            const x = (pos - this.viewport.start) * scale;
+
+            // Tick mark
+            ctx.beginPath();
+            ctx.moveTo(x, height - 6);
+            ctx.lineTo(x, height);
+            ctx.stroke();
+
+            // Label
+            const label = this.formatPosition(pos);
+            const labelWidth = ctx.measureText(label).width;
+            if (x + labelWidth < width - 5) {
+                ctx.fillText(label, x + 2, height - 8);
+            }
+        }
+
+        // Bottom border
+        ctx.strokeStyle = '#e5e7eb';
+        ctx.beginPath();
+        ctx.moveTo(0, height - 0.5);
+        ctx.lineTo(width, height - 0.5);
+        ctx.stroke();
+    }
+
+    private calculateTickInterval(span: number): number {
+        const targetTicks = 8;
+        const rawInterval = span / targetTicks;
+        const magnitude = Math.pow(10, Math.floor(Math.log10(rawInterval)));
+        const normalized = rawInterval / magnitude;
+
+        if (normalized <= 1) return magnitude;
+        if (normalized <= 2) return 2 * magnitude;
+        if (normalized <= 5) return 5 * magnitude;
+        return 10 * magnitude;
+    }
+
+    private formatPosition(pos: number): string {
+        if (pos >= 1000000) return (pos / 1000000).toFixed(1) + 'M';
+        if (pos >= 1000) return (pos / 1000).toFixed(1) + 'K';
+        return pos.toString();
+    }
+
+    // ==================== REFERENCE TRACK ====================
+
+    private renderReference(): void {
+        const ctx = this.referenceCtx;
+        const width = this.referenceCanvas.width;
+        const height = this.referenceCanvas.height;
+
+        ctx.clearRect(0, 0, width, height);
+
+        if (!this.data?.reference_sequence) {
+            // No reference available - show placeholder
+            ctx.fillStyle = '#f9fafb';
+            ctx.fillRect(0, 0, width, height);
+            ctx.fillStyle = '#9ca3af';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('Reference sequence not available', 8, height / 2 + 4);
+            return;
+        }
+
+        const scale = this.getScale();
+        const refSeq = this.data.reference_sequence;
+
+        if (scale >= 8) {
+            this.renderReferenceNucleotides(ctx, refSeq, scale, height);
+        } else if (scale >= 2) {
+            this.renderReferenceBlocks(ctx, refSeq, scale, height);
+        } else {
+            this.renderReferenceBands(ctx, refSeq, scale, width, height);
+        }
+
+        // Bottom border
+        ctx.strokeStyle = '#e5e7eb';
+        ctx.beginPath();
+        ctx.moveTo(0, height - 0.5);
+        ctx.lineTo(width, height - 0.5);
+        ctx.stroke();
+    }
+
+    private renderReferenceNucleotides(
+        ctx: CanvasRenderingContext2D,
+        refSeq: string,
+        scale: number,
+        height: number
+    ): void {
+        ctx.font = 'bold 12px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        const startIdx = Math.max(0, Math.floor(this.viewport.start - this.data!.start));
+        const endIdx = Math.min(refSeq.length, Math.ceil(this.viewport.end - this.data!.start));
+
+        for (let i = startIdx; i < endIdx; i++) {
+            const base = refSeq[i].toUpperCase();
+            const x = (this.data!.start + i - this.viewport.start) * scale;
+
+            // Background color
+            ctx.fillStyle = BASE_COLORS[base] || '#9ca3af';
+            ctx.fillRect(x, 2, Math.max(scale - 1, 1), height - 4);
+
+            // Letter (white on colored background)
+            if (scale >= 10) {
+                ctx.fillStyle = '#fff';
+                ctx.fillText(base, x + scale / 2, height / 2);
+            }
+        }
+
+        ctx.textAlign = 'start';
+        ctx.textBaseline = 'alphabetic';
+    }
+
+    private renderReferenceBlocks(
+        ctx: CanvasRenderingContext2D,
+        refSeq: string,
+        scale: number,
+        height: number
+    ): void {
+        const startIdx = Math.max(0, Math.floor(this.viewport.start - this.data!.start));
+        const endIdx = Math.min(refSeq.length, Math.ceil(this.viewport.end - this.data!.start));
+
+        for (let i = startIdx; i < endIdx; i++) {
+            const base = refSeq[i].toUpperCase();
+            const x = (this.data!.start + i - this.viewport.start) * scale;
+
+            ctx.fillStyle = BASE_COLORS[base] || '#9ca3af';
+            ctx.fillRect(x, 2, Math.max(scale - 0.5, 1), height - 4);
+        }
+    }
+
+    private renderReferenceBands(
+        ctx: CanvasRenderingContext2D,
+        refSeq: string,
+        scale: number,
+        width: number,
+        height: number
+    ): void {
+        // At very low zoom, aggregate base composition per pixel
+        const pixelWidth = 1 / scale;
+        const viewStart = Math.max(0, this.viewport.start - this.data!.start);
+
+        for (let px = 0; px < width; px++) {
+            const baseStart = Math.floor(viewStart + px * pixelWidth);
+            const baseEnd = Math.min(refSeq.length, Math.ceil(viewStart + (px + 1) * pixelWidth));
+
+            if (baseStart >= refSeq.length) break;
+
+            // Count bases in this pixel
+            const counts: Record<string, number> = { A: 0, T: 0, G: 0, C: 0 };
+            for (let i = baseStart; i < baseEnd; i++) {
+                const base = refSeq[i].toUpperCase();
+                if (counts[base] !== undefined) counts[base]++;
+            }
+
+            // Draw stacked bar for this pixel
+            let y = 2;
+            const total = baseEnd - baseStart;
+            for (const [base, count] of Object.entries(counts)) {
+                if (count === 0) continue;
+                const h = (count / total) * (height - 4);
+                ctx.fillStyle = BASE_COLORS[base];
+                ctx.fillRect(px, y, 1, h);
+                y += h;
+            }
+        }
+    }
+
+    // ==================== COVERAGE TRACK ====================
 
     private renderCoverage(): void {
         const ctx = this.coverageCtx;
@@ -332,8 +624,10 @@ class BAMCPViewer {
         const maxCov = Math.max(...coverage, 1);
         const scale = this.getScale();
 
+        // Fill area
         ctx.fillStyle = '#93c5fd';
         ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = 1;
         ctx.beginPath();
 
         for (let i = 0; i < coverage.length; i++) {
@@ -353,10 +647,21 @@ class BAMCPViewer {
         ctx.fill();
         ctx.stroke();
 
-        ctx.fillStyle = '#333';
-        ctx.font = '10px sans-serif';
+        // Max coverage label
+        ctx.fillStyle = '#374151';
+        ctx.font = 'bold 10px sans-serif';
         ctx.fillText('Max: ' + maxCov + 'x', 5, 12);
+
+        // Mean coverage
+        const meanCov = coverage.length > 0
+            ? (coverage.reduce((a, b) => a + b, 0) / coverage.length).toFixed(1)
+            : '0';
+        ctx.font = '10px sans-serif';
+        ctx.fillStyle = '#6b7280';
+        ctx.fillText('Mean: ' + meanCov + 'x', 80, 12);
     }
+
+    // ==================== READS TRACK ====================
 
     private renderReads(): void {
         const ctx = this.readsCtx;
@@ -367,6 +672,24 @@ class BAMCPViewer {
 
         if (!this.data) return;
 
+        const zoomLevel = this.getZoomLevel();
+
+        // At very low zoom, show overview message
+        if (zoomLevel === 'overview') {
+            ctx.fillStyle = '#f9fafb';
+            ctx.fillRect(0, 0, width, height);
+            ctx.fillStyle = '#6b7280';
+            ctx.font = '12px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(
+                `${this.data.reads.length} reads - zoom in to view`,
+                width / 2,
+                height / 2
+            );
+            ctx.textAlign = 'start';
+            return;
+        }
+
         const scale = this.getScale();
 
         for (let rowIdx = 0; rowIdx < this.packedRows.length; rowIdx++) {
@@ -375,24 +698,36 @@ class BAMCPViewer {
             if (y > height) break;
 
             for (const read of this.packedRows[rowIdx]) {
-                this.renderRead(ctx, read, y, scale);
+                this.renderRead(ctx, read, y, scale, zoomLevel);
             }
         }
     }
 
-    private renderRead(ctx: CanvasRenderingContext2D, read: Read, y: number, scale: number): void {
+    private renderRead(
+        ctx: CanvasRenderingContext2D,
+        read: Read,
+        y: number,
+        scale: number,
+        zoomLevel: 'nucleotide' | 'read'
+    ): void {
         const x = (read.position - this.viewport.start) * scale;
         const w = (read.end_position - read.position) * scale;
 
         if (x + w < 0 || x > this.readsCanvas.width) return;
 
-        // Parse soft-clips from CIGAR
-        const softClips = this.parseSoftClips(read.cigar);
+        // MAPQ-based opacity (MAPQ 60 = full, 0 = 30%)
+        const opacity = 0.3 + Math.min(read.mapping_quality, 60) / 60 * 0.7;
 
-        // Draw soft-clipped regions (semi-transparent with amber border)
+        // Parse CIGAR for indels
+        const cigarOps = this.parseCigar(read.cigar);
+
+        // Draw soft-clipped regions first
+        const softClips = this.getSoftClipsFromCigar(cigarOps);
         if (softClips.left > 0) {
             const clipW = softClips.left * scale;
-            ctx.fillStyle = read.is_reverse ? 'rgba(167,139,250,0.3)' : 'rgba(96,165,250,0.3)';
+            ctx.fillStyle = read.is_reverse
+                ? `rgba(167, 139, 250, ${opacity * 0.4})`
+                : `rgba(96, 165, 250, ${opacity * 0.4})`;
             ctx.fillRect(x - clipW, y, clipW, READ_HEIGHT);
             ctx.strokeStyle = '#f59e0b';
             ctx.lineWidth = 1;
@@ -400,54 +735,152 @@ class BAMCPViewer {
         }
         if (softClips.right > 0) {
             const clipW = softClips.right * scale;
-            ctx.fillStyle = read.is_reverse ? 'rgba(167,139,250,0.3)' : 'rgba(96,165,250,0.3)';
+            ctx.fillStyle = read.is_reverse
+                ? `rgba(167, 139, 250, ${opacity * 0.4})`
+                : `rgba(96, 165, 250, ${opacity * 0.4})`;
             ctx.fillRect(x + w, y, clipW, READ_HEIGHT);
             ctx.strokeStyle = '#f59e0b';
             ctx.lineWidth = 1;
             ctx.strokeRect(x + w, y, clipW, READ_HEIGHT);
         }
 
-        // Draw aligned read body
-        ctx.fillStyle = read.is_reverse ? '#a78bfa' : '#60a5fa';
-        ctx.fillRect(x, y, w, READ_HEIGHT);
+        // Draw read body with CIGAR operations
+        this.renderReadWithCigar(ctx, read, cigarOps, x, y, scale, opacity, zoomLevel);
 
-        if (scale > 2) {
-            for (const mm of read.mismatches) {
-                const mx = (mm.pos - this.viewport.start) * scale;
-                ctx.fillStyle = BASE_COLORS[mm.alt] || '#9ca3af';
-                ctx.fillRect(mx, y, Math.max(scale, 2), READ_HEIGHT);
-            }
-        }
-
-        ctx.fillStyle = 'white';
-        ctx.font = '8px sans-serif';
-        const arrow = read.is_reverse ? '\u25C0' : '\u25B6';
+        // Direction arrow
         if (w > 15) {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+            ctx.font = '8px sans-serif';
+            const arrow = read.is_reverse ? '\u25C0' : '\u25B6';
             ctx.fillText(arrow, read.is_reverse ? x + 2 : x + w - 10, y + 9);
         }
     }
 
-    private parseSoftClips(cigar: string): { left: number; right: number } {
+    private renderReadWithCigar(
+        ctx: CanvasRenderingContext2D,
+        read: Read,
+        ops: CigarOp[],
+        startX: number,
+        y: number,
+        scale: number,
+        opacity: number,
+        zoomLevel: 'nucleotide' | 'read'
+    ): void {
+        let refPos = read.position;
+        let queryPos = 0;
+
+        const baseColor = read.is_reverse ? [167, 139, 250] : [96, 165, 250];
+
+        for (const { op, len } of ops) {
+            const x = (refPos - this.viewport.start) * scale;
+
+            switch (op) {
+                case 'M':
+                case '=':
+                case 'X':
+                    // Match/mismatch segment
+                    ctx.fillStyle = `rgba(${baseColor[0]}, ${baseColor[1]}, ${baseColor[2]}, ${opacity})`;
+                    ctx.fillRect(x, y, len * scale, READ_HEIGHT);
+
+                    // Draw mismatches
+                    if (zoomLevel === 'nucleotide' || scale > 2) {
+                        for (const mm of read.mismatches) {
+                            if (mm.pos >= refPos && mm.pos < refPos + len) {
+                                const mx = (mm.pos - this.viewport.start) * scale;
+                                ctx.fillStyle = BASE_COLORS[mm.alt] || '#9ca3af';
+                                ctx.fillRect(mx, y, Math.max(scale, 2), READ_HEIGHT);
+
+                                // Draw letter at nucleotide zoom
+                                if (zoomLevel === 'nucleotide' && scale >= 10) {
+                                    ctx.fillStyle = '#fff';
+                                    ctx.font = 'bold 9px monospace';
+                                    ctx.textAlign = 'center';
+                                    ctx.fillText(mm.alt, mx + scale / 2, y + READ_HEIGHT - 2);
+                                    ctx.textAlign = 'start';
+                                }
+                            }
+                        }
+                    }
+
+                    refPos += len;
+                    queryPos += len;
+                    break;
+
+                case 'I':
+                    // Insertion - draw purple marker
+                    ctx.fillStyle = '#9333ea';
+                    ctx.beginPath();
+                    ctx.moveTo(x - 3, y);
+                    ctx.lineTo(x + 3, y);
+                    ctx.lineTo(x, y + 5);
+                    ctx.closePath();
+                    ctx.fill();
+
+                    // Vertical line
+                    ctx.strokeStyle = '#9333ea';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(x, y);
+                    ctx.lineTo(x, y + READ_HEIGHT);
+                    ctx.stroke();
+                    ctx.lineWidth = 1;
+
+                    queryPos += len;
+                    break;
+
+                case 'D':
+                case 'N':
+                    // Deletion - draw thin dark line
+                    ctx.fillStyle = '#1f2937';
+                    ctx.fillRect(x, y + READ_HEIGHT / 2 - 1, len * scale, 2);
+                    refPos += len;
+                    break;
+
+                case 'S':
+                    // Soft-clip - already handled above
+                    queryPos += len;
+                    break;
+
+                case 'H':
+                    // Hard-clip - nothing to draw
+                    break;
+            }
+        }
+    }
+
+    private parseCigar(cigar: string): CigarOp[] {
+        const ops: CigarOp[] = [];
+        if (!cigar) return ops;
+
+        const regex = /(\d+)([MIDNSHP=X])/g;
+        let match;
+        while ((match = regex.exec(cigar)) !== null) {
+            ops.push({ len: parseInt(match[1]), op: match[2] });
+        }
+        return ops;
+    }
+
+    private getSoftClipsFromCigar(ops: CigarOp[]): { left: number; right: number } {
         let left = 0, right = 0;
-        if (!cigar) return { left, right };
-        const ops = cigar.match(/\d+[MIDNSHP=X]/g);
-        if (!ops || ops.length === 0) return { left, right };
-        if (ops[0].endsWith('S')) left = parseInt(ops[0]);
-        if (ops.length > 1 && ops[ops.length - 1].endsWith('S')) right = parseInt(ops[ops.length - 1]);
+        if (ops.length === 0) return { left, right };
+        if (ops[0].op === 'S') left = ops[0].len;
+        if (ops.length > 1 && ops[ops.length - 1].op === 'S') right = ops[ops.length - 1].len;
         return { left, right };
     }
 
-    private getScale(): number {
-        const width = this.readsCanvas.width;
-        return width / (this.viewport.end - this.viewport.start);
-    }
+    // ==================== NAVIGATION ====================
 
     private zoom(factor: number): void {
         const center = (this.viewport.start + this.viewport.end) / 2;
         const span = (this.viewport.end - this.viewport.start) * factor;
 
-        this.viewport.start = Math.floor(center - span / 2);
-        this.viewport.end = Math.ceil(center + span / 2);
+        // Limit zoom range
+        const minSpan = 10;
+        const maxSpan = this.data ? (this.data.end - this.data.start) * 10 : 100000;
+        const clampedSpan = Math.max(minSpan, Math.min(maxSpan, span));
+
+        this.viewport.start = Math.floor(center - clampedSpan / 2);
+        this.viewport.end = Math.ceil(center + clampedSpan / 2);
 
         this.render();
         this.scheduleContextUpdate();
@@ -463,6 +896,16 @@ class BAMCPViewer {
         this.render();
         this.scheduleContextUpdate();
     }
+
+    private jumpTo(position: number): void {
+        const span = this.viewport.end - this.viewport.start;
+        this.viewport.start = position - span / 2;
+        this.viewport.end = position + span / 2;
+        this.render();
+        this.scheduleContextUpdate();
+    }
+
+    // ==================== TOOLTIP ====================
 
     private showTooltip(e: MouseEvent): void {
         if (!this.data) return;
@@ -485,12 +928,17 @@ class BAMCPViewer {
         );
 
         if (read) {
+            const mapqColor = read.mapping_quality >= 30 ? '#22c55e' :
+                              read.mapping_quality >= 10 ? '#f97316' : '#ef4444';
+
             this.tooltip.innerHTML =
                 '<strong>' + read.name + '</strong><br>' +
-                'Position: ' + read.position + '-' + read.end_position + '<br>' +
-                'MAPQ: ' + read.mapping_quality + '<br>' +
-                'CIGAR: ' + read.cigar + '<br>' +
-                'Strand: ' + (read.is_reverse ? 'Reverse' : 'Forward');
+                'Position: ' + read.position.toLocaleString() + '-' + read.end_position.toLocaleString() + '<br>' +
+                'MAPQ: <span style="color:' + mapqColor + '">' + read.mapping_quality + '</span><br>' +
+                'CIGAR: <code>' + read.cigar + '</code><br>' +
+                'Strand: ' + (read.is_reverse ? '← Reverse' : '→ Forward') + '<br>' +
+                'Length: ' + read.sequence.length + ' bp';
+
             this.tooltip.style.display = 'block';
             this.tooltip.style.left = (e.clientX + 10) + 'px';
             this.tooltip.style.top = (e.clientY + 10) + 'px';
@@ -499,18 +947,21 @@ class BAMCPViewer {
         }
     }
 
+    // ==================== VARIANT TABLE ====================
+
     private renderVariantTable(): void {
         if (!this.data) return;
 
         this.variantTable.innerHTML = this.data.variants.map((v) => {
+            const vafColor = v.vaf >= 0.4 ? '#22c55e' : v.vaf >= 0.2 ? '#f97316' : '#ef4444';
             return '<tr data-pos="' + v.position + '" ' +
                 'data-ref="' + v.ref + '" data-alt="' + v.alt + '" ' +
                 'data-vaf="' + v.vaf + '" data-depth="' + v.depth + '" ' +
                 'data-contig="' + v.contig + '">' +
-                '<td>' + v.contig + ':' + v.position + '</td>' +
-                '<td>' + v.ref + '</td>' +
-                '<td style="color: ' + (BASE_COLORS[v.alt] || '#333') + '">' + v.alt + '</td>' +
-                '<td>' + (v.vaf * 100).toFixed(1) + '%</td>' +
+                '<td>' + v.contig + ':' + v.position.toLocaleString() + '</td>' +
+                '<td style="font-family:monospace">' + v.ref + '</td>' +
+                '<td style="color:' + (BASE_COLORS[v.alt] || '#333') + ';font-family:monospace;font-weight:bold">' + v.alt + '</td>' +
+                '<td style="color:' + vafColor + '">' + (v.vaf * 100).toFixed(1) + '%</td>' +
                 '<td>' + v.depth + '</td>' +
                 '</tr>';
         }).join('');
@@ -521,7 +972,6 @@ class BAMCPViewer {
                 const pos = parseInt(el.dataset.pos!);
                 this.jumpTo(pos);
 
-                // Send variant explanation request via App SDK
                 const variant: Variant = {
                     contig: el.dataset.contig!,
                     position: pos,
@@ -533,14 +983,6 @@ class BAMCPViewer {
                 this.sendVariantMessage(variant);
             });
         });
-    }
-
-    private jumpTo(position: number): void {
-        const span = this.viewport.end - this.viewport.start;
-        this.viewport.start = position - span / 2;
-        this.viewport.end = position + span / 2;
-        this.render();
-        this.scheduleContextUpdate();
     }
 }
 

@@ -87,6 +87,7 @@ class TestGetViewerHtml:
         html = get_viewer_html()
         # Check that we don't have src= pointing to http/https URLs
         import re
+
         external_scripts = re.findall(r'<script[^>]+src=["\']https?://', html)
         assert len(external_scripts) == 0, f"Found external script sources: {external_scripts}"
 

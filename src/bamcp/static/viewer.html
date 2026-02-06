@@ -38,6 +38,20 @@
         #toolbar button:hover { background: #357abd; }
         #toolbar button.active { background: #2d6ba5; }
 
+        /* Color Legend */
+        #legend {
+            display: flex;
+            gap: 16px;
+            padding: 4px 8px;
+            background: #f9fafb;
+            border-bottom: 1px solid #e5e7eb;
+            font-size: 11px;
+        }
+        .legend-section { display: flex; align-items: center; gap: 8px; }
+        .legend-title { font-weight: 600; color: #6b7280; }
+        .legend-item { display: flex; align-items: center; gap: 3px; }
+        .color-box { width: 12px; height: 12px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.1); }
+
         #viewer {
             flex: 1;
             position: relative;
@@ -45,24 +59,29 @@
             min-height: 200px;
         }
 
-        #coverage-canvas, #reads-canvas {
+        /* Track canvases - positioned absolutely within viewer */
+        #ruler-canvas, #reference-canvas, #coverage-canvas, #reads-canvas {
             position: absolute;
             left: 0;
         }
 
-        #coverage-canvas { top: 0; height: 60px; }
-        #reads-canvas { top: 60px; }
+        #ruler-canvas { top: 0; height: 20px; background: #fafafa; }
+        #reference-canvas { top: 20px; height: 24px; background: #fff; }
+        #coverage-canvas { top: 44px; height: 60px; }
+        #reads-canvas { top: 104px; }
 
         #tooltip {
             position: absolute;
-            background: rgba(0, 0, 0, 0.8);
+            background: rgba(0, 0, 0, 0.85);
             color: white;
-            padding: 8px;
+            padding: 8px 10px;
             border-radius: 4px;
             font-size: 12px;
             pointer-events: none;
             display: none;
             max-width: 300px;
+            z-index: 100;
+            line-height: 1.4;
         }
 
         #variant-panel {
@@ -96,7 +115,29 @@
             <button id="zoom-out">&minus;</button>
             <button id="fullscreen-btn" title="Toggle fullscreen">&#x26F6;</button>
         </div>
+        <div id="legend">
+            <span class="legend-section">
+                <span class="legend-title">Bases:</span>
+                <span class="legend-item"><span class="color-box" style="background:#22c55e"></span>A</span>
+                <span class="legend-item"><span class="color-box" style="background:#ef4444"></span>T</span>
+                <span class="legend-item"><span class="color-box" style="background:#f97316"></span>G</span>
+                <span class="legend-item"><span class="color-box" style="background:#3b82f6"></span>C</span>
+            </span>
+            <span class="legend-section">
+                <span class="legend-title">Reads:</span>
+                <span class="legend-item"><span class="color-box" style="background:#60a5fa"></span>Forward</span>
+                <span class="legend-item"><span class="color-box" style="background:#a78bfa"></span>Reverse</span>
+            </span>
+            <span class="legend-section">
+                <span class="legend-title">Features:</span>
+                <span class="legend-item"><span class="color-box" style="background:#f59e0b; opacity:0.5"></span>Soft-clip</span>
+                <span class="legend-item"><span class="color-box" style="background:#9333ea"></span>Insertion</span>
+                <span class="legend-item"><span class="color-box" style="background:#1f2937"></span>Deletion</span>
+            </span>
+        </div>
         <div id="viewer">
+            <canvas id="ruler-canvas"></canvas>
+            <canvas id="reference-canvas"></canvas>
             <canvas id="coverage-canvas"></canvas>
             <canvas id="reads-canvas"></canvas>
             <div id="tooltip"></div>

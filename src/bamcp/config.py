@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -35,11 +36,21 @@ class BAMCPConfig:
     gnomad_dataset: str = "gnomad_r4"
     genome_build: str = "GRCh38"
 
+    # Cache settings
+    cache_dir: str = ""  # Set in from_env()
+    cache_ttl: int = 86400  # 24 hours
+
     @classmethod
     def from_env(cls) -> "BAMCPConfig":
         """Create config from environment variables."""
         scopes_raw = os.environ.get("BAMCP_REQUIRED_SCOPES", "")
         scopes = [s.strip() for s in scopes_raw.split(",") if s.strip()] or None
+
+        # Set up cache directory
+        cache_dir = os.environ.get("BAMCP_CACHE_DIR") or str(Path.home() / ".cache" / "bamcp")
+
+        # Ensure cache directory exists
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
         return cls(
             reference=os.environ.get("BAMCP_REFERENCE"),
@@ -63,4 +74,6 @@ class BAMCPConfig:
             gnomad_enabled=os.environ.get("BAMCP_GNOMAD_ENABLED", "true").lower() == "true",
             gnomad_dataset=os.environ.get("BAMCP_GNOMAD_DATASET", "gnomad_r4"),
             genome_build=os.environ.get("BAMCP_GENOME_BUILD", "GRCh38"),
+            cache_dir=cache_dir,
+            cache_ttl=int(os.environ.get("BAMCP_CACHE_TTL", "86400")),
         )

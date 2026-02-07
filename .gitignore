@@ -209,3 +209,9 @@ __marimo__/
 # BAMCP Viewer build artifacts
 src/bamcp/static/node_modules/
 src/bamcp/static/dist/
+
+# Genomic data files (BAM indexes downloaded from remote URLs)
+*.bam
+*.bai
+*.cram
+*.crai

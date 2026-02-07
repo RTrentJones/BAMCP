@@ -11,6 +11,7 @@ FastMCP server (server.py)
   ├── gnomAD client (gnomad.py) → gnomAD GraphQL API
   ├── UI resource (resources.py → static/viewer.html)
   ├── Auth provider (auth.py) — opt-in OAuth 2.0
+  ├── Cache manager (cache.py) — remote BAM index caching
   └── Config (config.py) — all settings from env vars
 ```
 
@@ -28,6 +29,8 @@ FastMCP server (server.py)
 | `resources.py` | `get_viewer_html()` — serves bundled HTML from `static/viewer.html` |
 | `config.py` | `BAMCPConfig` dataclass with `from_env()` classmethod |
 | `auth.py` | `BAMCPAuthProvider` (in-memory OAuth 2.0), `build_auth_settings()` |
+| `cache.py` | `BAMIndexCache` — file-based cache for remote BAM index files with TTL |
+| `reference.py` | Genome build registry (`GENOME_BUILDS`), `detect_genome_build()`, `get_public_reference_url()` |
 
 ## Registered Tools
 
@@ -36,12 +39,13 @@ FastMCP server (server.py)
 | `browse_region` | View aligned reads with interactive visualization (returns UI + data) |
 | `get_variants` | Detect and return variants in a region |
 | `get_coverage` | Calculate depth of coverage statistics |
-| `list_contigs` | List chromosomes/contigs in BAM/CRAM header |
+| `list_contigs` | List chromosomes/contigs and detect genome build (GRCh37/GRCh38) with suggested public reference URL |
 | `jump_to` | Jump to a specific genomic position with configurable window |
 | `visualize_region` | MCP Apps-aware region visualization (same as browse_region, App-centric name) |
 | `get_region_summary` | Text-only region summary for LLM reasoning (no UI) |
 | `lookup_clinvar` | Look up variant in ClinVar for clinical significance and conditions |
 | `lookup_gnomad` | Look up variant in gnomAD for population allele frequency data |
+| `cleanup_cache` | Clean up expired BAM index cache files |
 
 ## Transport Modes
 
@@ -69,6 +73,23 @@ Transport: `BAMCP_TRANSPORT`, `BAMCP_HOST`, `BAMCP_PORT`
 Auth: `BAMCP_AUTH_ENABLED`, `BAMCP_ISSUER_URL`, `BAMCP_RESOURCE_SERVER_URL`, `BAMCP_REQUIRED_SCOPES`, `BAMCP_TOKEN_EXPIRY`
 
 External databases: `BAMCP_NCBI_API_KEY`, `BAMCP_CLINVAR_ENABLED`, `BAMCP_GNOMAD_ENABLED`, `BAMCP_GNOMAD_DATASET`, `BAMCP_GENOME_BUILD`
+
+Cache: `BAMCP_CACHE_DIR` (default: `~/.cache/bamcp`), `BAMCP_CACHE_TTL` (default: 86400 seconds / 24 hours)
+
+## Genome Build Detection
+
+The `list_contigs` tool auto-detects genome build (GRCh37 or GRCh38) by comparing chr1 length:
+
+| Build | chr1 Length | Notes |
+|-------|-------------|-------|
+| GRCh38 | 248,956,422 | Current human reference |
+| GRCh37 | 249,250,621 | Older build, still common |
+
+When no local reference is configured, the tool suggests public UCSC FASTA URLs that pysam can use remotely:
+- GRCh38: `https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz`
+- GRCh37: `https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz`
+
+**Workflow**: Call `list_contigs` first on new BAM files to detect the build, then use the suggested reference URL or ask the user for their preferred reference.
 
 ## Commands
 
@@ -108,13 +129,13 @@ make clean        # remove build artifacts
 ```
 src/bamcp/
   __init__.py, __main__.py, server.py, tools.py, parsers.py,
-  clinvar.py, gnomad.py,
+  clinvar.py, gnomad.py, cache.py, reference.py,
   resources.py, config.py, auth.py, static/viewer.html
 tests/
   conftest.py, create_fixtures.py, fixtures/,
   test_parsers.py, test_tools.py, test_server.py, test_config.py,
   test_auth.py, test_resources.py, test_integration.py, test_docker.py,
-  test_clinvar.py, test_gnomad.py,
+  test_clinvar.py, test_gnomad.py, test_cache.py, test_reference.py,
   e2e/conftest.py, e2e/test_viewer_e2e.py
 docker/
   entrypoint.sh, healthcheck.py

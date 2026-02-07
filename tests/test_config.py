@@ -138,3 +138,44 @@ class TestBAMCPConfig:
         config = BAMCPConfig.from_env()
         assert config.auth_enabled is False
         assert config.required_scopes is None
+
+    @pytest.mark.unit
+    def test_from_env_cache_defaults(self, monkeypatch, tmp_path):
+        """Cache should use default directory and TTL."""
+        for key in list(os.environ.keys()):
+            if key.startswith("BAMCP_"):
+                monkeypatch.delenv(key, raising=False)
+
+        config = BAMCPConfig.from_env()
+        assert config.cache_dir.endswith(".cache/bamcp")
+        assert config.cache_ttl == 86400  # 24 hours
+
+    @pytest.mark.unit
+    def test_from_env_cache_custom(self, monkeypatch, tmp_path):
+        """Cache should respect custom env vars."""
+        for key in list(os.environ.keys()):
+            if key.startswith("BAMCP_"):
+                monkeypatch.delenv(key, raising=False)
+
+        cache_dir = str(tmp_path / "custom_cache")
+        monkeypatch.setenv("BAMCP_CACHE_DIR", cache_dir)
+        monkeypatch.setenv("BAMCP_CACHE_TTL", "3600")
+
+        config = BAMCPConfig.from_env()
+        assert config.cache_dir == cache_dir
+        assert config.cache_ttl == 3600
+
+    @pytest.mark.unit
+    def test_from_env_creates_cache_directory(self, monkeypatch, tmp_path):
+        """from_env should create the cache directory if it doesn't exist."""
+        for key in list(os.environ.keys()):
+            if key.startswith("BAMCP_"):
+                monkeypatch.delenv(key, raising=False)
+
+        cache_dir = tmp_path / "new_cache"
+        assert not cache_dir.exists()
+
+        monkeypatch.setenv("BAMCP_CACHE_DIR", str(cache_dir))
+        BAMCPConfig.from_env()
+
+        assert cache_dir.exists()

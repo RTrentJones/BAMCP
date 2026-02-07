@@ -9,12 +9,37 @@ from typing import Any
 
 import pysam
 
+from .cache import BAMIndexCache
 from .clinvar import ClinVarClient
 from .config import BAMCPConfig
 from .gnomad import GnomadClient
 from .parsers import RegionData, fetch_region
 
 logger = logging.getLogger(__name__)
+
+# Module-level cache instance for session consistency
+_cache_instance: BAMIndexCache | None = None
+
+
+def get_cache(config: BAMCPConfig) -> BAMIndexCache:
+    """Get or create the session cache instance.
+
+    Uses a module-level singleton to maintain consistent session ID
+    across all tool calls within a server process.
+    """
+    global _cache_instance
+    if _cache_instance is None:
+        _cache_instance = BAMIndexCache(config.cache_dir, config.cache_ttl)
+    return _cache_instance
+
+
+def _get_index_path(file_path: str, config: BAMCPConfig) -> str | None:
+    """Get cache path for a remote BAM's index file.
+
+    Returns None for local files (let pysam find the index normally).
+    """
+    cache = get_cache(config)
+    return cache.get_index_path(file_path)
 
 
 async def handle_browse_region(args: dict[str, Any], config: BAMCPConfig) -> dict:
@@ -33,6 +58,7 @@ async def handle_browse_region(args: dict[str, Any], config: BAMCPConfig) -> dic
         reference,
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
+        index_filename=_get_index_path(file_path, config),
     )
 
     payload = _serialize_region_data(data)
@@ -60,6 +86,7 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         reference,
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
+        index_filename=_get_index_path(file_path, config),
     )
 
     variants = [v for v in data.variants if v["vaf"] >= min_vaf and v["depth"] >= min_depth]
@@ -83,6 +110,7 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
         reference,
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
+        index_filename=_get_index_path(file_path, config),
     )
 
     coverage = data.coverage
@@ -100,12 +128,19 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
 
 
 async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict:
-    """List contigs in a BAM/CRAM file."""
+    """List contigs in a BAM/CRAM file and detect genome build."""
+    from .reference import detect_genome_build, get_public_reference_url
+
     file_path = args["file_path"]
     reference = args.get("reference", config.reference)
 
     mode: str = "rc" if file_path.endswith(".cram") else "rb"
-    samfile = pysam.AlignmentFile(file_path, mode, reference_filename=reference)  # type: ignore[arg-type]
+    samfile = pysam.AlignmentFile(
+        file_path,
+        mode,
+        reference_filename=reference,
+        index_filename=_get_index_path(file_path, config),
+    )  # type: ignore[arg-type]
 
     contigs = [
         {"name": name, "length": length}
@@ -114,7 +149,29 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
 
     samfile.close()
 
-    return {"content": [{"type": "text", "text": json.dumps({"contigs": contigs})}]}
+    # Detect genome build from contig lengths
+    build_info = detect_genome_build(contigs)
+
+    # Suggest public reference URL if no reference configured
+    suggested_url = None
+    if not config.reference and build_info["build"] != "unknown":
+        suggested_url = get_public_reference_url(build_info["build"])
+
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "contigs": contigs,
+                        "genome_build": build_info,
+                        "reference_configured": config.reference is not None,
+                        "suggested_reference_url": suggested_url,
+                    }
+                ),
+            }
+        ]
+    }
 
 
 async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
@@ -139,6 +196,7 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
         reference,
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
+        index_filename=_get_index_path(file_path, config),
     )
 
     payload = _serialize_region_data(data)
@@ -169,6 +227,7 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
         reference,
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
+        index_filename=_get_index_path(file_path, config),
     )
 
     payload = _serialize_region_data(data)
@@ -198,6 +257,7 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
         reference,
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
+        index_filename=_get_index_path(file_path, config),
     )
 
     coverage = data.coverage

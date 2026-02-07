@@ -10,6 +10,7 @@ from mcp.types import CallToolResult, TextContent
 from .config import BAMCPConfig
 from .resources import get_viewer_html
 from .tools import (
+    get_cache,
     handle_browse_region,
     handle_get_coverage,
     handle_get_region_summary,
@@ -117,7 +118,13 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         result = await handle_get_coverage(args, config)
         return str(result["content"][0]["text"])
 
-    @mcp.tool(description="List chromosomes/contigs in a BAM/CRAM file header")
+    @mcp.tool(
+        description=(
+            "List chromosomes/contigs in a BAM/CRAM file and detect genome build. "
+            "Use this first on new BAM files to determine whether reference is GRCh37 or GRCh38. "
+            "Returns detected build, confidence, and suggested public reference URL if available."
+        ),
+    )
     async def list_contigs(
         file_path: str,
         reference: str | None = None,
@@ -228,6 +235,22 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             config,
         )
         return str(result["content"][0]["text"])
+
+    # -- Cache Management Tool -----------------------------------------------
+
+    @mcp.tool(description="Clean up this session's BAM index cache files")
+    async def cleanup_cache() -> str:
+        """Remove cached index files downloaded during this session.
+
+        Each session stores its cache files in an isolated subdirectory,
+        so this only affects the current session's files.
+
+        Returns:
+            Summary of cleanup action.
+        """
+        cache = get_cache(config)
+        removed = cache.cleanup_session()
+        return f"Removed {removed} cached index files from session {cache.session_id}"
 
     # -- Resources -----------------------------------------------------------
 

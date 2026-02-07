@@ -73,6 +73,7 @@ def fetch_region(
     reference_path: str | None = None,
     max_reads: int = 10000,
     min_mapq: int = 0,
+    index_filename: str | None = None,
 ) -> RegionData:
     """
     Fetch reads from a BAM/CRAM file for a given region.
@@ -83,6 +84,8 @@ def fetch_region(
         reference_path: Path to reference FASTA (required for CRAM).
         max_reads: Maximum reads to return (stop after this many).
         min_mapq: Minimum mapping quality filter.
+        index_filename: Path to index file (.bai/.crai). Used to redirect
+            remote BAM index downloads to a cache directory.
 
     Returns:
         RegionData with reads, coverage, and detected variants.
@@ -90,7 +93,12 @@ def fetch_region(
     contig, start, end = parse_region(region)
 
     mode: str = "rc" if bam_path.endswith(".cram") else "rb"
-    samfile = pysam.AlignmentFile(bam_path, mode, reference_filename=reference_path)  # type: ignore[arg-type]
+    samfile = pysam.AlignmentFile(
+        bam_path,
+        mode,
+        reference_filename=reference_path,
+        index_filename=index_filename,
+    )  # type: ignore[arg-type]
 
     reads: list[AlignedRead] = []
     coverage = [0] * (end - start)

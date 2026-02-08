@@ -667,5 +667,7 @@ class TestLowConfidenceThresholds:
 
         result = _serialize_region_data(data)
 
-        assert result["variant_evidence"]["101:C>T"]["strand_bias"] <= LOW_CONFIDENCE_MAX_STRAND_BIAS
+        assert (
+            result["variant_evidence"]["101:C>T"]["strand_bias"] <= LOW_CONFIDENCE_MAX_STRAND_BIAS
+        )
         assert result["variants"][0]["is_low_confidence"] is False

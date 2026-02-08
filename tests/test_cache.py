@@ -235,7 +235,6 @@ class TestBAMIndexCache:
         # Current session should not be removed even with TTL=0
         assert cache.cache_dir.exists()
 
-
     @pytest.mark.unit
     def test_default_ttl_uses_shared_constant(self, tmp_path: Path):
         """Default cache TTL should come from shared constants."""

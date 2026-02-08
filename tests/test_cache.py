@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from bamcp.cache import BAMIndexCache
+from bamcp.constants import CACHE_SESSION_ID_LENGTH, DEFAULT_CACHE_TTL_SECONDS
 
 
 class TestBAMIndexCache:
@@ -26,7 +27,7 @@ class TestBAMIndexCache:
         cache = BAMIndexCache(str(tmp_path))
 
         assert cache.session_id is not None
-        assert len(cache.session_id) == 8  # First 8 chars of UUID
+        assert len(cache.session_id) == CACHE_SESSION_ID_LENGTH
 
     @pytest.mark.unit
     def test_get_index_path_local_file_returns_none(self, tmp_path: Path):
@@ -233,3 +234,9 @@ class TestBAMIndexCache:
 
         # Current session should not be removed even with TTL=0
         assert cache.cache_dir.exists()
+
+    @pytest.mark.unit
+    def test_default_ttl_uses_shared_constant(self, tmp_path: Path):
+        """Default cache TTL should come from shared constants."""
+        cache = BAMIndexCache(str(tmp_path))
+        assert cache.ttl_seconds == DEFAULT_CACHE_TTL_SECONDS

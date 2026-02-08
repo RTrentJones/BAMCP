@@ -12,6 +12,16 @@ import pysam
 from .cache import BAMIndexCache
 from .clinvar import ClinVarClient
 from .config import BAMCPConfig
+from .constants import (
+    DEFAULT_CONTIG,
+    LOW_CONFIDENCE_MAX_STRAND_BIAS,
+    LOW_CONFIDENCE_MIN_DEPTH,
+    LOW_CONFIDENCE_MIN_MEAN_QUALITY,
+    LOW_CONFIDENCE_MIN_VAF,
+    POSITION_HISTOGRAM_BINS,
+    QUALITY_HISTOGRAM_BINS,
+    VIEWER_RESOURCE_URI,
+)
 from .gnomad import GnomadClient
 from .parsers import AlignedRead, RegionData, fetch_region
 
@@ -68,7 +78,7 @@ async def handle_browse_region(args: dict[str, Any], config: BAMCPConfig) -> dic
     return {
         "content": [{"type": "text", "text": json.dumps(payload)}],
         "_meta": {
-            "ui/resourceUri": "ui://bamcp/viewer",
+            "ui/resourceUri": VIEWER_RESOURCE_URI,
             "ui/init": payload,
         },
     }
@@ -188,7 +198,7 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """
     file_path = args["file_path"]
     position = args["position"]
-    contig = args.get("contig", "chr1")
+    contig = args.get("contig", DEFAULT_CONTIG)
     window = args.get("window", config.default_window)
     reference = args.get("reference", config.reference)
 
@@ -212,7 +222,7 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     return {
         "content": [{"type": "text", "text": json.dumps(payload)}],
         "_meta": {
-            "ui/resourceUri": "ui://bamcp/viewer",
+            "ui/resourceUri": VIEWER_RESOURCE_URI,
             "ui/init": payload,
         },
     }
@@ -245,7 +255,7 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     return {
         "content": [{"type": "text", "text": json.dumps(payload)}],
         "_meta": {
-            "ui/resourceUri": "ui://bamcp/viewer",
+            "ui/resourceUri": VIEWER_RESOURCE_URI,
             "ui/init": payload,
         },
     }
@@ -535,8 +545,8 @@ def _compute_variant_evidence_from_index(
         "strand_bias": round(strand_bias, 3),
         "mean_quality": round(sum(qualities) / len(qualities), 1) if qualities else 0,
         "median_quality": sorted(qualities)[len(qualities) // 2] if qualities else 0,
-        "quality_histogram": _bin_histogram(qualities, [0, 10, 20, 30, 40]),
-        "position_histogram": _bin_histogram(read_positions, [0, 25, 50, 75, 100, 150]),
+        "quality_histogram": _bin_histogram(qualities, QUALITY_HISTOGRAM_BINS),
+        "position_histogram": _bin_histogram(read_positions, POSITION_HISTOGRAM_BINS),
     }
 
 
@@ -584,10 +594,10 @@ def _serialize_region_data(data: RegionData, compact: bool = False) -> dict:
         # - Mean base quality < 20
         # - Strand bias > 90% (0.9)
         is_low_confidence = (
-            variant["depth"] < 10
-            or variant["vaf"] < 0.10
-            or evidence["mean_quality"] < 20
-            or evidence["strand_bias"] > 0.9
+            variant["depth"] < LOW_CONFIDENCE_MIN_DEPTH
+            or variant["vaf"] < LOW_CONFIDENCE_MIN_VAF
+            or evidence["mean_quality"] < LOW_CONFIDENCE_MIN_MEAN_QUALITY
+            or evidence["strand_bias"] > LOW_CONFIDENCE_MAX_STRAND_BIAS
         )
         enhanced["is_low_confidence"] = is_low_confidence
 

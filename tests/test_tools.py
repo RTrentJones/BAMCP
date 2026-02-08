@@ -5,6 +5,14 @@ import json
 import pytest
 
 from bamcp.config import BAMCPConfig
+from bamcp.constants import (
+    DEFAULT_CONTIG,
+    LOW_CONFIDENCE_MAX_STRAND_BIAS,
+    LOW_CONFIDENCE_MIN_DEPTH,
+    LOW_CONFIDENCE_MIN_MEAN_QUALITY,
+    LOW_CONFIDENCE_MIN_VAF,
+    VIEWER_RESOURCE_URI,
+)
 from bamcp.parsers import AlignedRead, RegionData
 from bamcp.tools import (
     _serialize_region_data,
@@ -122,7 +130,7 @@ class TestHandleBrowseRegion:
         )
         assert "content" in result
         assert "_meta" in result
-        assert result["_meta"]["ui/resourceUri"] == "ui://bamcp/viewer"
+        assert result["_meta"]["ui/resourceUri"] == VIEWER_RESOURCE_URI
         assert "ui/init" in result["_meta"]
 
     @pytest.mark.unit
@@ -314,7 +322,7 @@ class TestHandleJumpTo:
             {"file_path": small_bam_path, "position": 150, "contig": "chr1"}, config
         )
         assert "_meta" in result
-        assert result["_meta"]["ui/resourceUri"] == "ui://bamcp/viewer"
+        assert result["_meta"]["ui/resourceUri"] == VIEWER_RESOURCE_URI
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -323,7 +331,7 @@ class TestHandleJumpTo:
             {"file_path": small_bam_path, "position": 150, "contig": "chr1"}, config
         )
         payload = json.loads(result["content"][0]["text"])
-        assert payload["contig"] == "chr1"
+        assert payload["contig"] == DEFAULT_CONTIG
         # Position 150 should be within the returned start-end range
         assert payload["start"] <= 150 <= payload["end"]
 
@@ -352,10 +360,10 @@ class TestHandleJumpTo:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_default_contig(self, small_bam_path, config):
-        """Without contig arg, defaults to chr1."""
+        """Without contig arg, defaults to configured constant."""
         result = await handle_jump_to({"file_path": small_bam_path, "position": 150}, config)
         payload = json.loads(result["content"][0]["text"])
-        assert payload["contig"] == "chr1"
+        assert payload["contig"] == DEFAULT_CONTIG
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -380,7 +388,7 @@ class TestHandleVisualizeRegion:
         )
         assert "content" in result
         assert "_meta" in result
-        assert result["_meta"]["ui/resourceUri"] == "ui://bamcp/viewer"
+        assert result["_meta"]["ui/resourceUri"] == VIEWER_RESOURCE_URI
         assert "ui/init" in result["_meta"]
 
     @pytest.mark.unit
@@ -573,3 +581,93 @@ class TestHandleLookupGnomad:
         payload = json.loads(result["content"][0]["text"])
         assert payload["found"] is False
         assert "disclaimer" in payload
+
+
+class TestLowConfidenceThresholds:
+    """Tests for low-confidence variant labeling thresholds."""
+
+    @pytest.mark.unit
+    def test_marks_low_confidence_using_shared_thresholds(self):
+        read = AlignedRead(
+            name="r1",
+            sequence="ACGT",
+            qualities=[LOW_CONFIDENCE_MIN_MEAN_QUALITY - 1] * 4,
+            cigar="4M",
+            position=100,
+            end_position=104,
+            mapping_quality=60,
+            is_reverse=False,
+            mismatches=[{"pos": 101, "ref": "C", "alt": "T"}],
+        )
+        data = RegionData(
+            contig="chr1",
+            start=100,
+            end=120,
+            reads=[read],
+            coverage=[1] * 20,
+            variants=[
+                {
+                    "contig": "chr1",
+                    "position": 101,
+                    "ref": "C",
+                    "alt": "T",
+                    "vaf": LOW_CONFIDENCE_MIN_VAF - 0.01,
+                    "depth": LOW_CONFIDENCE_MIN_DEPTH - 1,
+                    "alt_count": 1,
+                }
+            ],
+        )
+
+        result = _serialize_region_data(data)
+
+        assert result["variants"][0]["is_low_confidence"] is True
+
+    @pytest.mark.unit
+    def test_keeps_high_confidence_when_all_thresholds_pass(self):
+        forward_read = AlignedRead(
+            name="r1",
+            sequence="ACGT",
+            qualities=[LOW_CONFIDENCE_MIN_MEAN_QUALITY + 10] * 4,
+            cigar="4M",
+            position=100,
+            end_position=104,
+            mapping_quality=60,
+            is_reverse=False,
+            mismatches=[{"pos": 101, "ref": "C", "alt": "T"}],
+        )
+        reverse_read = AlignedRead(
+            name="r2",
+            sequence="ACGT",
+            qualities=[LOW_CONFIDENCE_MIN_MEAN_QUALITY + 10] * 4,
+            cigar="4M",
+            position=100,
+            end_position=104,
+            mapping_quality=60,
+            is_reverse=True,
+            mismatches=[{"pos": 101, "ref": "C", "alt": "T"}],
+        )
+        data = RegionData(
+            contig="chr1",
+            start=100,
+            end=120,
+            reads=[forward_read, reverse_read],
+            coverage=[2] * 20,
+            variants=[
+                {
+                    "contig": "chr1",
+                    "position": 101,
+                    "ref": "C",
+                    "alt": "T",
+                    "vaf": LOW_CONFIDENCE_MIN_VAF + 0.1,
+                    "depth": LOW_CONFIDENCE_MIN_DEPTH + 10,
+                    "alt_count": 2,
+                }
+            ],
+        )
+
+        result = _serialize_region_data(data)
+
+        assert (
+            result["variant_evidence"]["101:C>T"]["strand_bias"] <= LOW_CONFIDENCE_MAX_STRAND_BIAS
+        )
+        assert result["variants"][0]["is_low_confidence"] is False

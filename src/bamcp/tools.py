@@ -13,7 +13,7 @@ from .cache import BAMIndexCache
 from .clinvar import ClinVarClient
 from .config import BAMCPConfig
 from .gnomad import GnomadClient
-from .parsers import RegionData, fetch_region
+from .parsers import AlignedRead, RegionData, fetch_region
 
 logger = logging.getLogger(__name__)
 
@@ -391,6 +391,130 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 
 
+def _get_query_position(read: AlignedRead, ref_pos: int) -> int | None:
+    """Get the query (read) position corresponding to a reference position.
+
+    Uses CIGAR string to map reference coordinates to read coordinates.
+    Returns None if the reference position is not aligned to the read.
+    """
+    import re
+
+    cigar_ops = re.findall(r"(\d+)([MIDNSHP=X])", read.cigar)
+    query_pos = 0
+    ref_cursor = read.position
+
+    for length_str, op in cigar_ops:
+        length = int(length_str)
+
+        if op in ("M", "=", "X"):
+            # Match/mismatch: consumes both query and reference
+            if ref_cursor <= ref_pos < ref_cursor + length:
+                return query_pos + (ref_pos - ref_cursor)
+            query_pos += length
+            ref_cursor += length
+        elif op == "I":
+            # Insertion: consumes query only
+            query_pos += length
+        elif op in ("D", "N"):
+            # Deletion/skip: consumes reference only
+            if ref_cursor <= ref_pos < ref_cursor + length:
+                return None  # Position is in a deletion
+            ref_cursor += length
+        elif op == "S":
+            # Soft clip: consumes query only
+            query_pos += length
+        elif op == "H":
+            # Hard clip: consumes nothing
+            pass
+
+    return None
+
+
+def _bin_histogram(values: list[int], bins: list[int]) -> dict[str, int]:
+    """Bin values into a histogram with labeled ranges.
+
+    Args:
+        values: List of integer values to bin.
+        bins: List of bin edges (e.g., [0, 10, 20, 30, 40] creates bins 0-9, 10-19, etc.)
+
+    Returns:
+        Dict mapping bin labels to counts (e.g., {"0-9": 5, "10-19": 3, ...}).
+    """
+    histogram: dict[str, int] = {}
+
+    for i in range(len(bins)):
+        label = f"{bins[i]}+" if i == len(bins) - 1 else f"{bins[i]}-{bins[i + 1] - 1}"
+        histogram[label] = 0
+
+    for val in values:
+        for i in range(len(bins)):
+            if i == len(bins) - 1:
+                # Last bin: all values >= bins[i]
+                if val >= bins[i]:
+                    label = f"{bins[i]}+"
+                    histogram[label] = histogram.get(label, 0) + 1
+                    break
+            elif bins[i] <= val < bins[i + 1]:
+                label = f"{bins[i]}-{bins[i + 1] - 1}"
+                histogram[label] = histogram.get(label, 0) + 1
+                break
+
+    return histogram
+
+
+def _compute_variant_evidence(reads: list[AlignedRead], variant: dict) -> dict:
+    """Compute strand bias, quality, and position-in-read stats for a variant.
+
+    Args:
+        reads: List of aligned reads in the region.
+        variant: Variant dict with 'position' and 'alt' keys.
+
+    Returns:
+        Dict with forward_count, reverse_count, strand_bias, quality stats,
+        and histograms for quality and read position.
+    """
+    pos = variant["position"]
+    alt = variant["alt"]
+
+    forward_count = 0
+    reverse_count = 0
+    qualities: list[int] = []
+    read_positions: list[int] = []
+
+    for read in reads:
+        for mm in read.mismatches:
+            if mm["pos"] == pos and mm["alt"] == alt:
+                if read.is_reverse:
+                    reverse_count += 1
+                else:
+                    forward_count += 1
+
+                # Get quality at mismatch position
+                query_pos = _get_query_position(read, mm["pos"])
+                if query_pos is not None and query_pos < len(read.qualities):
+                    qualities.append(read.qualities[query_pos])
+                    # Position from 5' end (adjusted for reverse reads)
+                    if read.is_reverse:
+                        pos_from_5prime = len(read.sequence) - query_pos - 1
+                    else:
+                        pos_from_5prime = query_pos
+                    read_positions.append(pos_from_5prime)
+
+    # Strand bias: 0 = balanced, 1 = all one strand
+    total = forward_count + reverse_count
+    strand_bias = abs(forward_count - reverse_count) / max(total, 1)
+
+    return {
+        "forward_count": forward_count,
+        "reverse_count": reverse_count,
+        "strand_bias": round(strand_bias, 3),
+        "mean_quality": round(sum(qualities) / len(qualities), 1) if qualities else 0,
+        "median_quality": sorted(qualities)[len(qualities) // 2] if qualities else 0,
+        "quality_histogram": _bin_histogram(qualities, [0, 10, 20, 30, 40]),
+        "position_histogram": _bin_histogram(read_positions, [0, 25, 50, 75, 100, 150]),
+    }
+
+
 def _serialize_region_data(data: RegionData) -> dict:
     """Serialize RegionData to a JSON-compatible dict."""
     # Aggregate mismatches by position for LLM summary
@@ -404,6 +528,12 @@ def _serialize_region_data(data: RegionData) -> dict:
         {"pos": k[0], "ref": k[1], "alt": k[2], "count": v}
         for k, v in sorted(mismatch_counts.items())
     ]
+
+    # Compute variant evidence for each called variant
+    variant_evidence = {}
+    for variant in data.variants:
+        key = f"{variant['position']}:{variant['ref']}>{variant['alt']}"
+        variant_evidence[key] = _compute_variant_evidence(data.reads, variant)
 
     return {
         "contig": data.contig,
@@ -420,6 +550,11 @@ def _serialize_region_data(data: RegionData) -> dict:
                 "mapping_quality": r.mapping_quality,
                 "is_reverse": r.is_reverse,
                 "mismatches": r.mismatches,
+                "mate_position": r.mate_position,
+                "mate_contig": r.mate_contig,
+                "insert_size": r.insert_size,
+                "is_proper_pair": r.is_proper_pair,
+                "is_read1": r.is_read1,
             }
             for r in data.reads
         ],
@@ -427,4 +562,5 @@ def _serialize_region_data(data: RegionData) -> dict:
         "variants": data.variants,
         "reference_sequence": data.reference_sequence,
         "mismatch_summary": mismatch_summary,
+        "variant_evidence": variant_evidence,
     }

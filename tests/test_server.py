@@ -44,6 +44,7 @@ class TestCreateServer:
             "get_region_summary",
             "lookup_clinvar",
             "lookup_gnomad",
+            "search_gene",
             "cleanup_cache",
         }
         assert expected == tool_names

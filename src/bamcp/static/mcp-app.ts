@@ -24,6 +24,12 @@ interface Read {
     mapping_quality: number;
     is_reverse: boolean;
     mismatches: Array<{ pos: number; ref: string; alt: string }>;
+    // Paired-end fields
+    mate_position?: number | null;
+    mate_contig?: string | null;
+    insert_size?: number | null;
+    is_proper_pair?: boolean;
+    is_read1?: boolean;
 }
 
 interface Variant {
@@ -35,6 +41,16 @@ interface Variant {
     depth: number;
 }
 
+interface VariantEvidence {
+    forward_count: number;
+    reverse_count: number;
+    strand_bias: number;
+    mean_quality: number;
+    median_quality: number;
+    quality_histogram: Record<string, number>;
+    position_histogram: Record<string, number>;
+}
+
 interface RegionData {
     contig: string;
     start: number;
@@ -43,6 +59,7 @@ interface RegionData {
     coverage: number[];
     variants: Variant[];
     reference_sequence?: string;
+    variant_evidence?: Record<string, VariantEvidence>;
 }
 
 interface ToolResultParams {
@@ -89,6 +106,10 @@ class BAMCPViewer {
     // DOM elements
     private tooltip: HTMLElement;
     private variantTable: HTMLElement;
+    private evidencePanel: HTMLElement;
+    private strandChart: HTMLCanvasElement;
+    private qualityChart: HTMLCanvasElement;
+    private positionChart: HTMLCanvasElement;
 
     // State
     private data: RegionData | null = null;
@@ -113,6 +134,10 @@ class BAMCPViewer {
 
         this.tooltip = document.getElementById('tooltip')!;
         this.variantTable = document.getElementById('variant-table')!;
+        this.evidencePanel = document.getElementById('evidence-panel')!;
+        this.strandChart = document.getElementById('strand-chart') as HTMLCanvasElement;
+        this.qualityChart = document.getElementById('quality-chart') as HTMLCanvasElement;
+        this.positionChart = document.getElementById('position-chart') as HTMLCanvasElement;
 
         this.setupEventListeners();
         this.setupKeyboardShortcuts();
@@ -148,6 +173,24 @@ class BAMCPViewer {
         document.getElementById('go-btn')!.addEventListener('click', () => {
             const region = (document.getElementById('region-input') as HTMLInputElement).value;
             this.requestRegion(region);
+        });
+
+        // Gene search
+        document.getElementById('gene-btn')!.addEventListener('click', () => {
+            const gene = (document.getElementById('gene-input') as HTMLInputElement).value.trim();
+            if (gene) this.searchGene(gene);
+        });
+
+        (document.getElementById('gene-input') as HTMLInputElement).addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const gene = (e.target as HTMLInputElement).value.trim();
+                if (gene) this.searchGene(gene);
+            }
+        });
+
+        // Evidence panel close button
+        document.getElementById('close-evidence')!.addEventListener('click', () => {
+            this.evidencePanel.classList.remove('visible');
         });
 
         document.getElementById('zoom-in')!.addEventListener('click', () => this.zoom(0.5));
@@ -262,6 +305,22 @@ class BAMCPViewer {
                 return;
             } catch (e) {
                 console.warn('sendMessage failed:', e);
+            }
+        }
+    }
+
+    private async searchGene(symbol: string): Promise<void> {
+        if (this.app) {
+            try {
+                await this.app.sendMessage({
+                    role: 'user',
+                    content: [{
+                        type: 'text',
+                        text: `Search for gene ${symbol} and show the alignment at that location.`
+                    }]
+                });
+            } catch (e) {
+                console.warn('Gene search failed:', e);
             }
         }
     }
@@ -753,6 +812,24 @@ class BAMCPViewer {
 
         const scale = this.getScale();
 
+        // First pass: render mate connections (so they appear behind reads)
+        if (scale >= 0.5) {
+            ctx.save();
+            for (let rowIdx = 0; rowIdx < this.packedRows.length; rowIdx++) {
+                const y = rowIdx * (READ_HEIGHT + READ_GAP);
+                if (y > height) break;
+
+                for (const read of this.packedRows[rowIdx]) {
+                    // Only render connection from read1 to avoid duplicates
+                    if (read.is_read1) {
+                        this.renderMateConnection(ctx, read, y, scale);
+                    }
+                }
+            }
+            ctx.restore();
+        }
+
+        // Second pass: render reads on top
         for (let rowIdx = 0; rowIdx < this.packedRows.length; rowIdx++) {
             const y = rowIdx * (READ_HEIGHT + READ_GAP);
 
@@ -1138,10 +1215,208 @@ class BAMCPViewer {
                     depth: parseInt(el.dataset.depth!)
                 };
                 this.sendVariantMessage(variant);
+                this.renderEvidencePanel(variant);
             });
         });
     }
+
+    // ==================== EVIDENCE PANEL ====================
+
+    private renderEvidencePanel(variant: Variant): void {
+        const key = `${variant.position}:${variant.ref}>${variant.alt}`;
+        const evidence = this.data?.variant_evidence?.[key];
+
+        if (!evidence) {
+            this.evidencePanel.classList.remove('visible');
+            return;
+        }
+
+        // Update title
+        document.getElementById('evidence-title')!.textContent =
+            `${variant.contig}:${variant.position.toLocaleString()} ${variant.ref}>${variant.alt}`;
+
+        // Render strand bias chart
+        this.renderStrandChart(evidence);
+
+        // Render quality histogram
+        this.renderQualityChart(evidence);
+
+        // Render position histogram
+        this.renderPositionChart(evidence);
+
+        // Update stats and warnings
+        const strandRatio = document.getElementById('strand-ratio')!;
+        strandRatio.textContent = `${evidence.forward_count}F / ${evidence.reverse_count}R`;
+
+        const strandWarning = document.getElementById('strand-warning')!;
+        strandWarning.style.display = evidence.strand_bias > 0.8 ? 'block' : 'none';
+
+        const qualityStats = document.getElementById('quality-stats')!;
+        qualityStats.textContent = `Mean: Q${evidence.mean_quality} | Median: Q${evidence.median_quality}`;
+
+        // Show the panel
+        this.evidencePanel.classList.add('visible');
+    }
+
+    private renderStrandChart(evidence: VariantEvidence): void {
+        const ctx = this.strandChart.getContext('2d')!;
+        const width = this.strandChart.width;
+        const height = this.strandChart.height;
+
+        ctx.clearRect(0, 0, width, height);
+
+        const total = evidence.forward_count + evidence.reverse_count;
+        if (total === 0) return;
+
+        const forwardWidth = (evidence.forward_count / total) * width;
+
+        // Forward (blue/green)
+        ctx.fillStyle = '#60a5fa';
+        ctx.fillRect(0, 0, forwardWidth, height);
+
+        // Reverse (purple)
+        ctx.fillStyle = '#a78bfa';
+        ctx.fillRect(forwardWidth, 0, width - forwardWidth, height);
+
+        // Border
+        ctx.strokeStyle = '#e5e7eb';
+        ctx.strokeRect(0, 0, width, height);
+    }
+
+    private renderQualityChart(evidence: VariantEvidence): void {
+        const ctx = this.qualityChart.getContext('2d')!;
+        const width = this.qualityChart.width;
+        const height = this.qualityChart.height;
+
+        ctx.clearRect(0, 0, width, height);
+
+        const histogram = evidence.quality_histogram;
+        const bins = Object.keys(histogram);
+        const values = Object.values(histogram);
+        const maxVal = Math.max(...values, 1);
+
+        const barWidth = width / bins.length - 4;
+        const barGap = 4;
+
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'center';
+
+        bins.forEach((bin, i) => {
+            const x = i * (barWidth + barGap) + 2;
+            const barHeight = (histogram[bin] / maxVal) * (height - 16);
+
+            // Color based on quality range
+            if (bin.startsWith('30') || bin.startsWith('40')) {
+                ctx.fillStyle = '#22c55e';  // Green for high quality
+            } else if (bin.startsWith('20')) {
+                ctx.fillStyle = '#f97316';  // Orange for medium
+            } else {
+                ctx.fillStyle = '#ef4444';  // Red for low
+            }
+
+            ctx.fillRect(x, height - 12 - barHeight, barWidth, barHeight);
+
+            // Label
+            ctx.fillStyle = '#6b7280';
+            ctx.fillText(bin.split('-')[0], x + barWidth / 2, height - 2);
+        });
+    }
+
+    private renderPositionChart(evidence: VariantEvidence): void {
+        const ctx = this.positionChart.getContext('2d')!;
+        const width = this.positionChart.width;
+        const height = this.positionChart.height;
+
+        ctx.clearRect(0, 0, width, height);
+
+        const histogram = evidence.position_histogram;
+        const bins = Object.keys(histogram);
+        const values = Object.values(histogram);
+        const maxVal = Math.max(...values, 1);
+
+        const barWidth = width / bins.length - 4;
+        const barGap = 4;
+
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'center';
+
+        bins.forEach((bin, i) => {
+            const x = i * (barWidth + barGap) + 2;
+            const barHeight = (histogram[bin] / maxVal) * (height - 16);
+
+            // Color: edges are more suspicious (potential sequencing artifacts)
+            const binStart = parseInt(bin.split('-')[0]);
+            if (binStart < 25 || binStart >= 100) {
+                ctx.fillStyle = '#f97316';  // Orange for edge positions
+            } else {
+                ctx.fillStyle = '#3b82f6';  // Blue for middle
+            }
+
+            ctx.fillRect(x, height - 12 - barHeight, barWidth, barHeight);
+
+            // Label
+            ctx.fillStyle = '#6b7280';
+            ctx.fillText(bin.split('-')[0], x + barWidth / 2, height - 2);
+        });
+    }
+
+    // ==================== PAIRED-END VISUALIZATION ====================
+
+    private isInsertSizeAnomalous(read: Read): boolean {
+        if (!read.insert_size) return false;
+        const absSize = Math.abs(read.insert_size);
+        // Typical insert size is 200-800bp for WGS
+        return absSize < 100 || absSize > 1000;
+    }
+
+    private renderMateConnection(
+        ctx: CanvasRenderingContext2D,
+        read: Read,
+        y: number,
+        scale: number
+    ): void {
+        // Skip if no mate info or mate on different contig
+        if (read.mate_position == null || read.mate_contig !== this.data?.contig) return;
+
+        const matePos = read.mate_position;
+
+        // Skip if mate is outside viewport
+        if (matePos < this.viewport.start - 1000 || matePos > this.viewport.end + 1000) return;
+
+        // Calculate connection points
+        const x1 = read.is_read1
+            ? (read.end_position - this.viewport.start) * scale
+            : (read.position - this.viewport.start) * scale;
+        const x2 = (matePos - this.viewport.start) * scale;
+
+        // Only draw if both ends are somewhat visible
+        if (x1 < -50 && x2 < -50) return;
+        if (x1 > this.readsCanvas.width + 50 && x2 > this.readsCanvas.width + 50) return;
+
+        const midY = y + READ_HEIGHT / 2;
+        const arcHeight = Math.min(15, Math.abs(x2 - x1) / 6);
+
+        // Color based on proper pair status and insert size
+        if (!read.is_proper_pair) {
+            ctx.strokeStyle = '#ef4444';  // Red for improper pairs
+            ctx.setLineDash([3, 2]);
+        } else if (this.isInsertSizeAnomalous(read)) {
+            ctx.strokeStyle = '#f97316';  // Orange for anomalous insert size
+            ctx.setLineDash([2, 2]);
+        } else {
+            ctx.strokeStyle = 'rgba(156, 163, 175, 0.5)';  // Gray for normal
+            ctx.setLineDash([]);
+        }
+
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x1, midY);
+        ctx.quadraticCurveTo((x1 + x2) / 2, midY - arcHeight, x2, midY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
 }
+
 
 // Initialize the viewer
 new BAMCPViewer();

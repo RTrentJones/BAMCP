@@ -56,6 +56,12 @@ class TestBrowseRegionIntegration:
             "mapping_quality",
             "is_reverse",
             "mismatches",
+            # Paired-end fields
+            "mate_position",
+            "mate_contig",
+            "insert_size",
+            "is_proper_pair",
+            "is_read1",
         }
         assert set(read.keys()) == required_fields
         assert isinstance(read["qualities"], list)

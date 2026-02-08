@@ -19,6 +19,13 @@ class AlignedRead:
     is_reverse: bool
     mismatches: list[dict] = field(default_factory=list)
 
+    # Paired-end fields
+    mate_position: int | None = None
+    mate_contig: str | None = None
+    insert_size: int | None = None
+    is_proper_pair: bool = False
+    is_read1: bool = False
+
 
 @dataclass
 class RegionData:
@@ -152,6 +159,22 @@ def fetch_region(
             if 0 <= idx < len(coverage):
                 coverage[idx] += 1
 
+        # Extract paired-end information
+        mate_position = None
+        mate_contig = None
+        insert_size = None
+        is_proper_pair = False
+        is_read1 = False
+
+        if read.is_paired:
+            is_proper_pair = read.is_proper_pair
+            is_read1 = read.is_read1
+            insert_size = read.template_length if read.template_length != 0 else None
+
+            if read.next_reference_id >= 0:
+                mate_position = read.next_reference_start
+                mate_contig = samfile.get_reference_name(read.next_reference_id)
+
         reads.append(
             AlignedRead(
                 name=read.query_name or "",
@@ -163,6 +186,11 @@ def fetch_region(
                 mapping_quality=read.mapping_quality,
                 is_reverse=read.is_reverse,
                 mismatches=mismatches,
+                mate_position=mate_position,
+                mate_contig=mate_contig,
+                insert_size=insert_size,
+                is_proper_pair=is_proper_pair,
+                is_read1=is_read1,
             )
         )
 

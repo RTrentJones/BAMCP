@@ -236,6 +236,39 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         )
         return str(result["content"][0]["text"])
 
+    @mcp.tool(
+        description=(
+            "Search for a gene by symbol and return its genomic coordinates. "
+            "Use this to navigate to a gene's location by name (e.g., BRCA1, TP53)."
+        ),
+    )
+    async def search_gene(symbol: str) -> str:
+        import json
+
+        from .genes import GeneClient
+
+        client = GeneClient(
+            api_key=config.ncbi_api_key,
+            genome_build=config.genome_build,
+        )
+
+        try:
+            result = await client.search(symbol)
+        finally:
+            await client.close()
+
+        if result is None:
+            return json.dumps({"error": f"Gene '{symbol}' not found"})
+
+        return json.dumps(
+            {
+                "symbol": result.symbol,
+                "name": result.name,
+                "region": f"{result.chrom}:{result.start}-{result.end}",
+                "strand": result.strand,
+            }
+        )
+
     # -- Cache Management Tool -----------------------------------------------
 
     @mcp.tool(description="Clean up this session's BAM index cache files")

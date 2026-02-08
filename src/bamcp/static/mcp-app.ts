@@ -644,11 +644,27 @@ class BAMCPViewer {
         const lowCoverageThreshold = 10;
 
         // Draw low coverage warning regions first (background)
-        ctx.fillStyle = 'rgba(239, 68, 68, 0.15)';
         for (let i = 0; i < coverage.length; i++) {
             if (coverage[i] < lowCoverageThreshold) {
                 const x = (this.data.start + i - this.viewport.start) * scale;
-                ctx.fillRect(x, 0, Math.max(scale, 1), height);
+                if (coverage[i] === 0) {
+                    // Zero coverage: bright red stripe
+                    ctx.fillStyle = 'rgba(239, 68, 68, 0.4)';
+                    ctx.fillRect(x, 0, Math.max(scale, 1), height);
+                    // Hatching pattern for emphasis
+                    ctx.strokeStyle = 'rgba(239, 68, 68, 0.6)';
+                    ctx.lineWidth = 1;
+                    for (let ly = 0; ly < height; ly += 4) {
+                        ctx.beginPath();
+                        ctx.moveTo(x, ly);
+                        ctx.lineTo(x + Math.max(scale, 2), ly + 4);
+                        ctx.stroke();
+                    }
+                } else {
+                    // Low but non-zero coverage: lighter warning
+                    ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
+                    ctx.fillRect(x, 0, Math.max(scale, 1), height);
+                }
             }
         }
 
@@ -846,17 +862,32 @@ class BAMCPViewer {
                                     ctx.textAlign = 'start';
                                 }
                             } else {
-                                // Low zoom: bright tick marker for visibility
-                                ctx.fillStyle = BASE_COLORS[mm.alt] || '#ef4444';
+                                // Low zoom: prominent vertical line with circle marker
+                                const markerColor = BASE_COLORS[mm.alt] || '#ef4444';
+
+                                // Colored rectangle on the read
+                                ctx.fillStyle = markerColor;
                                 ctx.fillRect(mx, y, Math.max(2, scale), READ_HEIGHT);
 
-                                // Triangle indicator above read
+                                // Vertical line extending above read
+                                ctx.strokeStyle = markerColor;
+                                ctx.lineWidth = 2;
                                 ctx.beginPath();
-                                ctx.moveTo(mx, y - 2);
-                                ctx.lineTo(mx + 3, y);
-                                ctx.lineTo(mx - 1, y);
-                                ctx.closePath();
+                                ctx.moveTo(mx + 1, y - 8);
+                                ctx.lineTo(mx + 1, y + READ_HEIGHT);
+                                ctx.stroke();
+                                ctx.lineWidth = 1;
+
+                                // Circle marker at top
+                                ctx.fillStyle = markerColor;
+                                ctx.beginPath();
+                                ctx.arc(mx + 1, y - 5, 3, 0, Math.PI * 2);
                                 ctx.fill();
+
+                                // White outline for visibility
+                                ctx.strokeStyle = '#fff';
+                                ctx.lineWidth = 1;
+                                ctx.stroke();
                             }
                         }
                     }
@@ -988,7 +1019,7 @@ class BAMCPViewer {
         const mapqColor = read.mapping_quality >= 30 ? '#22c55e' :
                           read.mapping_quality >= 10 ? '#f97316' : '#ef4444';
 
-        this.tooltip.innerHTML =
+        let html =
             '<strong>' + read.name + '</strong><br>' +
             'Position: ' + read.position.toLocaleString() + '-' + read.end_position.toLocaleString() + '<br>' +
             'MAPQ: <span style="color:' + mapqColor + '">' + read.mapping_quality + '</span><br>' +
@@ -996,6 +1027,19 @@ class BAMCPViewer {
             'Strand: ' + (read.is_reverse ? '← Reverse' : '→ Forward') + '<br>' +
             'Length: ' + read.sequence.length + ' bp';
 
+        // Add mismatches if present
+        if (read.mismatches && read.mismatches.length > 0) {
+            const mmList = read.mismatches
+                .slice(0, 5)  // Limit to first 5
+                .map(mm => `${mm.pos.toLocaleString()} <span style="color:${BASE_COLORS[mm.ref] || '#888'}">${mm.ref}</span>→<span style="color:${BASE_COLORS[mm.alt] || '#ef4444'}">${mm.alt}</span>`)
+                .join(', ');
+            html += '<br><span style="color:#f97316">Mismatches:</span> ' + mmList;
+            if (read.mismatches.length > 5) {
+                html += ` <span style="color:#9ca3af">+${read.mismatches.length - 5} more</span>`;
+            }
+        }
+
+        this.tooltip.innerHTML = html;
         this.tooltip.style.display = 'block';
         this.tooltip.style.left = (clientX + 10) + 'px';
         this.tooltip.style.top = (clientY + 10) + 'px';

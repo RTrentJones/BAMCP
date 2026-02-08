@@ -58,7 +58,7 @@ def get_public_reference_url(build: str) -> str | None:
     """
     canonical = normalize_build_name(build)
     if canonical and canonical in GENOME_BUILDS:
-        return GENOME_BUILDS[canonical]["fasta_url"]
+        return str(GENOME_BUILDS[canonical]["fasta_url"])
     return None
 
 

@@ -134,13 +134,13 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
     file_path = args["file_path"]
     reference = args.get("reference", config.reference)
 
-    mode: str = "rc" if file_path.endswith(".cram") else "rb"
+    mode = "rc" if file_path.endswith(".cram") else "rb"
     samfile = pysam.AlignmentFile(
         file_path,
-        mode,
+        mode,  # type: ignore[arg-type]
         reference_filename=reference,
         index_filename=_get_index_path(file_path, config),
-    )  # type: ignore[arg-type]
+    )
 
     contigs = [
         {"name": name, "length": length}

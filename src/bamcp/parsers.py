@@ -92,13 +92,13 @@ def fetch_region(
     """
     contig, start, end = parse_region(region)
 
-    mode: str = "rc" if bam_path.endswith(".cram") else "rb"
+    mode = "rc" if bam_path.endswith(".cram") else "rb"
     samfile = pysam.AlignmentFile(
         bam_path,
-        mode,
+        mode,  # type: ignore[arg-type]
         reference_filename=reference_path,
         index_filename=index_filename,
-    )  # type: ignore[arg-type]
+    )
 
     reads: list[AlignedRead] = []
     coverage = [0] * (end - start)

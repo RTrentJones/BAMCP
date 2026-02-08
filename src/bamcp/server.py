@@ -63,7 +63,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             merged.update(experimental_capabilities)
         return _original_create_init_opts(notification_options, merged)
 
-    mcp._mcp_server.create_initialization_options = _patched_create_init_opts
+    mcp._mcp_server.create_initialization_options = _patched_create_init_opts  # type: ignore[method-assign]
 
     # -- Tools ---------------------------------------------------------------
     # Thin wrappers delegate to the existing handlers in tools.py.

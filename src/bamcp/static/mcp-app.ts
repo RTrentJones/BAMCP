@@ -131,6 +131,17 @@ class BAMCPViewer {
     private selectedVariantIndex: number = -1;
     private expandedVariantIndex: number = -1;
 
+    // Mate pair index: maps read name to its mate (if both are loaded)
+    private mateIndex: Map<string, Read> = new Map();
+    // Maps read to its row index for Y position lookup
+    private readRowIndex: Map<Read, number> = new Map();
+    // Currently hovered read (for pair highlighting) - only set after delay or click
+    private hoveredRead: Read | null = null;
+    // Pending hover (waiting for delay)
+    private pendingHoverRead: Read | null = null;
+    private hoverDelayTimer: ReturnType<typeof setTimeout> | null = null;
+    private static readonly HOVER_DELAY_MS = 600;  // Delay before hover effect kicks in
+
     constructor() {
         // Initialize canvases
         this.rulerCanvas = document.getElementById('ruler-canvas') as HTMLCanvasElement;
@@ -245,13 +256,47 @@ class BAMCPViewer {
 
         window.addEventListener('mouseup', () => isDragging = false);
 
-        // Tooltips
+        // Tooltips and hover state for mate highlighting (with delay)
         this.readsCanvas.addEventListener('mousemove', (e) => {
             if (isDragging) return;
+            const read = this.getReadAtPosition(e);
+
+            // Tooltip shows immediately (no delay)
             this.showTooltip(e);
+
+            // Pair highlighting has a delay to avoid flickering
+            if (read !== this.pendingHoverRead) {
+                this.pendingHoverRead = read;
+
+                // Clear existing timer
+                if (this.hoverDelayTimer) {
+                    clearTimeout(this.hoverDelayTimer);
+                    this.hoverDelayTimer = null;
+                }
+
+                // Start new timer for hover effect
+                if (read !== this.hoveredRead) {
+                    this.hoverDelayTimer = setTimeout(() => {
+                        this.hoveredRead = this.pendingHoverRead;
+                        this.renderReads();
+                    }, BAMCPViewer.HOVER_DELAY_MS);
+                }
+            }
         });
 
         this.readsCanvas.addEventListener('mouseout', () => {
+            // Clear pending hover timer
+            if (this.hoverDelayTimer) {
+                clearTimeout(this.hoverDelayTimer);
+                this.hoverDelayTimer = null;
+            }
+            this.pendingHoverRead = null;
+
+            // Clear active hover state
+            if (this.hoveredRead) {
+                this.hoveredRead = null;
+                this.renderReads();  // Clear mate highlighting
+            }
             if (!this.lockedTooltip) {
                 this.tooltip.style.display = 'none';
             }
@@ -420,10 +465,39 @@ class BAMCPViewer {
         (document.getElementById('region-input') as HTMLInputElement).value =
             data.contig + ':' + data.start + '-' + data.end;
 
+        this.buildMateIndex();
         this.packReads();
         this.renderVariantTable();
         this.resize();
         this.scheduleContextUpdate();
+    }
+
+    private buildMateIndex(): void {
+        // Build index of read pairs where both mates are loaded
+        this.mateIndex.clear();
+        if (!this.data) return;
+
+        // Group reads by name
+        const readsByName = new Map<string, Read[]>();
+        for (const read of this.data.reads) {
+            const existing = readsByName.get(read.name);
+            if (existing) {
+                existing.push(read);
+            } else {
+                readsByName.set(read.name, [read]);
+            }
+        }
+
+        // For pairs where both are loaded, create mate links
+        for (const [name, reads] of readsByName) {
+            if (reads.length === 2) {
+                // Both mates present - link them by position
+                const [r1, r2] = reads;
+                // Use position as key to find mate
+                this.mateIndex.set(`${name}:${r1.position}`, r2);
+                this.mateIndex.set(`${name}:${r2.position}`, r1);
+            }
+        }
     }
 
     private scheduleContextUpdate(): void {
@@ -505,10 +579,40 @@ class BAMCPViewer {
         if (!this.data) return;
 
         this.packedRows = [];
+        this.readRowIndex.clear();
         const rowEnds: number[] = [];
 
-        const sortedReads = [...this.data.reads].sort((a, b) => a.position - b.position);
+        // Group reads by name to identify pairs
+        const readsByName = new Map<string, Read[]>();
+        for (const read of this.data.reads) {
+            const existing = readsByName.get(read.name);
+            if (existing) existing.push(read);
+            else readsByName.set(read.name, [read]);
+        }
 
+        // Sort reads by position, but process pairs together
+        const sortedReads: Read[] = [];
+        const processed = new Set<string>();
+        const allReads = [...this.data.reads].sort((a, b) => a.position - b.position);
+
+        for (const read of allReads) {
+            const key = `${read.name}:${read.position}`;
+            if (processed.has(key)) continue;
+
+            const pair = readsByName.get(read.name);
+            if (pair && pair.length === 2) {
+                // Add both reads of the pair consecutively so they pack on same row
+                const [r1, r2] = pair.sort((a, b) => a.position - b.position);
+                sortedReads.push(r1, r2);
+                processed.add(`${r1.name}:${r1.position}`);
+                processed.add(`${r2.name}:${r2.position}`);
+            } else {
+                sortedReads.push(read);
+                processed.add(key);
+            }
+        }
+
+        // Pack into rows (pairs will tend to land on same row due to consecutive processing)
         for (const read of sortedReads) {
             let rowIndex = rowEnds.findIndex(end => end < read.position);
 
@@ -521,6 +625,7 @@ class BAMCPViewer {
             }
 
             this.packedRows[rowIndex].push(read);
+            this.readRowIndex.set(read, rowIndex);
         }
     }
 
@@ -900,6 +1005,32 @@ class BAMCPViewer {
 
         const scale = this.getScale();
 
+        // Determine which reads should show connectors:
+        // 1. Hovered pair (if any)
+        // 2. SV candidates (abnormal pairs)
+        const showConnectorFor = new Set<Read>();
+
+        if (this.hoveredRead) {
+            showConnectorFor.add(this.hoveredRead);
+            const mateKey = `${this.hoveredRead.name}:${this.hoveredRead.position}`;
+            const mate = this.mateIndex.get(mateKey);
+            if (mate) showConnectorFor.add(mate);
+        }
+
+        // Add all SV candidates
+        for (const row of this.packedRows) {
+            for (const read of row) {
+                if (this.isSVCandidate(read)) {
+                    showConnectorFor.add(read);
+                }
+            }
+        }
+
+        // Get the mate of hovered read (for highlighting)
+        const hoveredMate = this.hoveredRead
+            ? this.mateIndex.get(`${this.hoveredRead.name}:${this.hoveredRead.position}`)
+            : null;
+
         // First pass: render mate connections (so they appear behind reads)
         if (scale >= 0.5) {
             ctx.save();
@@ -909,22 +1040,27 @@ class BAMCPViewer {
 
                 for (const read of this.packedRows[rowIdx]) {
                     // Only render connection from read1 to avoid duplicates
-                    if (read.is_read1) {
-                        this.renderMateConnection(ctx, read, y, scale);
+                    if (read.is_read1 && showConnectorFor.has(read)) {
+                        const isHovered = read === this.hoveredRead || read === hoveredMate;
+                        this.renderMateConnection(ctx, read, y, scale, isHovered);
                     }
                 }
             }
             ctx.restore();
         }
 
-        // Second pass: render reads on top
+        // Second pass: render reads on top (dim non-hovered when hovering)
         for (let rowIdx = 0; rowIdx < this.packedRows.length; rowIdx++) {
             const y = rowIdx * (READ_HEIGHT + READ_GAP);
 
             if (y > height) break;
 
             for (const read of this.packedRows[rowIdx]) {
-                this.renderRead(ctx, read, y, scale, zoomLevel);
+                const isDimmed = this.hoveredRead !== null &&
+                    read !== this.hoveredRead &&
+                    read !== hoveredMate;
+
+                this.renderRead(ctx, read, y, scale, zoomLevel, isDimmed);
             }
         }
     }
@@ -934,15 +1070,18 @@ class BAMCPViewer {
         read: Read,
         y: number,
         scale: number,
-        zoomLevel: 'nucleotide' | 'read'
+        zoomLevel: 'nucleotide' | 'read',
+        isDimmed: boolean = false
     ): void {
         const x = (read.position - this.viewport.start) * scale;
         const w = (read.end_position - read.position) * scale;
 
         if (x + w < 0 || x > this.readsCanvas.width) return;
 
-        // MAPQ-based opacity (MAPQ 60 = full, 0 = 30%)
-        const opacity = 0.3 + Math.min(read.mapping_quality, 60) / 60 * 0.7;
+        // MAPQ-based opacity (MAPQ 60 = full, 0 = 30%), with dimming factor
+        // When dimmed, reduce opacity to 15% for clear visual distinction
+        const baseDim = isDimmed ? 0.15 : 1.0;
+        const opacity = (0.3 + Math.min(read.mapping_quality, 60) / 60 * 0.7) * baseDim;
 
         // Parse CIGAR for indels
         const cigarOps = this.parseCigar(read.cigar);
@@ -1605,57 +1744,206 @@ class BAMCPViewer {
 
     // ==================== PAIRED-END VISUALIZATION ====================
 
-    private isInsertSizeAnomalous(read: Read): boolean {
-        if (!read.insert_size) return false;
+    private getInsertSizeStatus(read: Read): 'normal' | 'short' | 'long' {
+        if (!read.insert_size) return 'normal';
         const absSize = Math.abs(read.insert_size);
-        // Typical insert size is 200-800bp for WGS
-        return absSize < 100 || absSize > 1000;
+        // Normal range: 150-500bp for typical WGS libraries
+        if (absSize < 100) return 'short';
+        if (absSize > 1000) return 'long';
+        return 'normal';
+    }
+
+    private isSVCandidate(read: Read): boolean {
+        // Chimeric (mate on different chromosome)
+        if (read.mate_contig && read.mate_contig !== this.data?.contig) return true;
+
+        // Short insert (<100bp) or long insert (>1kb)
+        if (read.insert_size) {
+            const absSize = Math.abs(read.insert_size);
+            if (absSize < 100 || absSize > 1000) return true;
+        }
+
+        // Improper pair flag
+        if (read.is_proper_pair === false) return true;
+
+        return false;
     }
 
     private renderMateConnection(
         ctx: CanvasRenderingContext2D,
         read: Read,
         y: number,
-        scale: number
+        scale: number,
+        isHovered: boolean = false
     ): void {
-        // Skip if no mate info or mate on different contig
-        if (read.mate_position == null || read.mate_contig !== this.data?.contig) return;
+        // Skip if no mate info
+        if (read.mate_position == null) return;
 
-        const matePos = read.mate_position;
-
-        // Skip if mate is outside viewport
-        if (matePos < this.viewport.start - 1000 || matePos > this.viewport.end + 1000) return;
-
-        // Calculate connection points
-        const x1 = read.is_read1
-            ? (read.end_position - this.viewport.start) * scale
-            : (read.position - this.viewport.start) * scale;
-        const x2 = (matePos - this.viewport.start) * scale;
-
-        // Only draw if both ends are somewhat visible
-        if (x1 < -50 && x2 < -50) return;
-        if (x1 > this.readsCanvas.width + 50 && x2 > this.readsCanvas.width + 50) return;
-
+        const mateContig = read.mate_contig;
         const midY = y + READ_HEIGHT / 2;
-        const arcHeight = Math.min(15, Math.abs(x2 - x1) / 6);
+        const width = this.readsCanvas.width;
 
-        // Color based on proper pair status and insert size
-        if (!read.is_proper_pair) {
-            ctx.strokeStyle = '#ef4444';  // Red for improper pairs
-            ctx.setLineDash([3, 2]);
-        } else if (this.isInsertSizeAnomalous(read)) {
-            ctx.strokeStyle = '#f97316';  // Orange for anomalous insert size
+        // Calculate read's connection point (3' end)
+        const readConnectPos = read.is_read1 ? read.end_position : read.position;
+        const x1 = (readConnectPos - this.viewport.start) * scale;
+
+        // Skip if this read's connection point is completely off-screen
+        if (x1 < -50 || x1 > width + 50) return;
+
+        // Check if mate is actually loaded (not just that position is in viewport)
+        const mateKey = `${read.name}:${read.position}`;
+        const mate = this.mateIndex.get(mateKey);
+        const mateLoaded = mate !== undefined;
+
+        // Determine mate status
+        const isChimeric = mateContig !== this.data?.contig;
+        const insertStatus = this.getInsertSizeStatus(read);
+        const isImproperPair = read.is_proper_pair === false;
+
+        // Color scheme for SV candidates:
+        // - Red: insert >1kb (potential deletion)
+        // - Orange: insert <100bp or inter-chromosomal
+        // - Gray dashed: improper pair flag
+        // - Green: normal pair (only shown on hover)
+        const getConnectorStyle = (): { color: string; dash: number[] } => {
+            if (insertStatus === 'long') return { color: '#ef4444', dash: [] };           // Red
+            if (insertStatus === 'short' || isChimeric) return { color: '#f97316', dash: [] };  // Orange
+            if (isImproperPair) return { color: '#9ca3af', dash: [3, 3] };                // Gray dashed
+            return { color: '#22c55e', dash: [] };                                         // Green (normal)
+        };
+
+        const style = getConnectorStyle();
+        const color = style.color;
+        const isAbnormal = isChimeric || insertStatus !== 'normal' || isImproperPair;
+
+        if (isChimeric) {
+            // CHIMERIC: Draw trailing line with chromosome warning
+            ctx.strokeStyle = color;
             ctx.setLineDash([2, 2]);
-        } else {
-            ctx.strokeStyle = 'rgba(156, 163, 175, 0.5)';  // Gray for normal
-            ctx.setLineDash([]);
-        }
+            ctx.lineWidth = 1.5;
 
-        ctx.lineWidth = 1;
+            const mateDirection = read.is_read1 ? 1 : -1;
+            const trailLength = 25;
+
+            // Trailing line
+            ctx.beginPath();
+            ctx.moveTo(x1, midY);
+            ctx.lineTo(x1 + trailLength * mateDirection, midY);
+            ctx.stroke();
+
+            // Warning triangle with chr label
+            const triX = x1 + (trailLength + 4) * mateDirection;
+            ctx.fillStyle = color;
+            ctx.font = 'bold 8px monospace';
+            const label = `⚠ ${mateContig || '?'}`;
+            ctx.fillText(label, mateDirection > 0 ? triX : triX - ctx.measureText(label).width, midY + 3);
+
+            ctx.setLineDash([]);
+
+        } else if (mateLoaded) {
+            // BOTH READS LOADED: Draw curved arc to actual mate position
+            // Get mate's connection point (5' end for read2, 3' end for read1)
+            const mateConnectPos = read.is_read1 ? mate.position : mate.end_position;
+            const x2 = (mateConnectPos - this.viewport.start) * scale;
+
+            // Get mate's actual Y position from row index
+            const mateRowIdx = this.readRowIndex.get(mate);
+            if (mateRowIdx === undefined) {
+                // Mate not in index, show direction indicator
+                this.renderOffscreenMateIndicator(ctx, x1, midY, mateConnectPos, color, isAbnormal || isHovered, read);
+                return;
+            }
+            const mateY = mateRowIdx * (READ_HEIGHT + READ_GAP) + READ_HEIGHT / 2;
+
+            // Only draw if mate connection point is in viewport (X axis)
+            if (x2 < -50 || x2 > width + 50) {
+                // Mate loaded but X position off-screen - show direction indicator
+                this.renderOffscreenMateIndicator(ctx, x1, midY, mateConnectPos, color, isAbnormal || isHovered, read);
+                return;
+            }
+
+            ctx.strokeStyle = color;
+            ctx.setLineDash(style.dash);
+            ctx.lineWidth = isHovered ? 2 : (isAbnormal ? 1.5 : 1);
+
+            // Arc connects from this read's Y to mate's Y
+            const arcMidX = (x1 + x2) / 2;
+            const arcMidY = Math.min(midY, mateY);
+            const arcHeight = Math.min(18, Math.abs(x2 - x1) / 5 + Math.abs(mateY - midY) / 4);
+
+            ctx.beginPath();
+            ctx.moveTo(x1, midY);
+            ctx.quadraticCurveTo(arcMidX, arcMidY - arcHeight, x2, mateY);
+            ctx.stroke();
+
+            // Insert size label (only if arc is wide enough and reads on same or adjacent rows)
+            if (Math.abs(x2 - x1) > 60 && read.insert_size && Math.abs(mateY - midY) < 40) {
+                const labelX = arcMidX;
+                const labelY = arcMidY - arcHeight - 2;
+                const absSize = Math.abs(read.insert_size);
+                const sizeLabel = insertStatus === 'normal'
+                    ? `${absSize}bp ✓`
+                    : `⚠ ${absSize}bp`;
+
+                ctx.font = '8px monospace';
+                ctx.fillStyle = color;
+                ctx.textAlign = 'center';
+                ctx.fillText(sizeLabel, labelX, labelY);
+                ctx.textAlign = 'start';
+            }
+
+            ctx.setLineDash([]);
+
+        } else {
+            // MATE NOT LOADED: Show direction indicator toward mate position
+            const matePos = read.mate_position;
+            // Use the style color for SV candidates, gray for normal (shouldn't show for normal pairs in default view)
+            this.renderOffscreenMateIndicator(ctx, x1, midY, matePos, color, isAbnormal || isHovered, read);
+        }
+    }
+
+    private renderOffscreenMateIndicator(
+        ctx: CanvasRenderingContext2D,
+        x1: number,
+        midY: number,
+        matePos: number,
+        color: string,
+        showLabel: boolean,
+        read: Read
+    ): void {
+        ctx.strokeStyle = color;
+        ctx.setLineDash([4, 3]);
+        ctx.lineWidth = 1.5;
+
+        const mateDirection = matePos > this.viewport.end ? 1 : -1;
+        const trailLength = 20;
+
+        // Trailing dashed line
         ctx.beginPath();
         ctx.moveTo(x1, midY);
-        ctx.quadraticCurveTo((x1 + x2) / 2, midY - arcHeight, x2, midY);
+        ctx.lineTo(x1 + trailLength * mateDirection, midY);
         ctx.stroke();
+
+        // Arrow head
+        const arrowX = x1 + trailLength * mateDirection;
+        ctx.beginPath();
+        ctx.moveTo(arrowX, midY);
+        ctx.lineTo(arrowX - 4 * mateDirection, midY - 3);
+        ctx.moveTo(arrowX, midY);
+        ctx.lineTo(arrowX - 4 * mateDirection, midY + 3);
+        ctx.stroke();
+
+        // Insert size label (show for abnormal or when hovered)
+        if (showLabel && read.insert_size) {
+            ctx.font = '9px monospace';
+            ctx.fillStyle = color;
+            const absSize = Math.abs(read.insert_size);
+            const arrow = mateDirection > 0 ? '→' : '←';
+            const label = `${absSize}bp ${arrow}`;
+            const labelX = mateDirection > 0 ? arrowX + 4 : arrowX - ctx.measureText(label).width - 4;
+            ctx.fillText(label, labelX, midY - 4);
+        }
+
         ctx.setLineDash([]);
     }
 }

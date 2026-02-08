@@ -14,7 +14,7 @@ class BAMCPConfig:
     max_reads: int = 10000
     default_window: int = 500
     min_vaf: float = 0.1
-    min_depth: int = 10
+    min_depth: int = 3
     min_mapq: int = 0
 
     # Transport settings
@@ -62,7 +62,7 @@ class BAMCPConfig:
             max_reads=int(os.environ.get("BAMCP_MAX_READS", "10000")),
             default_window=int(os.environ.get("BAMCP_DEFAULT_WINDOW", "500")),
             min_vaf=float(os.environ.get("BAMCP_MIN_VAF", "0.1")),
-            min_depth=int(os.environ.get("BAMCP_MIN_DEPTH", "10")),
+            min_depth=int(os.environ.get("BAMCP_MIN_DEPTH", "3")),
             min_mapq=int(os.environ.get("BAMCP_MIN_MAPQ", "0")),
             transport=os.environ.get("BAMCP_TRANSPORT", "stdio"),
             host=os.environ.get("BAMCP_HOST", "0.0.0.0"),  # noqa: S104

@@ -18,7 +18,7 @@ class TestBAMCPConfig:
         assert config.max_reads == 10000
         assert config.default_window == 500
         assert config.min_vaf == 0.1
-        assert config.min_depth == 10
+        assert config.min_depth == 3
         assert config.min_mapq == 0
         assert config.transport == "stdio"
         assert config.host == "0.0.0.0"
@@ -57,7 +57,7 @@ class TestBAMCPConfig:
         assert config.max_reads == 10000
         assert config.default_window == 500
         assert config.min_vaf == 0.1
-        assert config.min_depth == 10
+        assert config.min_depth == 3
         assert config.min_mapq == 0
 
     @pytest.mark.unit

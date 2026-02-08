@@ -39,6 +39,11 @@ interface Variant {
     alt: string;
     vaf: number;
     depth: number;
+    // Enhanced fields from tools.py
+    strand_forward?: number;
+    strand_reverse?: number;
+    mean_quality?: number;
+    is_low_confidence?: boolean;
 }
 
 interface VariantEvidence {
@@ -120,6 +125,12 @@ class BAMCPViewer {
     private _contextUpdateTimer: ReturnType<typeof setTimeout> | null = null;
     private lockedTooltip: { read: Read; x: number; y: number } | null = null;
 
+    // Variant panel state
+    private variantFilter: 'high' | 'all' = 'high';
+    private variantSort: { column: string; direction: 'asc' | 'desc' } = { column: 'position', direction: 'asc' };
+    private selectedVariantIndex: number = -1;
+    private expandedVariantIndex: number = -1;
+
     constructor() {
         // Initialize canvases
         this.rulerCanvas = document.getElementById('ruler-canvas') as HTMLCanvasElement;
@@ -191,6 +202,22 @@ class BAMCPViewer {
         // Evidence panel close button
         document.getElementById('close-evidence')!.addEventListener('click', () => {
             this.evidencePanel.classList.remove('visible');
+        });
+
+        // Variant filter toggle
+        document.getElementById('filter-high')!.addEventListener('click', () => {
+            this.setVariantFilter('high');
+        });
+        document.getElementById('filter-all')!.addEventListener('click', () => {
+            this.setVariantFilter('all');
+        });
+
+        // Variant table header click for sorting
+        document.querySelectorAll('#variant-panel th.sortable').forEach(th => {
+            th.addEventListener('click', () => {
+                const column = (th as HTMLElement).dataset.sort!;
+                this.setVariantSort(column);
+            });
         });
 
         document.getElementById('zoom-in')!.addEventListener('click', () => this.zoom(0.5));
@@ -288,7 +315,68 @@ class BAMCPViewer {
                         e.preventDefault();
                     }
                     break;
+                // Variant navigation shortcuts
+                case 'n':
+                case 'N':
+                    this.navigateVariant(1);
+                    e.preventDefault();
+                    break;
+                case 'p':
+                case 'P':
+                    this.navigateVariant(-1);
+                    e.preventDefault();
+                    break;
+                case 'Enter':
+                    this.toggleVariantExpansion();
+                    e.preventDefault();
+                    break;
             }
+        });
+    }
+
+    private navigateVariant(direction: number): void {
+        const variants = this.getFilteredAndSortedVariants();
+        if (variants.length === 0) return;
+
+        let newIndex = this.selectedVariantIndex + direction;
+
+        // Wrap around
+        if (newIndex < 0) newIndex = variants.length - 1;
+        if (newIndex >= variants.length) newIndex = 0;
+
+        this.selectVariant(newIndex);
+
+        const variant = variants[newIndex];
+        if (variant) {
+            this.jumpTo(variant.position);
+            this.renderEvidencePanel(variant);
+
+            // Scroll the variant into view in the table
+            const row = this.variantTable.querySelector(`tr[data-index="${newIndex}"]`);
+            row?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        }
+    }
+
+    private toggleVariantExpansion(): void {
+        if (this.selectedVariantIndex < 0) return;
+
+        const variants = this.getFilteredAndSortedVariants();
+        const variant = variants[this.selectedVariantIndex];
+
+        if (this.expandedVariantIndex === this.selectedVariantIndex) {
+            this.expandedVariantIndex = -1;
+            this.evidencePanel.classList.remove('visible');
+        } else {
+            this.expandedVariantIndex = this.selectedVariantIndex;
+            if (variant) {
+                this.renderEvidencePanel(variant);
+            }
+        }
+
+        // Update row classes
+        this.variantTable.querySelectorAll('tr').forEach(row => {
+            const rowIndex = parseInt((row as HTMLElement).dataset.index!);
+            row.classList.toggle('expanded', rowIndex === this.expandedVariantIndex);
         });
     }
 
@@ -1183,41 +1271,196 @@ class BAMCPViewer {
 
     // ==================== VARIANT TABLE ====================
 
+    private setVariantFilter(filter: 'high' | 'all'): void {
+        this.variantFilter = filter;
+
+        // Update toggle button styles
+        document.getElementById('filter-high')!.classList.toggle('active', filter === 'high');
+        document.getElementById('filter-all')!.classList.toggle('active', filter === 'all');
+
+        this.renderVariantTable();
+    }
+
+    private setVariantSort(column: string): void {
+        if (this.variantSort.column === column) {
+            // Toggle direction
+            this.variantSort.direction = this.variantSort.direction === 'asc' ? 'desc' : 'asc';
+        } else {
+            this.variantSort.column = column;
+            this.variantSort.direction = 'asc';
+        }
+
+        // Update header styles
+        document.querySelectorAll('#variant-panel th.sortable').forEach(th => {
+            th.classList.remove('sorted-asc', 'sorted-desc');
+            if ((th as HTMLElement).dataset.sort === this.variantSort.column) {
+                th.classList.add(this.variantSort.direction === 'asc' ? 'sorted-asc' : 'sorted-desc');
+            }
+        });
+
+        this.renderVariantTable();
+    }
+
+    private getFilteredAndSortedVariants(): Variant[] {
+        if (!this.data) return [];
+
+        let variants = [...this.data.variants];
+
+        // Filter by confidence
+        if (this.variantFilter === 'high') {
+            variants = variants.filter(v => !v.is_low_confidence);
+        }
+
+        // Sort
+        const { column, direction } = this.variantSort;
+        const multiplier = direction === 'asc' ? 1 : -1;
+
+        variants.sort((a, b) => {
+            let cmp = 0;
+            switch (column) {
+                case 'position':
+                    cmp = a.position - b.position;
+                    break;
+                case 'vaf':
+                    cmp = a.vaf - b.vaf;
+                    break;
+                case 'depth':
+                    cmp = a.depth - b.depth;
+                    break;
+                case 'quality':
+                    cmp = (a.mean_quality || 0) - (b.mean_quality || 0);
+                    break;
+            }
+            return cmp * multiplier;
+        });
+
+        return variants;
+    }
+
     private renderVariantTable(): void {
         if (!this.data) return;
 
-        this.variantTable.innerHTML = this.data.variants.map((v) => {
+        const variants = this.getFilteredAndSortedVariants();
+
+        // Update count badge
+        const countBadge = document.getElementById('variant-count');
+        if (countBadge) {
+            const totalCount = this.data.variants.length;
+            const highConfCount = this.data.variants.filter(v => !v.is_low_confidence).length;
+            countBadge.textContent = this.variantFilter === 'high'
+                ? `${highConfCount}`
+                : `${totalCount}`;
+        }
+
+        this.variantTable.innerHTML = variants.map((v, index) => {
             const vafColor = v.vaf >= 0.4 ? '#22c55e' : v.vaf >= 0.2 ? '#f97316' : '#ef4444';
-            return '<tr data-pos="' + v.position + '" ' +
-                'data-ref="' + v.ref + '" data-alt="' + v.alt + '" ' +
-                'data-vaf="' + v.vaf + '" data-depth="' + v.depth + '" ' +
-                'data-contig="' + v.contig + '">' +
-                '<td>' + v.contig + ':' + v.position.toLocaleString() + '</td>' +
-                '<td style="font-family:monospace">' + v.ref + '</td>' +
-                '<td style="color:' + (BASE_COLORS[v.alt] || '#333') + ';font-family:monospace;font-weight:bold">' + v.alt + '</td>' +
-                '<td style="color:' + vafColor + '">' + (v.vaf * 100).toFixed(1) + '%</td>' +
-                '<td>' + v.depth + '</td>' +
-                '</tr>';
+            const qualColor = (v.mean_quality || 0) >= 30 ? '#22c55e' :
+                              (v.mean_quality || 0) >= 20 ? '#f97316' : '#ef4444';
+            const strandF = v.strand_forward ?? 0;
+            const strandR = v.strand_reverse ?? 0;
+            const classes = [
+                v.is_low_confidence ? 'low-confidence' : '',
+                index === this.selectedVariantIndex ? 'selected' : '',
+                index === this.expandedVariantIndex ? 'expanded' : ''
+            ].filter(Boolean).join(' ');
+
+            return `<tr class="${classes}" data-index="${index}" data-pos="${v.position}"
+                data-ref="${v.ref}" data-alt="${v.alt}"
+                data-vaf="${v.vaf}" data-depth="${v.depth}"
+                data-contig="${v.contig}">
+                <td>${v.contig}:${v.position.toLocaleString()}</td>
+                <td style="font-family:monospace">${v.ref}</td>
+                <td style="color:${BASE_COLORS[v.alt] || '#333'};font-family:monospace;font-weight:bold">${v.alt}</td>
+                <td style="color:${vafColor}">${(v.vaf * 100).toFixed(1)}%</td>
+                <td>${v.depth}</td>
+                <td style="font-size:10px;color:#6b7280">${strandF}F:${strandR}R</td>
+                <td style="color:${qualColor}">Q${v.mean_quality?.toFixed(0) || '?'}</td>
+                <td>
+                    <button class="action-btn clinvar" data-action="clinvar" title="Look up in ClinVar">C</button>
+                    <button class="action-btn gnomad" data-action="gnomad" title="Look up in gnomAD">g</button>
+                </td>
+            </tr>`;
         }).join('');
 
+        // Attach row click handlers
         this.variantTable.querySelectorAll('tr').forEach(row => {
-            row.addEventListener('click', () => {
+            row.addEventListener('click', (e) => {
+                const target = e.target as HTMLElement;
                 const el = row as HTMLElement;
+                const index = parseInt(el.dataset.index!);
                 const pos = parseInt(el.dataset.pos!);
+
+                // Handle action button clicks
+                if (target.classList.contains('action-btn')) {
+                    e.stopPropagation();
+                    const action = target.dataset.action;
+                    const variant = variants[index];
+                    if (action === 'clinvar') {
+                        this.lookupClinVar(variant);
+                    } else if (action === 'gnomad') {
+                        this.lookupGnomAD(variant);
+                    }
+                    return;
+                }
+
+                // Handle row selection
+                this.selectVariant(index);
                 this.jumpTo(pos);
 
-                const variant: Variant = {
-                    contig: el.dataset.contig!,
-                    position: pos,
-                    ref: el.dataset.ref!,
-                    alt: el.dataset.alt!,
-                    vaf: parseFloat(el.dataset.vaf!),
-                    depth: parseInt(el.dataset.depth!)
-                };
+                const variant = variants[index];
                 this.sendVariantMessage(variant);
                 this.renderEvidencePanel(variant);
             });
         });
+    }
+
+    private selectVariant(index: number): void {
+        // Toggle expansion if clicking same row
+        if (this.selectedVariantIndex === index) {
+            this.expandedVariantIndex = this.expandedVariantIndex === index ? -1 : index;
+        } else {
+            this.selectedVariantIndex = index;
+            this.expandedVariantIndex = -1;
+        }
+
+        // Update row classes
+        this.variantTable.querySelectorAll('tr').forEach(row => {
+            const rowIndex = parseInt((row as HTMLElement).dataset.index!);
+            row.classList.toggle('selected', rowIndex === this.selectedVariantIndex);
+            row.classList.toggle('expanded', rowIndex === this.expandedVariantIndex);
+        });
+    }
+
+    private async lookupClinVar(variant: Variant): Promise<void> {
+        if (!this.app) return;
+
+        try {
+            await this.app.sendMessage({
+                role: 'user',
+                content: [{
+                    type: 'text',
+                    text: `Look up the variant ${variant.contig}:${variant.position} ${variant.ref}>${variant.alt} in ClinVar.`
+                }]
+            });
+        } catch (e) {
+            console.warn('ClinVar lookup failed:', e);
+        }
+    }
+
+    private async lookupGnomAD(variant: Variant): Promise<void> {
+        if (!this.app) return;
+
+        try {
+            await this.app.sendMessage({
+                role: 'user',
+                content: [{
+                    type: 'text',
+                    text: `Look up the variant ${variant.contig}:${variant.position} ${variant.ref}>${variant.alt} in gnomAD for population frequency.`
+                }]
+            });
+        } catch (e) {
+            console.warn('gnomAD lookup failed:', e);
+        }
     }
 
     // ==================== EVIDENCE PANEL ====================

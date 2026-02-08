@@ -529,11 +529,35 @@ def _serialize_region_data(data: RegionData) -> dict:
         for k, v in sorted(mismatch_counts.items())
     ]
 
-    # Compute variant evidence for each called variant
+    # Compute variant evidence for each called variant and enhance variant objects
     variant_evidence = {}
+    enhanced_variants = []
+
     for variant in data.variants:
         key = f"{variant['position']}:{variant['ref']}>{variant['alt']}"
-        variant_evidence[key] = _compute_variant_evidence(data.reads, variant)
+        evidence = _compute_variant_evidence(data.reads, variant)
+        variant_evidence[key] = evidence
+
+        # Enhance variant with evidence data for table display
+        enhanced = dict(variant)
+        enhanced["strand_forward"] = evidence["forward_count"]
+        enhanced["strand_reverse"] = evidence["reverse_count"]
+        enhanced["mean_quality"] = evidence["mean_quality"]
+
+        # Low-confidence if ANY of these criteria fail:
+        # - Depth < 10
+        # - VAF < 10% (0.10)
+        # - Mean base quality < 20
+        # - Strand bias > 90% (0.9)
+        is_low_confidence = (
+            variant["depth"] < 10
+            or variant["vaf"] < 0.10
+            or evidence["mean_quality"] < 20
+            or evidence["strand_bias"] > 0.9
+        )
+        enhanced["is_low_confidence"] = is_low_confidence
+
+        enhanced_variants.append(enhanced)
 
     return {
         "contig": data.contig,
@@ -559,7 +583,7 @@ def _serialize_region_data(data: RegionData) -> dict:
             for r in data.reads
         ],
         "coverage": data.coverage,
-        "variants": data.variants,
+        "variants": enhanced_variants,
         "reference_sequence": data.reference_sequence,
         "mismatch_summary": mismatch_summary,
         "variant_evidence": variant_evidence,

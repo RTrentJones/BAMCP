@@ -1754,18 +1754,14 @@ class BAMCPViewer {
     }
 
     private isSVCandidate(read: Read): boolean {
+        // Only flag truly anomalous pairs - be very conservative
         // Chimeric (mate on different chromosome)
         if (read.mate_contig && read.mate_contig !== this.data?.contig) return true;
 
-        // Short insert (<100bp) or long insert (>1kb)
-        if (read.insert_size) {
-            const absSize = Math.abs(read.insert_size);
-            if (absSize < 100 || absSize > 1000) return true;
-        }
+        // Very long insert (>5kb) - likely deletion or other SV
+        if (read.insert_size && Math.abs(read.insert_size) > 5000) return true;
 
-        // Improper pair flag
-        if (read.is_proper_pair === false) return true;
-
+        // Don't flag short inserts or improper pairs - too noisy
         return false;
     }
 

@@ -393,6 +393,18 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
 
 def _serialize_region_data(data: RegionData) -> dict:
     """Serialize RegionData to a JSON-compatible dict."""
+    # Aggregate mismatches by position for LLM summary
+    mismatch_counts: dict[tuple[int, str, str], int] = {}
+    for read in data.reads:
+        for mm in read.mismatches:
+            key = (mm["pos"], mm["ref"], mm["alt"])
+            mismatch_counts[key] = mismatch_counts.get(key, 0) + 1
+
+    mismatch_summary = [
+        {"pos": k[0], "ref": k[1], "alt": k[2], "count": v}
+        for k, v in sorted(mismatch_counts.items())
+    ]
+
     return {
         "contig": data.contig,
         "start": data.start,
@@ -414,4 +426,5 @@ def _serialize_region_data(data: RegionData) -> dict:
         "coverage": data.coverage,
         "variants": data.variants,
         "reference_sequence": data.reference_sequence,
+        "mismatch_summary": mismatch_summary,
     }

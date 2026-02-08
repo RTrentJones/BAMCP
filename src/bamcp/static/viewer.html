@@ -104,6 +104,39 @@
 
         #variant-panel tr:hover { background: #f0f7ff; cursor: pointer; }
         #variant-panel th { background: #f5f5f5; position: sticky; top: 0; }
+
+        /* Locked tooltip style */
+        #tooltip.locked {
+            pointer-events: auto;
+            border: 2px solid #3b82f6;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        #tooltip.locked::after {
+            content: '(click elsewhere to dismiss)';
+            display: block;
+            font-size: 9px;
+            color: #9ca3af;
+            margin-top: 4px;
+        }
+
+        /* Dark mode */
+        @media (prefers-color-scheme: dark) {
+            body { background: #111827; color: #f9fafb; }
+            #toolbar { background: #1f2937; border-color: #374151; }
+            #toolbar input { background: #374151; border-color: #4b5563; color: #f9fafb; }
+            #toolbar button { background: #3b82f6; }
+            #toolbar button:hover { background: #2563eb; }
+            #legend { background: #1f2937; border-color: #374151; }
+            .legend-title { color: #9ca3af; }
+            #viewer { background: #1f2937; }
+            #ruler-canvas { background: #1f2937; }
+            #reference-canvas { background: #111827; }
+            #variant-panel { background: #1f2937; border-color: #374151; }
+            #variant-panel th { background: #374151; color: #f9fafb; }
+            #variant-panel td { border-color: #374151; color: #e5e7eb; }
+            #variant-panel tr:hover { background: #374151; }
+            #tooltip { background: #374151; border-color: #4b5563; }
+        }
     </style>
 </head>
 <body>

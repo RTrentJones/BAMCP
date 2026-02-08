@@ -97,6 +97,7 @@ class BAMCPViewer {
     private app: App | null = null;
     private isFullscreen = false;
     private _contextUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+    private lockedTooltip: { read: Read; x: number; y: number } | null = null;
 
     constructor() {
         // Initialize canvases
@@ -181,7 +182,24 @@ class BAMCPViewer {
         });
 
         this.readsCanvas.addEventListener('mouseout', () => {
-            this.tooltip.style.display = 'none';
+            if (!this.lockedTooltip) {
+                this.tooltip.style.display = 'none';
+            }
+        });
+
+        // Click to lock/unlock tooltip
+        this.readsCanvas.addEventListener('click', (e) => {
+            if (isDragging) return;
+            const read = this.getReadAtPosition(e);
+            if (read) {
+                this.lockedTooltip = { read, x: e.clientX, y: e.clientY };
+                this.showTooltipForRead(read, e.clientX, e.clientY);
+                this.tooltip.classList.add('locked');
+            } else {
+                this.lockedTooltip = null;
+                this.tooltip.classList.remove('locked');
+                this.tooltip.style.display = 'none';
+            }
         });
 
         // Mouse wheel zoom
@@ -623,6 +641,16 @@ class BAMCPViewer {
         const coverage = this.data.coverage;
         const maxCov = Math.max(...coverage, 1);
         const scale = this.getScale();
+        const lowCoverageThreshold = 10;
+
+        // Draw low coverage warning regions first (background)
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.15)';
+        for (let i = 0; i < coverage.length; i++) {
+            if (coverage[i] < lowCoverageThreshold) {
+                const x = (this.data.start + i - this.viewport.start) * scale;
+                ctx.fillRect(x, 0, Math.max(scale, 1), height);
+            }
+        }
 
         // Fill area
         ctx.fillStyle = '#93c5fd';
@@ -646,6 +674,23 @@ class BAMCPViewer {
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
+
+        // Draw threshold line (dashed red)
+        const thresholdY = height - (lowCoverageThreshold / maxCov) * (height - 20);
+        if (thresholdY > 15 && thresholdY < height - 5) {
+            ctx.strokeStyle = '#ef4444';
+            ctx.setLineDash([4, 2]);
+            ctx.beginPath();
+            ctx.moveTo(0, thresholdY);
+            ctx.lineTo(width, thresholdY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Threshold label
+            ctx.fillStyle = '#ef4444';
+            ctx.font = '9px sans-serif';
+            ctx.fillText(lowCoverageThreshold + 'x', width - 25, thresholdY - 2);
+        }
 
         // Max coverage label
         ctx.fillStyle = '#374151';
@@ -782,11 +827,13 @@ class BAMCPViewer {
                     ctx.fillStyle = `rgba(${baseColor[0]}, ${baseColor[1]}, ${baseColor[2]}, ${opacity})`;
                     ctx.fillRect(x, y, len * scale, READ_HEIGHT);
 
-                    // Draw mismatches
-                    if (zoomLevel === 'nucleotide' || scale > 2) {
-                        for (const mm of read.mismatches) {
-                            if (mm.pos >= refPos && mm.pos < refPos + len) {
-                                const mx = (mm.pos - this.viewport.start) * scale;
+                    // Draw mismatches - always visible at any zoom level
+                    for (const mm of read.mismatches) {
+                        if (mm.pos >= refPos && mm.pos < refPos + len) {
+                            const mx = (mm.pos - this.viewport.start) * scale;
+
+                            if (zoomLevel === 'nucleotide' || scale > 2) {
+                                // Full mismatch rectangle at higher zoom
                                 ctx.fillStyle = BASE_COLORS[mm.alt] || '#9ca3af';
                                 ctx.fillRect(mx, y, Math.max(scale, 2), READ_HEIGHT);
 
@@ -798,6 +845,18 @@ class BAMCPViewer {
                                     ctx.fillText(mm.alt, mx + scale / 2, y + READ_HEIGHT - 2);
                                     ctx.textAlign = 'start';
                                 }
+                            } else {
+                                // Low zoom: bright tick marker for visibility
+                                ctx.fillStyle = BASE_COLORS[mm.alt] || '#ef4444';
+                                ctx.fillRect(mx, y, Math.max(2, scale), READ_HEIGHT);
+
+                                // Triangle indicator above read
+                                ctx.beginPath();
+                                ctx.moveTo(mx, y - 2);
+                                ctx.lineTo(mx + 3, y);
+                                ctx.lineTo(mx - 1, y);
+                                ctx.closePath();
+                                ctx.fill();
                             }
                         }
                     }
@@ -907,8 +966,8 @@ class BAMCPViewer {
 
     // ==================== TOOLTIP ====================
 
-    private showTooltip(e: MouseEvent): void {
-        if (!this.data) return;
+    private getReadAtPosition(e: MouseEvent): Read | null {
+        if (!this.data) return null;
 
         const rect = this.readsCanvas.getBoundingClientRect();
         const x = e.clientX - rect.left;
@@ -918,30 +977,39 @@ class BAMCPViewer {
         const genomePos = Math.floor(this.viewport.start + x / scale);
         const rowIdx = Math.floor(y / (READ_HEIGHT + READ_GAP));
 
-        if (rowIdx >= this.packedRows.length) {
-            this.tooltip.style.display = 'none';
-            return;
-        }
+        if (rowIdx >= this.packedRows.length) return null;
 
-        const read = this.packedRows[rowIdx].find(r =>
+        return this.packedRows[rowIdx].find(r =>
             r.position <= genomePos && r.end_position >= genomePos
-        );
+        ) || null;
+    }
+
+    private showTooltipForRead(read: Read, clientX: number, clientY: number): void {
+        const mapqColor = read.mapping_quality >= 30 ? '#22c55e' :
+                          read.mapping_quality >= 10 ? '#f97316' : '#ef4444';
+
+        this.tooltip.innerHTML =
+            '<strong>' + read.name + '</strong><br>' +
+            'Position: ' + read.position.toLocaleString() + '-' + read.end_position.toLocaleString() + '<br>' +
+            'MAPQ: <span style="color:' + mapqColor + '">' + read.mapping_quality + '</span><br>' +
+            'CIGAR: <code>' + read.cigar + '</code><br>' +
+            'Strand: ' + (read.is_reverse ? '← Reverse' : '→ Forward') + '<br>' +
+            'Length: ' + read.sequence.length + ' bp';
+
+        this.tooltip.style.display = 'block';
+        this.tooltip.style.left = (clientX + 10) + 'px';
+        this.tooltip.style.top = (clientY + 10) + 'px';
+    }
+
+    private showTooltip(e: MouseEvent): void {
+        // Don't update tooltip if locked
+        if (this.lockedTooltip) return;
+        if (!this.data) return;
+
+        const read = this.getReadAtPosition(e);
 
         if (read) {
-            const mapqColor = read.mapping_quality >= 30 ? '#22c55e' :
-                              read.mapping_quality >= 10 ? '#f97316' : '#ef4444';
-
-            this.tooltip.innerHTML =
-                '<strong>' + read.name + '</strong><br>' +
-                'Position: ' + read.position.toLocaleString() + '-' + read.end_position.toLocaleString() + '<br>' +
-                'MAPQ: <span style="color:' + mapqColor + '">' + read.mapping_quality + '</span><br>' +
-                'CIGAR: <code>' + read.cigar + '</code><br>' +
-                'Strand: ' + (read.is_reverse ? '← Reverse' : '→ Forward') + '<br>' +
-                'Length: ' + read.sequence.length + ' bp';
-
-            this.tooltip.style.display = 'block';
-            this.tooltip.style.left = (e.clientX + 10) + 'px';
-            this.tooltip.style.top = (e.clientY + 10) + 'px';
+            this.showTooltipForRead(read, e.clientX, e.clientY);
         } else {
             this.tooltip.style.display = 'none';
         }

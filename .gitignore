@@ -215,3 +215,6 @@ src/bamcp/static/dist/
 *.bai
 *.cram
 *.crai
+
+# Cache session directories (8-char hex)
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/

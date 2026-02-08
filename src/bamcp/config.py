@@ -37,8 +37,13 @@ class BAMCPConfig:
     genome_build: str = "GRCh38"
 
     # Cache settings
-    cache_dir: str = ""  # Set in from_env()
+    cache_dir: str = ""  # Defaults to ~/.cache/bamcp if empty
     cache_ttl: int = 86400  # 24 hours
+
+    def __post_init__(self) -> None:
+        """Set default cache_dir if not provided."""
+        if not self.cache_dir:
+            self.cache_dir = str(Path.home() / ".cache" / "bamcp")
 
     @classmethod
     def from_env(cls) -> "BAMCPConfig":

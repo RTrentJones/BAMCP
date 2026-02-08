@@ -462,43 +462,56 @@ def _bin_histogram(values: list[int], bins: list[int]) -> dict[str, int]:
     return histogram
 
 
-def _compute_variant_evidence(reads: list[AlignedRead], variant: dict) -> dict:
-    """Compute strand bias, quality, and position-in-read stats for a variant.
-
-    Args:
-        reads: List of aligned reads in the region.
-        variant: Variant dict with 'position' and 'alt' keys.
+def _build_mismatch_index(
+    reads: list[AlignedRead],
+) -> dict[tuple[int, str], list[tuple[AlignedRead, dict]]]:
+    """Build an index of mismatches by (position, alt) for O(1) variant lookup.
 
     Returns:
-        Dict with forward_count, reverse_count, strand_bias, quality stats,
-        and histograms for quality and read position.
+        Dict mapping (position, alt) to list of (read, mismatch) tuples.
+    """
+    index: dict[tuple[int, str], list[tuple[AlignedRead, dict]]] = {}
+    for read in reads:
+        for mm in read.mismatches:
+            key = (mm["pos"], mm["alt"])
+            if key not in index:
+                index[key] = []
+            index[key].append((read, mm))
+    return index
+
+
+def _compute_variant_evidence_from_index(
+    index: dict[tuple[int, str], list[tuple[AlignedRead, dict]]],
+    variant: dict,
+) -> dict:
+    """Compute variant evidence using pre-built mismatch index.
+
+    This is O(k) where k is the number of reads supporting the variant,
+    rather than O(n*m) when iterating all reads for each variant.
     """
     pos = variant["position"]
     alt = variant["alt"]
+
+    matches = index.get((pos, alt), [])
 
     forward_count = 0
     reverse_count = 0
     qualities: list[int] = []
     read_positions: list[int] = []
 
-    for read in reads:
-        for mm in read.mismatches:
-            if mm["pos"] == pos and mm["alt"] == alt:
-                if read.is_reverse:
-                    reverse_count += 1
-                else:
-                    forward_count += 1
+    for read, mm in matches:
+        if read.is_reverse:
+            reverse_count += 1
+        else:
+            forward_count += 1
 
-                # Get quality at mismatch position
-                query_pos = _get_query_position(read, mm["pos"])
-                if query_pos is not None and query_pos < len(read.qualities):
-                    qualities.append(read.qualities[query_pos])
-                    # Position from 5' end (adjusted for reverse reads)
-                    if read.is_reverse:
-                        pos_from_5prime = len(read.sequence) - query_pos - 1
-                    else:
-                        pos_from_5prime = query_pos
-                    read_positions.append(pos_from_5prime)
+        # Get quality at mismatch position
+        query_pos = _get_query_position(read, mm["pos"])
+        if query_pos is not None and query_pos < len(read.qualities):
+            qualities.append(read.qualities[query_pos])
+            # Position from 5' end (adjusted for reverse reads)
+            pos_from_5prime = len(read.sequence) - query_pos - 1 if read.is_reverse else query_pos
+            read_positions.append(pos_from_5prime)
 
     # Strand bias: 0 = balanced, 1 = all one strand
     total = forward_count + reverse_count
@@ -515,8 +528,17 @@ def _compute_variant_evidence(reads: list[AlignedRead], variant: dict) -> dict:
     }
 
 
-def _serialize_region_data(data: RegionData) -> dict:
-    """Serialize RegionData to a JSON-compatible dict."""
+def _serialize_region_data(data: RegionData, compact: bool = False) -> dict:
+    """Serialize RegionData to a JSON-compatible dict.
+
+    Args:
+        data: The region data to serialize.
+        compact: If True, omit sequences/qualities to reduce payload size.
+                 Use for overview zoom levels where individual bases aren't shown.
+    """
+    # Build mismatch index once for O(1) variant evidence lookups
+    mismatch_index = _build_mismatch_index(data.reads)
+
     # Aggregate mismatches by position for LLM summary
     mismatch_counts: dict[tuple[int, str, str], int] = {}
     for read in data.reads:
@@ -529,13 +551,13 @@ def _serialize_region_data(data: RegionData) -> dict:
         for k, v in sorted(mismatch_counts.items())
     ]
 
-    # Compute variant evidence for each called variant and enhance variant objects
+    # Compute variant evidence using index (O(k) per variant instead of O(n*m) total)
     variant_evidence = {}
     enhanced_variants = []
 
     for variant in data.variants:
         key = f"{variant['position']}:{variant['ref']}>{variant['alt']}"
-        evidence = _compute_variant_evidence(data.reads, variant)
+        evidence = _compute_variant_evidence_from_index(mismatch_index, variant)
         variant_evidence[key] = evidence
 
         # Enhance variant with evidence data for table display
@@ -559,11 +581,27 @@ def _serialize_region_data(data: RegionData) -> dict:
 
         enhanced_variants.append(enhanced)
 
-    return {
-        "contig": data.contig,
-        "start": data.start,
-        "end": data.end,
-        "reads": [
+    # Serialize reads - compact mode omits large sequence/quality data
+    if compact:
+        reads_data = [
+            {
+                "name": r.name,
+                "cigar": r.cigar,
+                "position": r.position,
+                "end_position": r.end_position,
+                "mapping_quality": r.mapping_quality,
+                "is_reverse": r.is_reverse,
+                "mismatches": r.mismatches,
+                "mate_position": r.mate_position,
+                "mate_contig": r.mate_contig,
+                "insert_size": r.insert_size,
+                "is_proper_pair": r.is_proper_pair,
+                "is_read1": r.is_read1,
+            }
+            for r in data.reads
+        ]
+    else:
+        reads_data = [
             {
                 "name": r.name,
                 "sequence": r.sequence,
@@ -581,10 +619,17 @@ def _serialize_region_data(data: RegionData) -> dict:
                 "is_read1": r.is_read1,
             }
             for r in data.reads
-        ],
+        ]
+
+    return {
+        "contig": data.contig,
+        "start": data.start,
+        "end": data.end,
+        "reads": reads_data,
         "coverage": data.coverage,
         "variants": enhanced_variants,
         "reference_sequence": data.reference_sequence,
         "mismatch_summary": mismatch_summary,
         "variant_evidence": variant_evidence,
+        "compact": compact,
     }

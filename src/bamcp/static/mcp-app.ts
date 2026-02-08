@@ -839,55 +839,100 @@ class BAMCPViewer {
                 case 'M':
                 case '=':
                 case 'X':
-                    // Match/mismatch segment
-                    ctx.fillStyle = `rgba(${baseColor[0]}, ${baseColor[1]}, ${baseColor[2]}, ${opacity})`;
-                    ctx.fillRect(x, y, len * scale, READ_HEIGHT);
-
-                    // Draw mismatches - always visible at any zoom level
+                    // Build mismatch lookup for this segment
+                    const mismatchMap = new Map<number, { ref: string; alt: string }>();
                     for (const mm of read.mismatches) {
                         if (mm.pos >= refPos && mm.pos < refPos + len) {
-                            const mx = (mm.pos - this.viewport.start) * scale;
+                            mismatchMap.set(mm.pos, mm);
+                        }
+                    }
 
-                            if (zoomLevel === 'nucleotide' || scale > 2) {
-                                // Full mismatch rectangle at higher zoom
-                                ctx.fillStyle = BASE_COLORS[mm.alt] || '#9ca3af';
-                                ctx.fillRect(mx, y, Math.max(scale, 2), READ_HEIGHT);
+                    if (zoomLevel === 'nucleotide' && scale >= 8) {
+                        // NUCLEOTIDE ZOOM: Show individual bases with quality shading
+                        const fontSize = Math.min(scale - 2, 11);
+                        ctx.font = `bold ${fontSize}px monospace`;
+                        ctx.textAlign = 'center';
 
-                                // Draw letter at nucleotide zoom
-                                if (zoomLevel === 'nucleotide' && scale >= 10) {
-                                    ctx.fillStyle = '#fff';
-                                    ctx.font = 'bold 9px monospace';
-                                    ctx.textAlign = 'center';
-                                    ctx.fillText(mm.alt, mx + scale / 2, y + READ_HEIGHT - 2);
-                                    ctx.textAlign = 'start';
-                                }
+                        for (let i = 0; i < len; i++) {
+                            const pos = refPos + i;
+                            const bx = (pos - this.viewport.start) * scale;
+
+                            // Skip if off-screen
+                            if (bx < -scale || bx > this.readsCanvas.width + scale) continue;
+
+                            const base = read.sequence[queryPos + i] || '?';
+                            const qual = read.qualities[queryPos + i] || 0;
+                            const mismatch = mismatchMap.get(pos);
+
+                            // Quality-based opacity: Q30+ = full, Q10 = 60%, Q0 = 30%
+                            const qualAlpha = 0.3 + Math.min(qual, 40) / 40 * 0.7;
+
+                            if (mismatch) {
+                                // MISMATCH: Colored background with white text
+                                ctx.fillStyle = BASE_COLORS[base] || '#ef4444';
+                                ctx.fillRect(bx + 1, y, scale - 2, READ_HEIGHT);
+
+                                // White border for emphasis
+                                ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+                                ctx.lineWidth = 1.5;
+                                ctx.strokeRect(bx + 1, y, scale - 2, READ_HEIGHT);
+
+                                // White letter
+                                ctx.fillStyle = '#fff';
+                                ctx.fillText(base, bx + scale / 2, y + READ_HEIGHT - 2);
                             } else {
-                                // Low zoom: prominent vertical line with circle marker
-                                const markerColor = BASE_COLORS[mm.alt] || '#ef4444';
+                                // MATCH: Gray background with quality-faded letter
+                                // Subtle gray background based on quality
+                                ctx.fillStyle = `rgba(${baseColor[0]}, ${baseColor[1]}, ${baseColor[2]}, ${opacity * 0.6})`;
+                                ctx.fillRect(bx, y, scale, READ_HEIGHT);
 
-                                // Colored rectangle on the read
-                                ctx.fillStyle = markerColor;
-                                ctx.fillRect(mx, y, Math.max(2, scale), READ_HEIGHT);
+                                // Base letter with quality-based opacity
+                                ctx.fillStyle = `rgba(50, 50, 50, ${qualAlpha})`;
+                                ctx.fillText(base, bx + scale / 2, y + READ_HEIGHT - 2);
+                            }
+                        }
+                        ctx.textAlign = 'start';
+                    } else {
+                        // READ/OVERVIEW ZOOM: Solid bar with mismatch markers
+                        ctx.fillStyle = `rgba(${baseColor[0]}, ${baseColor[1]}, ${baseColor[2]}, ${opacity})`;
+                        ctx.fillRect(x, y, len * scale, READ_HEIGHT);
 
-                                // Vertical line extending above read
-                                ctx.strokeStyle = markerColor;
-                                ctx.lineWidth = 2;
-                                ctx.beginPath();
-                                ctx.moveTo(mx + 1, y - 8);
-                                ctx.lineTo(mx + 1, y + READ_HEIGHT);
-                                ctx.stroke();
-                                ctx.lineWidth = 1;
+                        // Draw mismatch markers
+                        for (const mm of read.mismatches) {
+                            if (mm.pos >= refPos && mm.pos < refPos + len) {
+                                const mx = (mm.pos - this.viewport.start) * scale;
 
-                                // Circle marker at top
-                                ctx.fillStyle = markerColor;
-                                ctx.beginPath();
-                                ctx.arc(mx + 1, y - 5, 3, 0, Math.PI * 2);
-                                ctx.fill();
+                                if (scale > 2) {
+                                    // Medium zoom: colored rectangle
+                                    ctx.fillStyle = BASE_COLORS[mm.alt] || '#9ca3af';
+                                    ctx.fillRect(mx, y, Math.max(scale, 2), READ_HEIGHT);
+                                } else {
+                                    // Low zoom: prominent vertical line with circle marker
+                                    const markerColor = BASE_COLORS[mm.alt] || '#ef4444';
 
-                                // White outline for visibility
-                                ctx.strokeStyle = '#fff';
-                                ctx.lineWidth = 1;
-                                ctx.stroke();
+                                    ctx.fillStyle = markerColor;
+                                    ctx.fillRect(mx, y, Math.max(2, scale), READ_HEIGHT);
+
+                                    // Vertical line extending above read
+                                    ctx.strokeStyle = markerColor;
+                                    ctx.lineWidth = 2;
+                                    ctx.beginPath();
+                                    ctx.moveTo(mx + 1, y - 8);
+                                    ctx.lineTo(mx + 1, y + READ_HEIGHT);
+                                    ctx.stroke();
+                                    ctx.lineWidth = 1;
+
+                                    // Circle marker at top
+                                    ctx.fillStyle = markerColor;
+                                    ctx.beginPath();
+                                    ctx.arc(mx + 1, y - 5, 3, 0, Math.PI * 2);
+                                    ctx.fill();
+
+                                    // White outline for visibility
+                                    ctx.strokeStyle = '#fff';
+                                    ctx.lineWidth = 1;
+                                    ctx.stroke();
+                                }
                             }
                         }
                     }

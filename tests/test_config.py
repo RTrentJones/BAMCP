@@ -5,6 +5,17 @@ import os
 import pytest
 
 from bamcp.config import BAMCPConfig
+from bamcp.constants import (
+    DEFAULT_CACHE_TTL_SECONDS,
+    DEFAULT_HOST,
+    DEFAULT_MAX_READS,
+    DEFAULT_MIN_DEPTH,
+    DEFAULT_MIN_MAPQ,
+    DEFAULT_MIN_VAF,
+    DEFAULT_PORT,
+    DEFAULT_TOKEN_EXPIRY_SECONDS,
+    DEFAULT_WINDOW_SIZE,
+)
 
 
 class TestBAMCPConfig:
@@ -15,16 +26,16 @@ class TestBAMCPConfig:
         """Config defaults should match documented values."""
         config = BAMCPConfig()
         assert config.reference is None
-        assert config.max_reads == 10000
-        assert config.default_window == 500
-        assert config.min_vaf == 0.1
-        assert config.min_depth == 3
-        assert config.min_mapq == 0
+        assert config.max_reads == DEFAULT_MAX_READS
+        assert config.default_window == DEFAULT_WINDOW_SIZE
+        assert config.min_vaf == DEFAULT_MIN_VAF
+        assert config.min_depth == DEFAULT_MIN_DEPTH
+        assert config.min_mapq == DEFAULT_MIN_MAPQ
         assert config.transport == "stdio"
-        assert config.host == "0.0.0.0"
-        assert config.port == 8000
+        assert config.host == DEFAULT_HOST
+        assert config.port == DEFAULT_PORT
         assert config.auth_enabled is False
-        assert config.token_expiry == 3600
+        assert config.token_expiry == DEFAULT_TOKEN_EXPIRY_SECONDS
 
     @pytest.mark.unit
     def test_custom_values(self):
@@ -54,11 +65,11 @@ class TestBAMCPConfig:
 
         config = BAMCPConfig.from_env()
         assert config.reference is None
-        assert config.max_reads == 10000
-        assert config.default_window == 500
-        assert config.min_vaf == 0.1
-        assert config.min_depth == 3
-        assert config.min_mapq == 0
+        assert config.max_reads == DEFAULT_MAX_READS
+        assert config.default_window == DEFAULT_WINDOW_SIZE
+        assert config.min_vaf == DEFAULT_MIN_VAF
+        assert config.min_depth == DEFAULT_MIN_DEPTH
+        assert config.min_mapq == DEFAULT_MIN_MAPQ
 
     @pytest.mark.unit
     def test_from_env_custom(self, monkeypatch):
@@ -90,7 +101,7 @@ class TestBAMCPConfig:
         config = BAMCPConfig.from_env()
         assert config.max_reads == 500
         assert config.reference is None  # default
-        assert config.min_vaf == 0.1  # default
+        assert config.min_vaf == DEFAULT_MIN_VAF  # default
 
     @pytest.mark.unit
     def test_from_env_transport_fields(self, monkeypatch):
@@ -148,7 +159,7 @@ class TestBAMCPConfig:
 
         config = BAMCPConfig.from_env()
         assert config.cache_dir.endswith(".cache/bamcp")
-        assert config.cache_ttl == 86400  # 24 hours
+        assert config.cache_ttl == DEFAULT_CACHE_TTL_SECONDS
 
     @pytest.mark.unit
     def test_from_env_cache_custom(self, monkeypatch, tmp_path):

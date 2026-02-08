@@ -8,6 +8,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from .constants import (
+    CACHE_SESSION_ID_LENGTH,
+    DEFAULT_CACHE_TTL_SECONDS,
+    REMOTE_FILE_SCHEMES,
+)
+
 
 class BAMIndexCache:
     """File-based cache for remote BAM index files.
@@ -23,7 +29,7 @@ class BAMIndexCache:
     def __init__(
         self,
         cache_dir: str,
-        ttl_seconds: int = 86400,
+        ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
         session_id: str | None = None,
     ):
         """Initialize the cache.
@@ -35,7 +41,7 @@ class BAMIndexCache:
         """
         self.base_cache_dir = Path(cache_dir)
         self.ttl_seconds = ttl_seconds
-        self.session_id = session_id or str(uuid.uuid4())[:8]
+        self.session_id = session_id or str(uuid.uuid4())[:CACHE_SESSION_ID_LENGTH]
         self.cache_dir = self.base_cache_dir / self.session_id
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -50,7 +56,7 @@ class BAMIndexCache:
         Returns:
             Cache path for the index file, or None for local files.
         """
-        if not bam_path.startswith(("http://", "https://")):
+        if not bam_path.startswith(REMOTE_FILE_SCHEMES):
             return None
 
         # Hash URL + basename for unique filename (not used for security)

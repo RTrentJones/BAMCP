@@ -4,6 +4,24 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .constants import (
+    DEFAULT_CACHE_DIR,
+    DEFAULT_CACHE_TTL_SECONDS,
+    DEFAULT_GENOME_BUILD,
+    DEFAULT_GNOMAD_DATASET,
+    DEFAULT_HOST,
+    DEFAULT_ISSUER_URL,
+    DEFAULT_MAX_READS,
+    DEFAULT_MIN_DEPTH,
+    DEFAULT_MIN_MAPQ,
+    DEFAULT_MIN_VAF,
+    DEFAULT_PORT,
+    DEFAULT_RESOURCE_SERVER_URL,
+    DEFAULT_TOKEN_EXPIRY_SECONDS,
+    DEFAULT_TRANSPORT,
+    DEFAULT_WINDOW_SIZE,
+)
+
 
 @dataclass
 class BAMCPConfig:
@@ -11,74 +29,74 @@ class BAMCPConfig:
 
     # Genomics settings
     reference: str | None = None
-    max_reads: int = 10000
-    default_window: int = 500
-    min_vaf: float = 0.1
-    min_depth: int = 3
-    min_mapq: int = 0
+    max_reads: int = DEFAULT_MAX_READS
+    default_window: int = DEFAULT_WINDOW_SIZE
+    min_vaf: float = DEFAULT_MIN_VAF
+    min_depth: int = DEFAULT_MIN_DEPTH
+    min_mapq: int = DEFAULT_MIN_MAPQ
 
     # Transport settings
-    transport: str = "stdio"
-    host: str = "0.0.0.0"  # noqa: S104
-    port: int = 8000
+    transport: str = DEFAULT_TRANSPORT
+    host: str = DEFAULT_HOST
+    port: int = DEFAULT_PORT
 
     # Auth settings
     auth_enabled: bool = False
-    issuer_url: str = "http://localhost:8000"
-    resource_server_url: str = "http://localhost:8000"
+    issuer_url: str = DEFAULT_ISSUER_URL
+    resource_server_url: str = DEFAULT_RESOURCE_SERVER_URL
     required_scopes: list[str] | None = None
-    token_expiry: int = 3600
+    token_expiry: int = DEFAULT_TOKEN_EXPIRY_SECONDS
 
     # External database settings
     ncbi_api_key: str | None = None
     clinvar_enabled: bool = True
     gnomad_enabled: bool = True
-    gnomad_dataset: str = "gnomad_r4"
-    genome_build: str = "GRCh38"
+    gnomad_dataset: str = DEFAULT_GNOMAD_DATASET
+    genome_build: str = DEFAULT_GENOME_BUILD
 
     # Cache settings
     cache_dir: str = ""  # Defaults to ~/.cache/bamcp if empty
-    cache_ttl: int = 86400  # 24 hours
+    cache_ttl: int = DEFAULT_CACHE_TTL_SECONDS
 
     def __post_init__(self) -> None:
         """Set default cache_dir if not provided."""
         if not self.cache_dir:
-            self.cache_dir = str(Path.home() / ".cache" / "bamcp")
+            self.cache_dir = str(DEFAULT_CACHE_DIR)
 
     @classmethod
     def from_env(cls) -> "BAMCPConfig":
         """Create config from environment variables."""
-        scopes_raw = os.environ.get("BAMCP_REQUIRED_SCOPES", "")
+        env = os.environ
+
+        scopes_raw = env.get("BAMCP_REQUIRED_SCOPES", "")
         scopes = [s.strip() for s in scopes_raw.split(",") if s.strip()] or None
 
         # Set up cache directory
-        cache_dir = os.environ.get("BAMCP_CACHE_DIR") or str(Path.home() / ".cache" / "bamcp")
+        cache_dir = env.get("BAMCP_CACHE_DIR") or str(DEFAULT_CACHE_DIR)
 
         # Ensure cache directory exists
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
         return cls(
             reference=os.environ.get("BAMCP_REFERENCE"),
-            max_reads=int(os.environ.get("BAMCP_MAX_READS", "10000")),
-            default_window=int(os.environ.get("BAMCP_DEFAULT_WINDOW", "500")),
-            min_vaf=float(os.environ.get("BAMCP_MIN_VAF", "0.1")),
-            min_depth=int(os.environ.get("BAMCP_MIN_DEPTH", "3")),
-            min_mapq=int(os.environ.get("BAMCP_MIN_MAPQ", "0")),
-            transport=os.environ.get("BAMCP_TRANSPORT", "stdio"),
-            host=os.environ.get("BAMCP_HOST", "0.0.0.0"),  # noqa: S104
-            port=int(os.environ.get("BAMCP_PORT", "8000")),
-            auth_enabled=os.environ.get("BAMCP_AUTH_ENABLED", "").lower() == "true",
-            issuer_url=os.environ.get("BAMCP_ISSUER_URL", "http://localhost:8000"),
-            resource_server_url=os.environ.get(
-                "BAMCP_RESOURCE_SERVER_URL", "http://localhost:8000"
-            ),
+            max_reads=int(env.get("BAMCP_MAX_READS", str(DEFAULT_MAX_READS))),
+            default_window=int(env.get("BAMCP_DEFAULT_WINDOW", str(DEFAULT_WINDOW_SIZE))),
+            min_vaf=float(env.get("BAMCP_MIN_VAF", str(DEFAULT_MIN_VAF))),
+            min_depth=int(env.get("BAMCP_MIN_DEPTH", str(DEFAULT_MIN_DEPTH))),
+            min_mapq=int(env.get("BAMCP_MIN_MAPQ", str(DEFAULT_MIN_MAPQ))),
+            transport=env.get("BAMCP_TRANSPORT", DEFAULT_TRANSPORT),
+            host=env.get("BAMCP_HOST", DEFAULT_HOST),
+            port=int(env.get("BAMCP_PORT", str(DEFAULT_PORT))),
+            auth_enabled=env.get("BAMCP_AUTH_ENABLED", "").lower() == "true",
+            issuer_url=env.get("BAMCP_ISSUER_URL", DEFAULT_ISSUER_URL),
+            resource_server_url=env.get("BAMCP_RESOURCE_SERVER_URL", DEFAULT_RESOURCE_SERVER_URL),
             required_scopes=scopes,
-            token_expiry=int(os.environ.get("BAMCP_TOKEN_EXPIRY", "3600")),
-            ncbi_api_key=os.environ.get("BAMCP_NCBI_API_KEY"),
-            clinvar_enabled=os.environ.get("BAMCP_CLINVAR_ENABLED", "true").lower() == "true",
-            gnomad_enabled=os.environ.get("BAMCP_GNOMAD_ENABLED", "true").lower() == "true",
-            gnomad_dataset=os.environ.get("BAMCP_GNOMAD_DATASET", "gnomad_r4"),
-            genome_build=os.environ.get("BAMCP_GENOME_BUILD", "GRCh38"),
+            token_expiry=int(env.get("BAMCP_TOKEN_EXPIRY", str(DEFAULT_TOKEN_EXPIRY_SECONDS))),
+            ncbi_api_key=env.get("BAMCP_NCBI_API_KEY"),
+            clinvar_enabled=env.get("BAMCP_CLINVAR_ENABLED", "true").lower() == "true",
+            gnomad_enabled=env.get("BAMCP_GNOMAD_ENABLED", "true").lower() == "true",
+            gnomad_dataset=env.get("BAMCP_GNOMAD_DATASET", DEFAULT_GNOMAD_DATASET),
+            genome_build=env.get("BAMCP_GENOME_BUILD", DEFAULT_GENOME_BUILD),
             cache_dir=cache_dir,
-            cache_ttl=int(os.environ.get("BAMCP_CACHE_TTL", "86400")),
+            cache_ttl=int(env.get("BAMCP_CACHE_TTL", str(DEFAULT_CACHE_TTL_SECONDS))),
         )

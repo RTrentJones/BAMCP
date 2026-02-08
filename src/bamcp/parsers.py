@@ -81,6 +81,8 @@ def fetch_region(
     max_reads: int = 10000,
     min_mapq: int = 0,
     index_filename: str | None = None,
+    min_vaf: float = 0.1,
+    min_depth: int = 3,
 ) -> RegionData:
     """
     Fetch reads from a BAM/CRAM file for a given region.
@@ -196,7 +198,7 @@ def fetch_region(
 
     samfile.close()
 
-    variants = detect_variants(base_counts, ref_seq, contig, start)
+    variants = detect_variants(base_counts, ref_seq, contig, start, min_vaf, min_depth)
 
     return RegionData(
         contig=contig,

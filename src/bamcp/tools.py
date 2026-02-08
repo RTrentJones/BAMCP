@@ -59,6 +59,8 @@ async def handle_browse_region(args: dict[str, Any], config: BAMCPConfig) -> dic
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
         index_filename=_get_index_path(file_path, config),
+        min_vaf=config.min_vaf,
+        min_depth=config.min_depth,
     )
 
     payload = _serialize_region_data(data)
@@ -87,6 +89,8 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
         index_filename=_get_index_path(file_path, config),
+        min_vaf=min_vaf,
+        min_depth=min_depth,
     )
 
     variants = [v for v in data.variants if v["vaf"] >= min_vaf and v["depth"] >= min_depth]
@@ -111,6 +115,8 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
         index_filename=_get_index_path(file_path, config),
+        min_vaf=config.min_vaf,
+        min_depth=config.min_depth,
     )
 
     coverage = data.coverage
@@ -197,6 +203,8 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
         index_filename=_get_index_path(file_path, config),
+        min_vaf=config.min_vaf,
+        min_depth=config.min_depth,
     )
 
     payload = _serialize_region_data(data)
@@ -228,6 +236,8 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
         index_filename=_get_index_path(file_path, config),
+        min_vaf=config.min_vaf,
+        min_depth=config.min_depth,
     )
 
     payload = _serialize_region_data(data)
@@ -258,6 +268,8 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
         index_filename=_get_index_path(file_path, config),
+        min_vaf=config.min_vaf,
+        min_depth=config.min_depth,
     )
 
     coverage = data.coverage

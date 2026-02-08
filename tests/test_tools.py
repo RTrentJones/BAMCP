@@ -624,7 +624,7 @@ class TestLowConfidenceThresholds:
 
     @pytest.mark.unit
     def test_keeps_high_confidence_when_all_thresholds_pass(self):
-        read = AlignedRead(
+        forward_read = AlignedRead(
             name="r1",
             sequence="ACGT",
             qualities=[LOW_CONFIDENCE_MIN_MEAN_QUALITY + 10] * 4,
@@ -635,12 +635,23 @@ class TestLowConfidenceThresholds:
             is_reverse=False,
             mismatches=[{"pos": 101, "ref": "C", "alt": "T"}],
         )
+        reverse_read = AlignedRead(
+            name="r2",
+            sequence="ACGT",
+            qualities=[LOW_CONFIDENCE_MIN_MEAN_QUALITY + 10] * 4,
+            cigar="4M",
+            position=100,
+            end_position=104,
+            mapping_quality=60,
+            is_reverse=True,
+            mismatches=[{"pos": 101, "ref": "C", "alt": "T"}],
+        )
         data = RegionData(
             contig="chr1",
             start=100,
             end=120,
-            reads=[read],
-            coverage=[1] * 20,
+            reads=[forward_read, reverse_read],
+            coverage=[2] * 20,
             variants=[
                 {
                     "contig": "chr1",
@@ -649,7 +660,7 @@ class TestLowConfidenceThresholds:
                     "alt": "T",
                     "vaf": LOW_CONFIDENCE_MIN_VAF + 0.1,
                     "depth": LOW_CONFIDENCE_MIN_DEPTH + 10,
-                    "alt_count": 1,
+                    "alt_count": 2,
                 }
             ],
         )

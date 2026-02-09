@@ -15,6 +15,7 @@ from .cache import BAMIndexCache
 from .clinvar import ClinVarClient
 from .config import BAMCPConfig
 from .constants import (
+    BAM_PARSE_TIMEOUT_SECONDS,
     DEFAULT_CONTIG,
     LOW_CONFIDENCE_MAX_STRAND_BIAS,
     LOW_CONFIDENCE_MIN_DEPTH,
@@ -53,6 +54,48 @@ def _get_index_path(file_path: str, config: BAMCPConfig) -> str | None:
     """
     cache = get_cache(config)
     return cache.get_index_path(file_path)
+
+
+async def _fetch_region_with_timeout(
+    file_path: str,
+    region: str,
+    reference: str | None,
+    config: BAMCPConfig,
+    min_vaf: float | None = None,
+    min_depth: int | None = None,
+) -> RegionData:
+    """Fetch region data from BAM/CRAM file with timeout protection.
+
+    Args:
+        file_path: Path to BAM/CRAM file.
+        region: Genomic region string.
+        reference: Path to reference FASTA.
+        config: Server configuration.
+        min_vaf: Minimum VAF threshold (uses config default if None).
+        min_depth: Minimum depth threshold (uses config default if None).
+
+    Returns:
+        RegionData with reads, coverage, and variants.
+
+    Raises:
+        asyncio.TimeoutError: If BAM parsing exceeds timeout.
+    """
+    index_path = _get_index_path(file_path, config)
+
+    return await asyncio.wait_for(
+        asyncio.to_thread(
+            fetch_region,
+            file_path,
+            region,
+            reference,
+            max_reads=config.max_reads,
+            min_mapq=config.min_mapq,
+            index_filename=index_path,
+            min_vaf=min_vaf if min_vaf is not None else config.min_vaf,
+            min_depth=min_depth if min_depth is not None else config.min_depth,
+        ),
+        timeout=BAM_PARSE_TIMEOUT_SECONDS,
+    )
 
 
 def validate_path(file_path: str, config: BAMCPConfig) -> None:
@@ -108,19 +151,7 @@ async def handle_browse_region(args: dict[str, Any], config: BAMCPConfig) -> dic
     region = args["region"]
     reference = args.get("reference", config.reference)
 
-    index_path = _get_index_path(file_path, config)
-    data = await asyncio.to_thread(
-        fetch_region,
-        file_path,
-        region,
-        reference,
-        max_reads=config.max_reads,
-        min_mapq=config.min_mapq,
-        index_filename=index_path,
-        min_vaf=config.min_vaf,
-        min_depth=config.min_depth,
-    )
-
+    data = await _fetch_region_with_timeout(file_path, region, reference, config)
     payload = _serialize_region_data(data)
 
     return {
@@ -141,17 +172,8 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
 
-    index_path = _get_index_path(file_path, config)
-    data = await asyncio.to_thread(
-        fetch_region,
-        file_path,
-        region,
-        reference,
-        max_reads=config.max_reads,
-        min_mapq=config.min_mapq,
-        index_filename=index_path,
-        min_vaf=min_vaf,
-        min_depth=min_depth,
+    data = await _fetch_region_with_timeout(
+        file_path, region, reference, config, min_vaf=min_vaf, min_depth=min_depth
     )
 
     variants = [v for v in data.variants if v["vaf"] >= min_vaf and v["depth"] >= min_depth]
@@ -170,18 +192,7 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
     region = args["region"]
     reference = args.get("reference", config.reference)
 
-    index_path = _get_index_path(file_path, config)
-    data = await asyncio.to_thread(
-        fetch_region,
-        file_path,
-        region,
-        reference,
-        max_reads=config.max_reads,
-        min_mapq=config.min_mapq,
-        index_filename=index_path,
-        min_vaf=config.min_vaf,
-        min_depth=config.min_depth,
-    )
+    data = await _fetch_region_with_timeout(file_path, region, reference, config)
 
     coverage = data.coverage
     stats = {
@@ -207,22 +218,22 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
 
     def _list_contigs_sync() -> list[dict]:
         mode = "rc" if file_path.endswith(".cram") else "rb"
-        samfile = pysam.AlignmentFile(
+        # Use context manager to ensure file handles are closed on exception
+        with pysam.AlignmentFile(
             file_path,
             mode,  # type: ignore[arg-type]
             reference_filename=reference,
             index_filename=_get_index_path(file_path, config),
-        )
-
-        try:
+        ) as samfile:
             return [
                 {"name": name, "length": length}
                 for name, length in zip(samfile.references, samfile.lengths, strict=True)
             ]
-        finally:
-            samfile.close()
 
-    contigs = await asyncio.to_thread(_list_contigs_sync)
+    contigs = await asyncio.wait_for(
+        asyncio.to_thread(_list_contigs_sync),
+        timeout=BAM_PARSE_TIMEOUT_SECONDS,
+    )
 
     # Detect genome build from contig lengths
     build_info = detect_genome_build(contigs)
@@ -266,19 +277,7 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     end = position + window // 2
     region = f"{contig}:{start}-{end}"
 
-    index_path = _get_index_path(file_path, config)
-    data = await asyncio.to_thread(
-        fetch_region,
-        file_path,
-        region,
-        reference,
-        max_reads=config.max_reads,
-        min_mapq=config.min_mapq,
-        index_filename=index_path,
-        min_vaf=config.min_vaf,
-        min_depth=config.min_depth,
-    )
-
+    data = await _fetch_region_with_timeout(file_path, region, reference, config)
     payload = _serialize_region_data(data)
 
     return {
@@ -302,19 +301,7 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     region = args["region"]
     reference = args.get("reference", config.reference)
 
-    index_path = _get_index_path(file_path, config)
-    data = await asyncio.to_thread(
-        fetch_region,
-        file_path,
-        region,
-        reference,
-        max_reads=config.max_reads,
-        min_mapq=config.min_mapq,
-        index_filename=index_path,
-        min_vaf=config.min_vaf,
-        min_depth=config.min_depth,
-    )
-
+    data = await _fetch_region_with_timeout(file_path, region, reference, config)
     payload = _serialize_region_data(data)
 
     return {
@@ -337,18 +324,7 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     region = args["region"]
     reference = args.get("reference", config.reference)
 
-    index_path = _get_index_path(file_path, config)
-    data = await asyncio.to_thread(
-        fetch_region,
-        file_path,
-        region,
-        reference,
-        max_reads=config.max_reads,
-        min_mapq=config.min_mapq,
-        index_filename=index_path,
-        min_vaf=config.min_vaf,
-        min_depth=config.min_depth,
-    )
+    data = await _fetch_region_with_timeout(file_path, region, reference, config)
 
     coverage = data.coverage
     mean_cov = round(sum(coverage) / len(coverage), 2) if coverage else 0

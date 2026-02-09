@@ -4,13 +4,99 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
+from typing import Generic, TypeVar
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+
+# Cache configuration
+CACHE_MAX_SIZE = 1000  # Maximum number of cached entries
+CACHE_TTL_SECONDS = 3600  # 1 hour TTL
+
+# NCBI rate limits (requests per second)
+NCBI_RATE_LIMIT_NO_KEY = 3  # 3 req/sec without API key
+NCBI_RATE_LIMIT_WITH_KEY = 10  # 10 req/sec with API key
+
+T = TypeVar("T")
+
+
+class BoundedTTLCache(Generic[T]):
+    """Thread-safe bounded cache with TTL eviction.
+
+    Implements LRU eviction when maxsize is exceeded and TTL-based expiry.
+    """
+
+    def __init__(self, maxsize: int = CACHE_MAX_SIZE, ttl: float = CACHE_TTL_SECONDS):
+        self._cache: OrderedDict[tuple, tuple[T, float]] = OrderedDict()
+        self._maxsize = maxsize
+        self._ttl = ttl
+        self._lock = asyncio.Lock()
+
+    async def get(self, key: tuple) -> T | None:
+        """Get value from cache, returning None if missing or expired."""
+        async with self._lock:
+            if key not in self._cache:
+                return None
+
+            value, timestamp = self._cache[key]
+            if time.monotonic() - timestamp > self._ttl:
+                del self._cache[key]
+                return None
+
+            # Move to end (most recently used)
+            self._cache.move_to_end(key)
+            return value
+
+    async def set(self, key: tuple, value: T) -> None:
+        """Set value in cache, evicting oldest if at capacity."""
+        async with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+            elif len(self._cache) >= self._maxsize:
+                # Evict oldest (first) item
+                self._cache.popitem(last=False)
+
+            self._cache[key] = (value, time.monotonic())
+
+
+class TokenBucketRateLimiter:
+    """Async token bucket rate limiter for API requests.
+
+    Enforces a maximum number of requests per second.
+    """
+
+    def __init__(self, rate: float):
+        """Initialize rate limiter.
+
+        Args:
+            rate: Maximum requests per second.
+        """
+        self._rate = rate
+        self._tokens = rate
+        self._last_refill = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        """Acquire a token, waiting if necessary."""
+        async with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_refill
+            self._tokens = min(self._rate, self._tokens + elapsed * self._rate)
+            self._last_refill = now
+
+            if self._tokens < 1:
+                wait_time = (1 - self._tokens) / self._rate
+                await asyncio.sleep(wait_time)
+                self._tokens = 0
+            else:
+                self._tokens -= 1
+
 
 # Review status to star rating mapping
 REVIEW_STARS: dict[str, int] = {
@@ -41,18 +127,29 @@ class ClinVarResult:
 
 @dataclass
 class ClinVarClient:
-    """Async client for NCBI E-utilities ClinVar queries."""
+    """Async client for NCBI E-utilities ClinVar queries.
+
+    Features:
+    - Bounded LRU cache with TTL to prevent memory exhaustion
+    - Token bucket rate limiting to comply with NCBI requirements
+    - Concurrency limiting via semaphore
+    """
 
     api_key: str | None = None
     timeout: float = 30.0
-    _cache: dict[tuple[str, int, str, str], ClinVarResult | None] = field(
-        default_factory=dict, repr=False
-    )
+    _cache: BoundedTTLCache[ClinVarResult | None] = field(default=None, repr=False)  # type: ignore[assignment]
     _semaphore: asyncio.Semaphore = field(default=None, repr=False)  # type: ignore[assignment]
+    _rate_limiter: TokenBucketRateLimiter = field(default=None, repr=False)  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         max_concurrent = 10 if self.api_key else 3
+        rate = NCBI_RATE_LIMIT_WITH_KEY if self.api_key else NCBI_RATE_LIMIT_NO_KEY
+
         self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._rate_limiter = TokenBucketRateLimiter(rate)
+        self._cache = BoundedTTLCache[ClinVarResult | None](
+            maxsize=CACHE_MAX_SIZE, ttl=CACHE_TTL_SECONDS
+        )
 
     async def lookup(self, chrom: str, pos: int, ref: str, alt: str) -> ClinVarResult | None:
         """
@@ -68,12 +165,22 @@ class ClinVarClient:
             ClinVarResult if found, None otherwise.
         """
         cache_key = (chrom, pos, ref, alt)
-        if cache_key in self._cache:
-            return self._cache[cache_key]
 
+        # Check cache first
+        cached = await self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        # Acquire semaphore for concurrency control and rate limit
         async with self._semaphore:
+            # Re-check cache after acquiring semaphore (another request may have filled it)
+            cached = await self._cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+            await self._rate_limiter.acquire()
             result = await self._do_lookup(chrom, pos, ref, alt)
-            self._cache[cache_key] = result
+            await self._cache.set(cache_key, result)
             return result
 
     async def _do_lookup(self, chrom: str, pos: int, ref: str, alt: str) -> ClinVarResult | None:
@@ -99,6 +206,9 @@ class ClinVarClient:
             if not id_list:
                 logger.debug("ClinVar: no results for %s", term)
                 return None
+
+            # Rate limit before second request
+            await self._rate_limiter.acquire()
 
             # Step 2: esummary to get annotation details
             summary_params: dict[str, str | int] = {

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 
+import numpy as np
 import pysam
 
 
@@ -41,6 +42,10 @@ class RegionData:
     reference_sequence: str | None = None
 
 
+# Maximum region size to prevent DoS via unbounded memory allocation
+MAX_REGION_SIZE = 1_000_000  # 1 Mbp
+
+
 def parse_region(region: str) -> tuple[str, int, int]:
     """
     Parse a genomic region string into contig, start, end.
@@ -54,7 +59,7 @@ def parse_region(region: str) -> tuple[str, int, int]:
         Tuple of (contig, start, end)
 
     Raises:
-        ValueError: If region format is invalid.
+        ValueError: If region format is invalid or exceeds MAX_REGION_SIZE.
     """
     region = region.replace(",", "")
     try:
@@ -71,6 +76,13 @@ def parse_region(region: str) -> tuple[str, int, int]:
         raise ValueError(f"Start position must be non-negative, got {start}")
     if end <= start:
         raise ValueError(f"End position ({end}) must be greater than start ({start})")
+
+    region_size = end - start
+    if region_size > MAX_REGION_SIZE:
+        raise ValueError(
+            f"Region size {region_size:,}bp exceeds maximum allowed {MAX_REGION_SIZE:,}bp. "
+            f"Please request a smaller region."
+        )
 
     return contig, start, end
 
@@ -103,109 +115,117 @@ def fetch_region(
     contig, start, end = parse_region(region)
 
     mode = "rc" if bam_path.endswith(".cram") else "rb"
-    samfile = pysam.AlignmentFile(
+
+    # Use context manager to ensure file handles are properly closed on exception
+    with pysam.AlignmentFile(
         bam_path,
         mode,  # type: ignore[arg-type]
         reference_filename=reference_path,
         index_filename=index_filename,
-    )
-
-    # 1. Calculate coverage and base counts using pysam's optimized C engine
-    # Returns tuple of arrays (A, C, G, T)
-    # Use read_callback to respect min_mapq filter for consistency with read filtering
-    cov_A, cov_C, cov_G, cov_T = samfile.count_coverage(
-        contig,
-        start,
-        end,
-        quality_threshold=0,
-        read_callback=lambda r: r.mapping_quality >= min_mapq,
-    )
-
-    # Sum arrays to get total coverage per position
-    # coverage = [a + c + g + t for a, c, g, t in zip(cov_A, cov_C, cov_G, cov_T)]
-    # Unpack for zip efficiency
-    coverage = []
-    for i in range(len(cov_A)):
-        coverage.append(cov_A[i] + cov_C[i] + cov_G[i] + cov_T[i])
-
-    reads: list[AlignedRead] = []
-
-    ref_seq: str | None = None
-    if reference_path:
-        with pysam.FastaFile(reference_path) as fasta:
-            ref_seq = fasta.fetch(contig, start, end)
-
-    read_count = 0
-    for read in samfile.fetch(contig, start, end):
-        if read.mapping_quality < min_mapq:
-            continue
-        if read.is_unmapped or read.is_secondary or read.is_supplementary:
-            continue
-
-        read_count += 1
-        if read_count > max_reads:
-            break
-
-        mismatches: list[dict] = []
-        if ref_seq and read.query_sequence:
-            try:
-                aligned_pairs = read.get_aligned_pairs(with_seq=True)
-            except ValueError:
-                # MD tag not present; fall back to coordinate-based comparison
-                aligned_pairs = []
-                for qpos, rpos in read.get_aligned_pairs():
-                    if rpos is not None and start <= rpos < end:
-                        idx = rpos - start
-                        ref_base_chr = ref_seq[idx] if 0 <= idx < len(ref_seq) else None
-                        aligned_pairs.append((qpos, rpos, ref_base_chr))
-                    else:
-                        aligned_pairs.append((qpos, rpos, None))
-
-            for qpos, rpos, ref_base in aligned_pairs:
-                if rpos is None or qpos is None:
-                    continue
-                if start <= rpos < end:
-                    query_base = read.query_sequence[qpos]
-                    if ref_base and query_base != ref_base.upper():
-                        mismatches.append({"pos": rpos, "ref": ref_base.upper(), "alt": query_base})
-
-        # Extract paired-end information
-        mate_position = None
-        mate_contig = None
-        insert_size = None
-        is_proper_pair = False
-        is_read1 = False
-
-        if read.is_paired:
-            is_proper_pair = read.is_proper_pair
-            is_read1 = read.is_read1
-            insert_size = read.template_length if read.template_length != 0 else None
-
-            if read.next_reference_id >= 0:
-                mate_position = read.next_reference_start
-                mate_contig = samfile.get_reference_name(read.next_reference_id)
-
-        reads.append(
-            AlignedRead(
-                name=read.query_name or "",
-                sequence=read.query_sequence or "",
-                qualities=list(read.query_qualities or []),
-                cigar=read.cigarstring or "",
-                position=read.reference_start if read.reference_start is not None else 0,
-                end_position=read.reference_end if read.reference_end is not None else (read.reference_start or 0),
-                mapping_quality=read.mapping_quality,
-                is_reverse=read.is_reverse,
-                mismatches=mismatches,
-                mate_position=mate_position,
-                mate_contig=mate_contig,
-                insert_size=insert_size,
-                is_proper_pair=is_proper_pair,
-                is_read1=is_read1,
-                is_paired=read.is_paired,
-            )
+    ) as samfile:
+        # 1. Calculate coverage and base counts using pysam's optimized C engine
+        # Returns tuple of arrays (A, C, G, T)
+        # Use read_callback to respect min_mapq filter for consistency with read filtering
+        cov_A, cov_C, cov_G, cov_T = samfile.count_coverage(
+            contig,
+            start,
+            end,
+            quality_threshold=0,
+            read_callback=lambda r: r.mapping_quality >= min_mapq,
         )
 
-    samfile.close()
+        # Vectorized sum using numpy for O(n) instead of Python loop
+        # count_coverage returns numpy arrays, so we can add directly
+        coverage = (np.array(cov_A) + np.array(cov_C) + np.array(cov_G) + np.array(cov_T)).tolist()
+
+        reads: list[AlignedRead] = []
+
+        ref_seq: str | None = None
+        if reference_path:
+            with pysam.FastaFile(reference_path) as fasta:
+                ref_seq = fasta.fetch(contig, start, end)
+
+        read_count = 0
+        for read in samfile.fetch(contig, start, end):
+            if read.mapping_quality < min_mapq:
+                continue
+            if read.is_unmapped or read.is_secondary or read.is_supplementary:
+                continue
+
+            read_count += 1
+            if read_count > max_reads:
+                break
+
+            mismatches: list[dict] = []
+            if ref_seq and read.query_sequence:
+                try:
+                    aligned_pairs = read.get_aligned_pairs(with_seq=True)
+                except ValueError:
+                    # MD tag not present; fall back to coordinate-based comparison
+                    aligned_pairs = []
+                    for qpos, rpos in read.get_aligned_pairs():
+                        if rpos is not None and start <= rpos < end:
+                            idx = rpos - start
+                            ref_base_chr = ref_seq[idx] if 0 <= idx < len(ref_seq) else None
+                            aligned_pairs.append((qpos, rpos, ref_base_chr))
+                        else:
+                            aligned_pairs.append((qpos, rpos, None))
+
+                for qpos, rpos, ref_base in aligned_pairs:
+                    if rpos is None or qpos is None:
+                        continue
+                    if start <= rpos < end:
+                        query_base = read.query_sequence[qpos]
+                        if ref_base and query_base != ref_base.upper():
+                            mismatches.append(
+                                {
+                                    "pos": rpos,
+                                    "ref": ref_base.upper(),
+                                    "alt": query_base,
+                                }
+                            )
+
+            # Extract paired-end information
+            mate_position = None
+            mate_contig = None
+            insert_size = None
+            is_proper_pair = False
+            is_read1 = False
+
+            if read.is_paired:
+                is_proper_pair = read.is_proper_pair
+                is_read1 = read.is_read1
+                insert_size = read.template_length if read.template_length != 0 else None
+
+                if read.next_reference_id >= 0:
+                    mate_position = read.next_reference_start
+                    mate_contig = samfile.get_reference_name(read.next_reference_id)
+
+            reads.append(
+                AlignedRead(
+                    name=read.query_name or "",
+                    sequence=read.query_sequence or "",
+                    qualities=list(read.query_qualities or []),
+                    cigar=read.cigarstring or "",
+                    position=read.reference_start if read.reference_start is not None else 0,
+                    end_position=(
+                        read.reference_end
+                        if read.reference_end is not None
+                        else (read.reference_start or 0)
+                    ),
+                    mapping_quality=read.mapping_quality,
+                    is_reverse=read.is_reverse,
+                    mismatches=mismatches,
+                    mate_position=mate_position,
+                    mate_contig=mate_contig,
+                    insert_size=insert_size,
+                    is_proper_pair=is_proper_pair,
+                    is_read1=is_read1,
+                    is_paired=read.is_paired,
+                )
+            )
+
+    # Context manager ensures samfile is closed before we continue
 
     variants = detect_variants(
         (cov_A, cov_C, cov_G, cov_T), ref_seq, contig, start, min_vaf, min_depth
@@ -250,18 +270,11 @@ def detect_variants(
         return variants
 
     cov_A, cov_C, cov_G, cov_T = coverage_counts
-    # Map index to base string
-    bases = ["A", "C", "G", "T"]
 
     # Iterate over positions
     for i in range(len(cov_A)):
         # Total depth at this position (excluding N/Del)
-        counts = {
-            "A": cov_A[i],
-            "C": cov_C[i],
-            "G": cov_G[i],
-            "T": cov_T[i]
-        }
+        counts = {"A": cov_A[i], "C": cov_C[i], "G": cov_G[i], "T": cov_T[i]}
         total = sum(counts.values())
 
         if total < min_depth:

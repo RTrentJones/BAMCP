@@ -4,13 +4,62 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
+from typing import Generic, TypeVar
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 GNOMAD_API_URL = "https://gnomad.broadinstitute.org/api"
+
+# Cache configuration
+CACHE_MAX_SIZE = 1000  # Maximum number of cached entries
+CACHE_TTL_SECONDS = 3600  # 1 hour TTL
+
+T = TypeVar("T")
+
+
+class BoundedTTLCache(Generic[T]):
+    """Thread-safe bounded cache with TTL eviction.
+
+    Implements LRU eviction when maxsize is exceeded and TTL-based expiry.
+    """
+
+    def __init__(self, maxsize: int = CACHE_MAX_SIZE, ttl: float = CACHE_TTL_SECONDS):
+        self._cache: OrderedDict[tuple, tuple[T, float]] = OrderedDict()
+        self._maxsize = maxsize
+        self._ttl = ttl
+        self._lock = asyncio.Lock()
+
+    async def get(self, key: tuple) -> T | None:
+        """Get value from cache, returning None if missing or expired."""
+        async with self._lock:
+            if key not in self._cache:
+                return None
+
+            value, timestamp = self._cache[key]
+            if time.monotonic() - timestamp > self._ttl:
+                del self._cache[key]
+                return None
+
+            # Move to end (most recently used)
+            self._cache.move_to_end(key)
+            return value
+
+    async def set(self, key: tuple, value: T) -> None:
+        """Set value in cache, evicting oldest if at capacity."""
+        async with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+            elif len(self._cache) >= self._maxsize:
+                # Evict oldest (first) item
+                self._cache.popitem(last=False)
+
+            self._cache[key] = (value, time.monotonic())
+
 
 VARIANT_QUERY = """
 query GnomadVariant($variantId: String!, $dataset: DatasetId!) {
@@ -76,17 +125,23 @@ class GnomadResult:
 
 @dataclass
 class GnomadClient:
-    """Async client for gnomAD GraphQL API queries."""
+    """Async client for gnomAD GraphQL API queries.
+
+    Features:
+    - Bounded LRU cache with TTL to prevent memory exhaustion
+    - Concurrency limiting via semaphore
+    """
 
     dataset: str = "gnomad_r4"
     timeout: float = 30.0
-    _cache: dict[tuple[str, int, str, str], GnomadResult | None] = field(
-        default_factory=dict, repr=False
-    )
+    _cache: BoundedTTLCache[GnomadResult | None] = field(default=None, repr=False)  # type: ignore[assignment]
     _semaphore: asyncio.Semaphore = field(default=None, repr=False)  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         self._semaphore = asyncio.Semaphore(5)
+        self._cache = BoundedTTLCache[GnomadResult | None](
+            maxsize=CACHE_MAX_SIZE, ttl=CACHE_TTL_SECONDS
+        )
 
     async def lookup(self, chrom: str, pos: int, ref: str, alt: str) -> GnomadResult | None:
         """
@@ -102,12 +157,20 @@ class GnomadClient:
             GnomadResult if found, None otherwise.
         """
         cache_key = (chrom, pos, ref, alt)
-        if cache_key in self._cache:
-            return self._cache[cache_key]
+
+        # Check cache first
+        cached = await self._cache.get(cache_key)
+        if cached is not None:
+            return cached
 
         async with self._semaphore:
+            # Re-check cache after acquiring semaphore
+            cached = await self._cache.get(cache_key)
+            if cached is not None:
+                return cached
+
             result = await self._do_lookup(chrom, pos, ref, alt)
-            self._cache[cache_key] = result
+            await self._cache.set(cache_key, result)
             return result
 
     async def _do_lookup(self, chrom: str, pos: int, ref: str, alt: str) -> GnomadResult | None:

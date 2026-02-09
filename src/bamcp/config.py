@@ -63,9 +63,42 @@ class BAMCPConfig:
     allow_remote_files: bool = False
 
     def __post_init__(self) -> None:
-        """Set default cache_dir if not provided."""
+        """Validate config values and set defaults."""
+        # Set default cache_dir if not provided
         if not self.cache_dir:
             self.cache_dir = str(DEFAULT_CACHE_DIR)
+
+        # Validate genomics settings
+        if not 0 <= self.min_vaf <= 1:
+            raise ValueError(f"min_vaf must be between 0 and 1, got {self.min_vaf}")
+
+        if self.min_depth < 1:
+            raise ValueError(f"min_depth must be at least 1, got {self.min_depth}")
+
+        if self.max_reads < 1:
+            raise ValueError(f"max_reads must be at least 1, got {self.max_reads}")
+
+        if not 0 <= self.min_mapq <= 255:
+            raise ValueError(f"min_mapq must be between 0 and 255, got {self.min_mapq}")
+
+        if self.default_window < 1:
+            raise ValueError(f"default_window must be at least 1, got {self.default_window}")
+
+        # Validate transport settings
+        valid_transports = ("stdio", "sse", "streamable-http")
+        if self.transport not in valid_transports:
+            raise ValueError(f"transport must be one of {valid_transports}, got '{self.transport}'")
+
+        if not 1 <= self.port <= 65535:
+            raise ValueError(f"port must be between 1 and 65535, got {self.port}")
+
+        # Validate auth settings
+        if self.token_expiry < 1:
+            raise ValueError(f"token_expiry must be at least 1 second, got {self.token_expiry}")
+
+        # Validate cache settings
+        if self.cache_ttl < 0:
+            raise ValueError(f"cache_ttl must be non-negative, got {self.cache_ttl}")
 
     @classmethod
     def from_env(cls) -> "BAMCPConfig":

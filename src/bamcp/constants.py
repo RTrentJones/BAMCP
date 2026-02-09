@@ -34,6 +34,9 @@ DEFAULT_CACHE_TTL_SECONDS = 86_400  # 24 hours
 CACHE_SESSION_ID_LENGTH = 8
 REMOTE_FILE_SCHEMES = ("http://", "https://")
 
+# Timeout for BAM/CRAM parsing operations (seconds)
+BAM_PARSE_TIMEOUT_SECONDS = 30.0
+
 # UI constants
 VIEWER_RESOURCE_URI = "ui://bamcp/viewer"
 

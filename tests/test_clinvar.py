@@ -243,3 +243,89 @@ class TestClinVarClient:
         client = ClinVarClient(timeout=1.0)
         with pytest.raises(httpx.ReadTimeout):
             await client.lookup("chr17", 7674220, "G", "A")
+
+
+class TestBoundedTTLCache:
+    """Tests for BoundedTTLCache behavior."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_cache_basic_set_get(self):
+        from bamcp.clinvar import BoundedTTLCache
+
+        cache: BoundedTTLCache[str] = BoundedTTLCache(maxsize=100, ttl=3600)
+        await cache.set(("key1",), "value1")
+        result = await cache.get(("key1",))
+        assert result == "value1"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_cache_miss_returns_none(self):
+        from bamcp.clinvar import BoundedTTLCache
+
+        cache: BoundedTTLCache[str] = BoundedTTLCache(maxsize=100, ttl=3600)
+        result = await cache.get(("nonexistent",))
+        assert result is None
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_cache_evicts_oldest_when_full(self):
+        from bamcp.clinvar import BoundedTTLCache
+
+        cache: BoundedTTLCache[str] = BoundedTTLCache(maxsize=3, ttl=3600)
+        await cache.set(("key1",), "value1")
+        await cache.set(("key2",), "value2")
+        await cache.set(("key3",), "value3")
+        # Cache is now full
+
+        # Add a fourth item - should evict key1 (oldest)
+        await cache.set(("key4",), "value4")
+
+        assert await cache.get(("key1",)) is None  # Evicted
+        assert await cache.get(("key2",)) == "value2"
+        assert await cache.get(("key3",)) == "value3"
+        assert await cache.get(("key4",)) == "value4"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_cache_lru_access_updates_order(self):
+        from bamcp.clinvar import BoundedTTLCache
+
+        cache: BoundedTTLCache[str] = BoundedTTLCache(maxsize=3, ttl=3600)
+        await cache.set(("key1",), "value1")
+        await cache.set(("key2",), "value2")
+        await cache.set(("key3",), "value3")
+
+        # Access key1 to make it most recently used
+        await cache.get(("key1",))
+
+        # Add a fourth item - should evict key2 (now oldest)
+        await cache.set(("key4",), "value4")
+
+        assert await cache.get(("key1",)) == "value1"  # Still there (was accessed)
+        assert await cache.get(("key2",)) is None  # Evicted
+        assert await cache.get(("key3",)) == "value3"
+        assert await cache.get(("key4",)) == "value4"
+
+
+class TestTokenBucketRateLimiter:
+    """Tests for TokenBucketRateLimiter behavior."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_rate_limiter_allows_initial_requests(self):
+        from bamcp.clinvar import TokenBucketRateLimiter
+
+        limiter = TokenBucketRateLimiter(rate=5.0)  # 5 requests per second
+        # Should be able to make 5 requests immediately
+        for _ in range(5):
+            await limiter.acquire()
+        # Test passes if no exception
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_rate_limiter_initialized_with_rate(self):
+        from bamcp.clinvar import TokenBucketRateLimiter
+
+        limiter = TokenBucketRateLimiter(rate=10.0)
+        assert limiter._rate == 10.0

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import bisect
 import json
 import logging
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pysam
 
 from .cache import BAMIndexCache
@@ -30,6 +33,12 @@ from .gnomad import GnomadClient
 from .parsers import AlignedRead, RegionData, fetch_region
 
 logger = logging.getLogger(__name__)
+
+# Pattern for valid chromosome names (chr prefix optional, allows chr1-chr99 or 1-99, X, Y, M, MT)
+CHROM_PATTERN = re.compile(r"^(chr)?(\d{1,2}|[XYM]|MT)$", re.IGNORECASE)
+
+# Pattern for valid allele strings (only ACGTN)
+ALLELE_PATTERN = re.compile(r"^[ACGTN]+$", re.IGNORECASE)
 
 # Module-level cache instance for session consistency
 _cache_instance: BAMIndexCache | None = None
@@ -346,6 +355,49 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     return {"content": [{"type": "text", "text": "\n".join(summary_lines)}]}
 
 
+def _validate_variant_input(chrom: str, pos: int, ref: str, alt: str) -> str | None:
+    """Validate variant lookup input parameters.
+
+    Returns:
+        Error message if validation fails, None if valid.
+    """
+    if not CHROM_PATTERN.match(chrom):
+        return f"Invalid chromosome: {chrom}"
+    if pos < 1:
+        return f"Position must be positive, got {pos}"
+    if not ALLELE_PATTERN.match(ref):
+        return f"Invalid reference allele: {ref}"
+    if not ALLELE_PATTERN.match(alt):
+        return f"Invalid alternate allele: {alt}"
+    if len(ref) > 1000 or len(alt) > 1000:
+        return "Allele length exceeds maximum (1000bp)"
+    return None
+
+
+def validate_lookup_inputs(chrom: str, pos: int, ref: str, alt: str) -> None:
+    """Validate variant lookup input parameters.
+
+    Args:
+        chrom: Chromosome (e.g., "chr17" or "17").
+        pos: Genomic position (1-based).
+        ref: Reference allele.
+        alt: Alternate allele.
+
+    Raises:
+        ValueError: If any parameter is invalid.
+    """
+    if not CHROM_PATTERN.match(chrom):
+        raise ValueError(f"Invalid chromosome: {chrom}")
+    if pos < 1:
+        raise ValueError(f"Position must be positive, got {pos}")
+    if not ALLELE_PATTERN.match(ref):
+        raise ValueError(f"Invalid reference allele: {ref}")
+    if not ALLELE_PATTERN.match(alt):
+        raise ValueError(f"Invalid alternate allele: {alt}")
+    if len(ref) > 1000 or len(alt) > 1000:
+        raise ValueError("Allele length exceeds maximum (1000bp)")
+
+
 _CLINVAR_DISCLAIMER = (
     "Note: This is research-grade information from ClinVar and is not intended "
     "for clinical diagnostic use."
@@ -368,18 +420,45 @@ async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> di
     ref = args["ref"]
     alt = args["alt"]
 
+    # Validate input parameters
+    validation_error = _validate_variant_input(chrom, pos, ref, alt)
+    if validation_error:
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {"error": validation_error, "disclaimer": _CLINVAR_DISCLAIMER}
+                    ),
+                }
+            ]
+        }
+
     client = ClinVarClient(api_key=config.ncbi_api_key)
 
     try:
         result = await client.lookup(chrom, pos, ref, alt)
-    except Exception:
-        logger.exception("ClinVar lookup failed for %s:%d %s>%s", chrom, pos, ref, alt)
+    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
+        # Network and HTTP errors - expected failures
+        logger.warning("ClinVar lookup failed for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
         return {
             "content": [
                 {
                     "type": "text",
                     "text": json.dumps(
                         {"error": "ClinVar lookup failed", "disclaimer": _CLINVAR_DISCLAIMER}
+                    ),
+                }
+            ]
+        }
+    except asyncio.TimeoutError:
+        logger.warning("ClinVar lookup timed out for %s:%d %s>%s", chrom, pos, ref, alt)
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {"error": "ClinVar lookup timed out", "disclaimer": _CLINVAR_DISCLAIMER}
                     ),
                 }
             ]
@@ -418,18 +497,45 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
     ref = args["ref"]
     alt = args["alt"]
 
+    # Validate input parameters
+    validation_error = _validate_variant_input(chrom, pos, ref, alt)
+    if validation_error:
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {"error": validation_error, "disclaimer": _GNOMAD_DISCLAIMER}
+                    ),
+                }
+            ]
+        }
+
     client = GnomadClient(dataset=config.gnomad_dataset)
 
     try:
         result = await client.lookup(chrom, pos, ref, alt)
-    except Exception:
-        logger.exception("gnomAD lookup failed for %s:%d %s>%s", chrom, pos, ref, alt)
+    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
+        # Network and HTTP errors - expected failures
+        logger.warning("gnomAD lookup failed for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
         return {
             "content": [
                 {
                     "type": "text",
                     "text": json.dumps(
                         {"error": "gnomAD lookup failed", "disclaimer": _GNOMAD_DISCLAIMER}
+                    ),
+                }
+            ]
+        }
+    except asyncio.TimeoutError:
+        logger.warning("gnomAD lookup timed out for %s:%d %s>%s", chrom, pos, ref, alt)
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {"error": "gnomAD lookup timed out", "disclaimer": _GNOMAD_DISCLAIMER}
                     ),
                 }
             ]
@@ -499,6 +605,8 @@ def _get_query_position(read: AlignedRead, ref_pos: int) -> int | None:
 def _bin_histogram(values: list[int], bins: list[int]) -> dict[str, int]:
     """Bin values into a histogram with labeled ranges.
 
+    Uses binary search for O(n log b) instead of O(n*b) linear scan.
+
     Args:
         values: List of integer values to bin.
         bins: List of bin edges (e.g., [0, 10, 20, 30, 40] creates bins 0-9, 10-19, etc.)
@@ -506,26 +614,27 @@ def _bin_histogram(values: list[int], bins: list[int]) -> dict[str, int]:
     Returns:
         Dict mapping bin labels to counts (e.g., {"0-9": 5, "10-19": 3, ...}).
     """
-    histogram: dict[str, int] = {}
-
+    # Pre-compute labels and initialize histogram
+    labels = []
     for i in range(len(bins)):
         label = f"{bins[i]}+" if i == len(bins) - 1 else f"{bins[i]}-{bins[i + 1] - 1}"
-        histogram[label] = 0
+        labels.append(label)
 
+    # Use list for counting (faster than dict for small number of bins)
+    counts = [0] * len(bins)
+
+    # Use binary search to find bin for each value - O(n log b)
     for val in values:
-        for i in range(len(bins)):
-            if i == len(bins) - 1:
-                # Last bin: all values >= bins[i]
-                if val >= bins[i]:
-                    label = f"{bins[i]}+"
-                    histogram[label] = histogram.get(label, 0) + 1
-                    break
-            elif bins[i] <= val < bins[i + 1]:
-                label = f"{bins[i]}-{bins[i + 1] - 1}"
-                histogram[label] = histogram.get(label, 0) + 1
-                break
+        # bisect_right gives us the insertion point
+        # Subtract 1 to get the bin index (values below first bin go to -1, clamp to 0)
+        idx = bisect.bisect_right(bins, val) - 1
+        if idx < 0:
+            idx = 0  # Values below first bin go to first bin
+        elif idx >= len(bins):
+            idx = len(bins) - 1  # Values above last bin go to last bin
+        counts[idx] += 1
 
-    return histogram
+    return dict(zip(labels, counts, strict=True))
 
 
 def _build_mismatch_index(
@@ -632,18 +741,30 @@ def _serialize_region_data(data: RegionData, compact: bool = False) -> dict:
         enhanced["strand_reverse"] = evidence["reverse_count"]
         enhanced["mean_quality"] = evidence["mean_quality"]
 
-        # Low-confidence if ANY of these criteria fail:
-        # - Depth < 10
-        # - VAF < 10% (0.10)
-        # - Mean base quality < 20
-        # - Strand bias > 90% (0.9)
-        is_low_confidence = (
-            variant["depth"] < LOW_CONFIDENCE_MIN_DEPTH
-            or variant["vaf"] < LOW_CONFIDENCE_MIN_VAF
-            or evidence["mean_quality"] < LOW_CONFIDENCE_MIN_MEAN_QUALITY
-            or evidence["strand_bias"] > LOW_CONFIDENCE_MAX_STRAND_BIAS
-        )
-        enhanced["is_low_confidence"] = is_low_confidence
+        # Compute confidence level based on multiple criteria
+        # High: VAF >= 20%, depth >= 20, quality >= 25, strand bias <= 0.7
+        # Medium: VAF >= 10%, depth >= 10, quality >= 20, strand bias <= 0.9
+        # Low: anything else
+        vaf = variant["vaf"]
+        depth = variant["depth"]
+        quality = evidence["mean_quality"]
+        strand_bias = evidence["strand_bias"]
+
+        if vaf >= 0.2 and depth >= 20 and quality >= 25 and strand_bias <= 0.7:
+            confidence = "high"
+        elif (
+            vaf >= LOW_CONFIDENCE_MIN_VAF
+            and depth >= LOW_CONFIDENCE_MIN_DEPTH
+            and quality >= LOW_CONFIDENCE_MIN_MEAN_QUALITY
+            and strand_bias <= LOW_CONFIDENCE_MAX_STRAND_BIAS
+        ):
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        enhanced["confidence"] = confidence
+        # Keep is_low_confidence for backwards compatibility
+        enhanced["is_low_confidence"] = confidence == "low"
 
         enhanced_variants.append(enhanced)
 

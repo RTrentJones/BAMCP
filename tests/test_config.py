@@ -190,3 +190,137 @@ class TestBAMCPConfig:
         BAMCPConfig.from_env()
 
         assert cache_dir.exists()
+
+
+class TestConfigValidation:
+    """Tests for config validation in __post_init__."""
+
+    @pytest.mark.unit
+    def test_min_vaf_too_low(self):
+        """min_vaf below 0 should raise ValueError."""
+        with pytest.raises(ValueError, match="min_vaf must be between 0 and 1"):
+            BAMCPConfig(min_vaf=-0.1)
+
+    @pytest.mark.unit
+    def test_min_vaf_too_high(self):
+        """min_vaf above 1 should raise ValueError."""
+        with pytest.raises(ValueError, match="min_vaf must be between 0 and 1"):
+            BAMCPConfig(min_vaf=1.5)
+
+    @pytest.mark.unit
+    def test_min_vaf_boundary_valid(self):
+        """min_vaf at boundaries (0 and 1) should be valid."""
+        config = BAMCPConfig(min_vaf=0.0)
+        assert config.min_vaf == 0.0
+
+        config = BAMCPConfig(min_vaf=1.0)
+        assert config.min_vaf == 1.0
+
+    @pytest.mark.unit
+    def test_min_depth_zero(self):
+        """min_depth of 0 should raise ValueError."""
+        with pytest.raises(ValueError, match="min_depth must be at least 1"):
+            BAMCPConfig(min_depth=0)
+
+    @pytest.mark.unit
+    def test_min_depth_negative(self):
+        """Negative min_depth should raise ValueError."""
+        with pytest.raises(ValueError, match="min_depth must be at least 1"):
+            BAMCPConfig(min_depth=-5)
+
+    @pytest.mark.unit
+    def test_max_reads_zero(self):
+        """max_reads of 0 should raise ValueError."""
+        with pytest.raises(ValueError, match="max_reads must be at least 1"):
+            BAMCPConfig(max_reads=0)
+
+    @pytest.mark.unit
+    def test_max_reads_negative(self):
+        """Negative max_reads should raise ValueError."""
+        with pytest.raises(ValueError, match="max_reads must be at least 1"):
+            BAMCPConfig(max_reads=-100)
+
+    @pytest.mark.unit
+    def test_min_mapq_negative(self):
+        """Negative min_mapq should raise ValueError."""
+        with pytest.raises(ValueError, match="min_mapq must be between 0 and 255"):
+            BAMCPConfig(min_mapq=-1)
+
+    @pytest.mark.unit
+    def test_min_mapq_too_high(self):
+        """min_mapq above 255 should raise ValueError."""
+        with pytest.raises(ValueError, match="min_mapq must be between 0 and 255"):
+            BAMCPConfig(min_mapq=256)
+
+    @pytest.mark.unit
+    def test_min_mapq_boundary_valid(self):
+        """min_mapq at boundaries (0 and 255) should be valid."""
+        config = BAMCPConfig(min_mapq=0)
+        assert config.min_mapq == 0
+
+        config = BAMCPConfig(min_mapq=255)
+        assert config.min_mapq == 255
+
+    @pytest.mark.unit
+    def test_default_window_zero(self):
+        """default_window of 0 should raise ValueError."""
+        with pytest.raises(ValueError, match="default_window must be at least 1"):
+            BAMCPConfig(default_window=0)
+
+    @pytest.mark.unit
+    def test_default_window_negative(self):
+        """Negative default_window should raise ValueError."""
+        with pytest.raises(ValueError, match="default_window must be at least 1"):
+            BAMCPConfig(default_window=-50)
+
+    @pytest.mark.unit
+    def test_invalid_transport(self):
+        """Invalid transport should raise ValueError."""
+        with pytest.raises(ValueError, match="transport must be one of"):
+            BAMCPConfig(transport="websocket")
+
+    @pytest.mark.unit
+    def test_valid_transports(self):
+        """Valid transports should be accepted."""
+        for transport in ("stdio", "sse", "streamable-http"):
+            config = BAMCPConfig(transport=transport)
+            assert config.transport == transport
+
+    @pytest.mark.unit
+    def test_port_too_low(self):
+        """Port below 1 should raise ValueError."""
+        with pytest.raises(ValueError, match="port must be between 1 and 65535"):
+            BAMCPConfig(port=0)
+
+    @pytest.mark.unit
+    def test_port_too_high(self):
+        """Port above 65535 should raise ValueError."""
+        with pytest.raises(ValueError, match="port must be between 1 and 65535"):
+            BAMCPConfig(port=65536)
+
+    @pytest.mark.unit
+    def test_port_boundary_valid(self):
+        """Ports at boundaries (1 and 65535) should be valid."""
+        config = BAMCPConfig(port=1)
+        assert config.port == 1
+
+        config = BAMCPConfig(port=65535)
+        assert config.port == 65535
+
+    @pytest.mark.unit
+    def test_token_expiry_zero(self):
+        """token_expiry of 0 should raise ValueError."""
+        with pytest.raises(ValueError, match="token_expiry must be at least 1"):
+            BAMCPConfig(token_expiry=0)
+
+    @pytest.mark.unit
+    def test_cache_ttl_negative(self):
+        """Negative cache_ttl should raise ValueError."""
+        with pytest.raises(ValueError, match="cache_ttl must be non-negative"):
+            BAMCPConfig(cache_ttl=-1)
+
+    @pytest.mark.unit
+    def test_cache_ttl_zero_valid(self):
+        """cache_ttl of 0 (disable caching) should be valid."""
+        config = BAMCPConfig(cache_ttl=0)
+        assert config.cache_ttl == 0

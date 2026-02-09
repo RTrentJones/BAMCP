@@ -28,6 +28,7 @@ export interface Variant {
     strand_forward?: number;
     strand_reverse?: number;
     mean_quality?: number;
+    confidence?: 'high' | 'medium' | 'low';
     is_low_confidence?: boolean;
     alt_count?: number;
 }

@@ -114,12 +114,12 @@ export class StateManager {
 
         let variants = [...this.data.variants];
 
-        // Filter
+        // Filter: use backend-computed confidence field (high/medium/low)
         if (this.variantFilter === 'high') {
             variants = variants.filter(v =>
-                (v.vaf >= 0.2 && v.depth >= 10) ||
-                (v.is_low_confidence === false) ||
-                (v.is_low_confidence === undefined)  // Include if field not set
+                v.confidence === 'high' ||
+                v.confidence === 'medium' ||
+                v.confidence === undefined  // Include if field not set (backwards compat)
             );
         }
 

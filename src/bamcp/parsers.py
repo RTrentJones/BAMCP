@@ -25,6 +25,7 @@ class AlignedRead:
     insert_size: int | None = None
     is_proper_pair: bool = False
     is_read1: bool = False
+    is_paired: bool = False
 
 
 @dataclass
@@ -109,9 +110,25 @@ def fetch_region(
         index_filename=index_filename,
     )
 
+    # 1. Calculate coverage and base counts using pysam's optimized C engine
+    # Returns tuple of arrays (A, C, G, T)
+    # Use read_callback to respect min_mapq filter for consistency with read filtering
+    cov_A, cov_C, cov_G, cov_T = samfile.count_coverage(
+        contig,
+        start,
+        end,
+        quality_threshold=0,
+        read_callback=lambda r: r.mapping_quality >= min_mapq,
+    )
+
+    # Sum arrays to get total coverage per position
+    # coverage = [a + c + g + t for a, c, g, t in zip(cov_A, cov_C, cov_G, cov_T)]
+    # Unpack for zip efficiency
+    coverage = []
+    for i in range(len(cov_A)):
+        coverage.append(cov_A[i] + cov_C[i] + cov_G[i] + cov_T[i])
+
     reads: list[AlignedRead] = []
-    coverage = [0] * (end - start)
-    base_counts: list[dict[str, int]] = [{} for _ in range(end - start)]
 
     ref_seq: str | None = None
     if reference_path:
@@ -143,6 +160,7 @@ def fetch_region(
                         aligned_pairs.append((qpos, rpos, ref_base_chr))
                     else:
                         aligned_pairs.append((qpos, rpos, None))
+
             for qpos, rpos, ref_base in aligned_pairs:
                 if rpos is None or qpos is None:
                     continue
@@ -150,16 +168,6 @@ def fetch_region(
                     query_base = read.query_sequence[qpos]
                     if ref_base and query_base != ref_base.upper():
                         mismatches.append({"pos": rpos, "ref": ref_base.upper(), "alt": query_base})
-                    idx = rpos - start
-                    if 0 <= idx < len(base_counts):
-                        base_counts[idx][query_base] = base_counts[idx].get(query_base, 0) + 1
-
-        ref_start = max(read.reference_start, start)
-        ref_end = min(read.reference_end or read.reference_start, end)
-        for pos in range(ref_start, ref_end):
-            idx = pos - start
-            if 0 <= idx < len(coverage):
-                coverage[idx] += 1
 
         # Extract paired-end information
         mate_position = None
@@ -183,8 +191,8 @@ def fetch_region(
                 sequence=read.query_sequence or "",
                 qualities=list(read.query_qualities or []),
                 cigar=read.cigarstring or "",
-                position=read.reference_start,
-                end_position=read.reference_end or read.reference_start,
+                position=read.reference_start if read.reference_start is not None else 0,
+                end_position=read.reference_end if read.reference_end is not None else (read.reference_start or 0),
                 mapping_quality=read.mapping_quality,
                 is_reverse=read.is_reverse,
                 mismatches=mismatches,
@@ -193,12 +201,15 @@ def fetch_region(
                 insert_size=insert_size,
                 is_proper_pair=is_proper_pair,
                 is_read1=is_read1,
+                is_paired=read.is_paired,
             )
         )
 
     samfile.close()
 
-    variants = detect_variants(base_counts, ref_seq, contig, start, min_vaf, min_depth)
+    variants = detect_variants(
+        (cov_A, cov_C, cov_G, cov_T), ref_seq, contig, start, min_vaf, min_depth
+    )
 
     return RegionData(
         contig=contig,
@@ -212,7 +223,7 @@ def fetch_region(
 
 
 def detect_variants(
-    base_counts: list[dict[str, int]],
+    coverage_counts: tuple[list[int], list[int], list[int], list[int]],
     ref_seq: str | None,
     contig: str,
     start: int,
@@ -220,10 +231,10 @@ def detect_variants(
     min_depth: int = 10,
 ) -> list[dict]:
     """
-    Detect variants from base counts.
+    Detect variants from coverage counts (A, C, G, T).
 
     Args:
-        base_counts: List of dicts mapping base -> count for each position.
+        coverage_counts: Tuple of 4 arrays (A, C, G, T) from count_coverage.
         ref_seq: Reference sequence for the region.
         contig: Contig name.
         start: Start position of the region.
@@ -238,19 +249,37 @@ def detect_variants(
     if not ref_seq:
         return variants
 
-    for i, counts in enumerate(base_counts):
-        if not counts:
-            continue
+    cov_A, cov_C, cov_G, cov_T = coverage_counts
+    # Map index to base string
+    bases = ["A", "C", "G", "T"]
 
+    # Iterate over positions
+    for i in range(len(cov_A)):
+        # Total depth at this position (excluding N/Del)
+        counts = {
+            "A": cov_A[i],
+            "C": cov_C[i],
+            "G": cov_G[i],
+            "T": cov_T[i]
+        }
         total = sum(counts.values())
+
         if total < min_depth:
             continue
 
+        if i >= len(ref_seq):
+            break
+
         ref_base = ref_seq[i].upper()
 
+        # Check for alternatives
         for base, count in counts.items():
             if base == ref_base:
                 continue
+
+            if count == 0:
+                continue
+
             vaf = count / total
             if vaf >= min_vaf:
                 variants.append(

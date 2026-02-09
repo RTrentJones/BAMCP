@@ -79,25 +79,37 @@ class TestDetectVariants:
     @pytest.mark.unit
     def test_no_ref_seq(self):
         """No variants without reference sequence."""
-        base_counts = [{"A": 10}]
-        variants = detect_variants(base_counts, None, "chr1", 100)
+        # A=10
+        coverage_counts = ([10], [0], [0], [0])
+        variants = detect_variants(coverage_counts, None, "chr1", 100)
         assert variants == []
 
     @pytest.mark.unit
     def test_no_variants(self):
         """No variants when all bases match reference."""
-        base_counts = [{"A": 20}, {"C": 20}, {"G": 20}, {"T": 20}]
+        # 4 positions: A, C, G, T
+        cov_A = [20, 0, 0, 0]
+        cov_C = [0, 20, 0, 0]
+        cov_G = [0, 0, 20, 0]
+        cov_T = [0, 0, 0, 20]
+        coverage_counts = (cov_A, cov_C, cov_G, cov_T)
+
         ref_seq = "ACGT"
-        variants = detect_variants(base_counts, ref_seq, "chr1", 100)
+        variants = detect_variants(coverage_counts, ref_seq, "chr1", 100)
         assert variants == []
 
     @pytest.mark.unit
     def test_snv_detected(self):
         """SNV above VAF threshold should be detected."""
         # Position 0: ref=A, 15A + 5T = VAF 0.25
-        base_counts = [{"A": 15, "T": 5}]
+        cov_A = [15]
+        cov_C = [0]
+        cov_G = [0]
+        cov_T = [5]
+        coverage_counts = (cov_A, cov_C, cov_G, cov_T)
+
         ref_seq = "A"
-        variants = detect_variants(base_counts, ref_seq, "chr1", 100, min_vaf=0.1, min_depth=10)
+        variants = detect_variants(coverage_counts, ref_seq, "chr1", 100, min_vaf=0.1, min_depth=10)
         assert len(variants) == 1
         assert variants[0]["position"] == 100
         assert variants[0]["ref"] == "A"
@@ -109,33 +121,51 @@ class TestDetectVariants:
     @pytest.mark.unit
     def test_snv_below_vaf_threshold(self):
         """SNV below VAF threshold should not be detected."""
-        base_counts = [{"A": 19, "T": 1}]  # VAF = 0.05
+        # VAF = 0.05 (1/20)
+        cov_A = [19]
+        cov_C = [0]
+        cov_G = [0]
+        cov_T = [1]
+        coverage_counts = (cov_A, cov_C, cov_G, cov_T)
+
         ref_seq = "A"
-        variants = detect_variants(base_counts, ref_seq, "chr1", 100, min_vaf=0.1, min_depth=10)
+        variants = detect_variants(coverage_counts, ref_seq, "chr1", 100, min_vaf=0.1, min_depth=10)
         assert len(variants) == 0
 
     @pytest.mark.unit
     def test_low_depth_filtered(self):
-        """Positions with low depth should be skipped."""
-        base_counts = [{"A": 3, "T": 3}]  # depth = 6
+        """Positions with low depth should be filtered."""
+        # depth = 6
+        cov_A = [3]
+        cov_C = [0]
+        cov_G = [0]
+        cov_T = [3]
+        coverage_counts = (cov_A, cov_C, cov_G, cov_T)
+
         ref_seq = "A"
-        variants = detect_variants(base_counts, ref_seq, "chr1", 100, min_vaf=0.1, min_depth=10)
+        variants = detect_variants(coverage_counts, ref_seq, "chr1", 100, min_vaf=0.1, min_depth=10)
         assert len(variants) == 0
 
     @pytest.mark.unit
     def test_empty_counts(self):
-        """Empty count dicts should be handled."""
-        base_counts = [{}]
+        """Empty counts should be handled."""
+        coverage_counts = ([], [], [], [])
         ref_seq = "A"
-        variants = detect_variants(base_counts, ref_seq, "chr1", 100)
+        variants = detect_variants(coverage_counts, ref_seq, "chr1", 100)
         assert variants == []
 
     @pytest.mark.unit
     def test_multiple_alts(self):
         """Multiple alternate alleles at one position."""
-        base_counts = [{"A": 10, "T": 5, "G": 5}]
+        # A=10, T=5, G=5
+        cov_A = [10]
+        cov_C = [0]
+        cov_G = [5]
+        cov_T = [5]
+        coverage_counts = (cov_A, cov_C, cov_G, cov_T)
+
         ref_seq = "A"
-        variants = detect_variants(base_counts, ref_seq, "chr1", 100, min_vaf=0.1, min_depth=10)
+        variants = detect_variants(coverage_counts, ref_seq, "chr1", 100, min_vaf=0.1, min_depth=10)
         assert len(variants) == 2
         alts = {v["alt"] for v in variants}
         assert alts == {"T", "G"}
@@ -143,9 +173,17 @@ class TestDetectVariants:
     @pytest.mark.unit
     def test_correct_positions(self):
         """Variants should have correct genomic positions."""
-        base_counts = [{"A": 20}, {"C": 10, "G": 10}, {"G": 20}]
+        # Pos 0: A (ref=A)
+        # Pos 1: C=10, G=10 (ref=C) -> Alt G
+        # Pos 2: G (ref=G)
+        cov_A = [20, 0, 0]
+        cov_C = [0, 10, 0]
+        cov_G = [0, 10, 20]
+        cov_T = [0, 0, 0]
+        coverage_counts = (cov_A, cov_C, cov_G, cov_T)
+
         ref_seq = "ACG"
-        variants = detect_variants(base_counts, ref_seq, "chr1", 500, min_vaf=0.1, min_depth=10)
+        variants = detect_variants(coverage_counts, ref_seq, "chr1", 500, min_vaf=0.1, min_depth=10)
         assert len(variants) == 1
         assert variants[0]["position"] == 501
         assert variants[0]["ref"] == "C"

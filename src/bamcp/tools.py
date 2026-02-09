@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import pysam
@@ -20,6 +22,7 @@ from .constants import (
     LOW_CONFIDENCE_MIN_VAF,
     POSITION_HISTOGRAM_BINS,
     QUALITY_HISTOGRAM_BINS,
+    REMOTE_FILE_SCHEMES,
     VIEWER_RESOURCE_URI,
 )
 from .gnomad import GnomadClient
@@ -52,6 +55,48 @@ def _get_index_path(file_path: str, config: BAMCPConfig) -> str | None:
     return cache.get_index_path(file_path)
 
 
+def validate_path(file_path: str, config: BAMCPConfig) -> None:
+    """Validate that the file path is allowed by configuration.
+
+    Args:
+        file_path: Path or URL to validate.
+        config: Server configuration.
+
+    Raises:
+        ValueError: If the path is not allowed.
+    """
+    # Check for remote URLs
+    if "://" in file_path:
+        if not config.allow_remote_files:
+            raise ValueError(f"Remote files are disabled. Cannot access {file_path}")
+
+        if not file_path.startswith(REMOTE_FILE_SCHEMES):
+            raise ValueError(f"Scheme not supported for remote file: {file_path}")
+        return
+
+    # Check local files if restrictions are configured
+    if config.allowed_directories:
+        try:
+            abs_path = Path(file_path).resolve()
+        except OSError as e:
+            raise ValueError(f"Invalid path: {file_path}") from e
+
+        allowed = False
+        for d in config.allowed_directories:
+            try:
+                allowed_dir = Path(d).resolve()
+                if abs_path.is_relative_to(allowed_dir):
+                    allowed = True
+                    break
+            except OSError:
+                continue
+
+        if not allowed:
+            raise ValueError(
+                f"Path {file_path} is not in allowed directories: {config.allowed_directories}"
+            )
+
+
 async def handle_browse_region(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """
     Handle browse_region tool call.
@@ -59,16 +104,19 @@ async def handle_browse_region(args: dict[str, Any], config: BAMCPConfig) -> dic
     Returns serialized region data with UI metadata.
     """
     file_path = args["file_path"]
+    validate_path(file_path, config)
     region = args["region"]
     reference = args.get("reference", config.reference)
 
-    data = fetch_region(
+    index_path = _get_index_path(file_path, config)
+    data = await asyncio.to_thread(
+        fetch_region,
         file_path,
         region,
         reference,
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
-        index_filename=_get_index_path(file_path, config),
+        index_filename=index_path,
         min_vaf=config.min_vaf,
         min_depth=config.min_depth,
     )
@@ -87,18 +135,21 @@ async def handle_browse_region(args: dict[str, Any], config: BAMCPConfig) -> dic
 async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Return variants without UI."""
     file_path = args["file_path"]
+    validate_path(file_path, config)
     region = args["region"]
     reference = args.get("reference", config.reference)
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
 
-    data = fetch_region(
+    index_path = _get_index_path(file_path, config)
+    data = await asyncio.to_thread(
+        fetch_region,
         file_path,
         region,
         reference,
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
-        index_filename=_get_index_path(file_path, config),
+        index_filename=index_path,
         min_vaf=min_vaf,
         min_depth=min_depth,
     )
@@ -115,16 +166,19 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
 async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Return coverage statistics."""
     file_path = args["file_path"]
+    validate_path(file_path, config)
     region = args["region"]
     reference = args.get("reference", config.reference)
 
-    data = fetch_region(
+    index_path = _get_index_path(file_path, config)
+    data = await asyncio.to_thread(
+        fetch_region,
         file_path,
         region,
         reference,
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
-        index_filename=_get_index_path(file_path, config),
+        index_filename=index_path,
         min_vaf=config.min_vaf,
         min_depth=config.min_depth,
     )
@@ -148,22 +202,27 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
     from .reference import detect_genome_build, get_public_reference_url
 
     file_path = args["file_path"]
+    validate_path(file_path, config)
     reference = args.get("reference", config.reference)
 
-    mode = "rc" if file_path.endswith(".cram") else "rb"
-    samfile = pysam.AlignmentFile(
-        file_path,
-        mode,  # type: ignore[arg-type]
-        reference_filename=reference,
-        index_filename=_get_index_path(file_path, config),
-    )
+    def _list_contigs_sync() -> list[dict]:
+        mode = "rc" if file_path.endswith(".cram") else "rb"
+        samfile = pysam.AlignmentFile(
+            file_path,
+            mode,  # type: ignore[arg-type]
+            reference_filename=reference,
+            index_filename=_get_index_path(file_path, config),
+        )
 
-    contigs = [
-        {"name": name, "length": length}
-        for name, length in zip(samfile.references, samfile.lengths, strict=True)
-    ]
+        try:
+            return [
+                {"name": name, "length": length}
+                for name, length in zip(samfile.references, samfile.lengths, strict=True)
+            ]
+        finally:
+            samfile.close()
 
-    samfile.close()
+    contigs = await asyncio.to_thread(_list_contigs_sync)
 
     # Detect genome build from contig lengths
     build_info = detect_genome_build(contigs)
@@ -197,6 +256,7 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     Centers the viewer on a specific genomic position with a configurable window.
     """
     file_path = args["file_path"]
+    validate_path(file_path, config)
     position = args["position"]
     contig = args.get("contig", DEFAULT_CONTIG)
     window = args.get("window", config.default_window)
@@ -206,13 +266,15 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     end = position + window // 2
     region = f"{contig}:{start}-{end}"
 
-    data = fetch_region(
+    index_path = _get_index_path(file_path, config)
+    data = await asyncio.to_thread(
+        fetch_region,
         file_path,
         region,
         reference,
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
-        index_filename=_get_index_path(file_path, config),
+        index_filename=index_path,
         min_vaf=config.min_vaf,
         min_depth=config.min_depth,
     )
@@ -236,16 +298,19 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     Equivalent to browse_region but named to clarify its App-centric purpose.
     """
     file_path = args["file_path"]
+    validate_path(file_path, config)
     region = args["region"]
     reference = args.get("reference", config.reference)
 
-    data = fetch_region(
+    index_path = _get_index_path(file_path, config)
+    data = await asyncio.to_thread(
+        fetch_region,
         file_path,
         region,
         reference,
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
-        index_filename=_get_index_path(file_path, config),
+        index_filename=index_path,
         min_vaf=config.min_vaf,
         min_depth=config.min_depth,
     )
@@ -268,16 +333,19 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     Text-only summary for LLM reasoning — no UI metadata.
     """
     file_path = args["file_path"]
+    validate_path(file_path, config)
     region = args["region"]
     reference = args.get("reference", config.reference)
 
-    data = fetch_region(
+    index_path = _get_index_path(file_path, config)
+    data = await asyncio.to_thread(
+        fetch_region,
         file_path,
         region,
         reference,
         max_reads=config.max_reads,
         min_mapq=config.min_mapq,
-        index_filename=_get_index_path(file_path, config),
+        index_filename=index_path,
         min_vaf=config.min_vaf,
         min_depth=config.min_depth,
     )

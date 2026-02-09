@@ -58,6 +58,10 @@ class BAMCPConfig:
     cache_dir: str = ""  # Defaults to ~/.cache/bamcp if empty
     cache_ttl: int = DEFAULT_CACHE_TTL_SECONDS
 
+    # Security settings
+    allowed_directories: list[str] | None = None
+    allow_remote_files: bool = False
+
     def __post_init__(self) -> None:
         """Set default cache_dir if not provided."""
         if not self.cache_dir:
@@ -99,4 +103,9 @@ class BAMCPConfig:
             genome_build=env.get("BAMCP_GENOME_BUILD", DEFAULT_GENOME_BUILD),
             cache_dir=cache_dir,
             cache_ttl=int(env.get("BAMCP_CACHE_TTL", str(DEFAULT_CACHE_TTL_SECONDS))),
+            allowed_directories=[
+                d.strip() for d in env.get("BAMCP_ALLOWED_DIRECTORIES", "").split(",") if d.strip()
+            ]
+            or None,
+            allow_remote_files=env.get("BAMCP_ALLOW_REMOTE_FILES", "false").lower() == "true",
         )

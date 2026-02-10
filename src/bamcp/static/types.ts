@@ -1,14 +1,13 @@
 export interface Read {
     name: string;
-    sequence: string;
-    qualities: number[];
+    sequence?: string;  // Only in non-compact mode (high zoom)
     cigar: string;
     position: number;
     end_position: number;
     mapping_quality: number;
     is_reverse: boolean;
     mismatches: Array<{ pos: number; ref: string; alt: string }>;
-    // Paired-end fields
+    // Paired-end fields (only present if is_paired=true)
     mate_position?: number | null;
     mate_contig?: string | null;
     insert_size?: number | null;
@@ -39,8 +38,6 @@ export interface VariantEvidence {
     strand_bias: number;
     mean_quality: number;
     median_quality: number;
-    quality_histogram: Record<string, number>;
-    position_histogram: Record<string, number>;
 }
 
 export interface RegionData {

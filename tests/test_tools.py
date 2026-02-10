@@ -78,18 +78,46 @@ class TestSerializeRegionData:
             coverage=[1] * 100,
             variants=[],
         )
+        # Default is compact=True, which omits sequence
         result = _serialize_region_data(data)
         assert len(result["reads"]) == 1
         r = result["reads"][0]
         assert r["name"] == "r1"
-        assert r["sequence"] == "ACGT"
+        assert "sequence" not in r  # Compact mode omits sequence
         assert r["cigar"] == "4M"
         assert r["position"] == 100
         assert r["end_position"] == 104
         assert r["mapping_quality"] == 60
-        assert r["qualities"] == [30, 30, 30, 30]
+        assert "qualities" not in r  # Qualities are never serialized
         assert r["is_reverse"] is False
         assert len(r["mismatches"]) == 1
+
+    @pytest.mark.unit
+    def test_non_compact_includes_sequence(self):
+        """Non-compact mode includes sequence but never qualities."""
+        read = AlignedRead(
+            name="r1",
+            sequence="ACGT",
+            qualities=[30, 30, 30, 30],
+            cigar="4M",
+            position=100,
+            end_position=104,
+            mapping_quality=60,
+            is_reverse=False,
+            mismatches=[],
+        )
+        data = RegionData(
+            contig="chr1",
+            start=100,
+            end=200,
+            reads=[read],
+            coverage=[1] * 100,
+            variants=[],
+        )
+        result = _serialize_region_data(data, compact=False)
+        r = result["reads"][0]
+        assert r["sequence"] == "ACGT"
+        assert "qualities" not in r  # Qualities never serialized
 
     @pytest.mark.unit
     def test_serialization_is_json_compatible(self):
@@ -135,12 +163,16 @@ class TestHandleBrowseRegion:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_content_is_json(self, small_bam_path, config):
+    async def test_content_is_summary(self, small_bam_path, config):
         result = await handle_browse_region(
             {"file_path": small_bam_path, "region": "chr1:90-200"}, config
         )
+        # Content is now a summary string, not JSON payload
         text = result["content"][0]["text"]
-        payload = json.loads(text)
+        assert "Region chr1:90-200" in text
+        assert "reads" in text
+        # Payload is in _meta.ui/init
+        payload = result["_meta"]["ui/init"]
         assert "contig" in payload
         assert "reads" in payload
         assert "coverage" in payload
@@ -152,7 +184,8 @@ class TestHandleBrowseRegion:
             {"file_path": small_bam_path, "region": "chr1:90-200", "reference": ref_fasta_path},
             config,
         )
-        payload = json.loads(result["content"][0]["text"])
+        # Payload is in _meta.ui/init
+        payload = result["_meta"]["ui/init"]
         assert payload["reference_sequence"] is not None
 
     @pytest.mark.unit
@@ -161,7 +194,8 @@ class TestHandleBrowseRegion:
         result = await handle_browse_region(
             {"file_path": small_bam_path, "region": "chr1:90-200"}, config_with_ref
         )
-        payload = json.loads(result["content"][0]["text"])
+        # Payload is in _meta.ui/init
+        payload = result["_meta"]["ui/init"]
         assert payload["reference_sequence"] is not None
 
     @pytest.mark.unit
@@ -330,7 +364,8 @@ class TestHandleJumpTo:
         result = await handle_jump_to(
             {"file_path": small_bam_path, "position": 150, "contig": "chr1"}, config
         )
-        payload = json.loads(result["content"][0]["text"])
+        # Payload is in _meta.ui/init
+        payload = result["_meta"]["ui/init"]
         assert payload["contig"] == DEFAULT_CONTIG
         # Position 150 should be within the returned start-end range
         assert payload["start"] <= 150 <= payload["end"]
@@ -342,7 +377,8 @@ class TestHandleJumpTo:
             {"file_path": small_bam_path, "position": 150, "contig": "chr1", "window": 100},
             config,
         )
-        payload = json.loads(result["content"][0]["text"])
+        # Payload is in _meta.ui/init
+        payload = result["_meta"]["ui/init"]
         span = payload["end"] - payload["start"]
         assert span == 100
 
@@ -353,7 +389,8 @@ class TestHandleJumpTo:
         result = await handle_jump_to(
             {"file_path": small_bam_path, "position": 300, "contig": "chr1"}, config
         )
-        payload = json.loads(result["content"][0]["text"])
+        # Payload is in _meta.ui/init
+        payload = result["_meta"]["ui/init"]
         span = payload["end"] - payload["start"]
         assert span == 200
 
@@ -362,7 +399,8 @@ class TestHandleJumpTo:
     async def test_default_contig(self, small_bam_path, config):
         """Without contig arg, defaults to configured constant."""
         result = await handle_jump_to({"file_path": small_bam_path, "position": 150}, config)
-        payload = json.loads(result["content"][0]["text"])
+        # Payload is in _meta.ui/init
+        payload = result["_meta"]["ui/init"]
         assert payload["contig"] == DEFAULT_CONTIG
 
     @pytest.mark.unit
@@ -372,7 +410,8 @@ class TestHandleJumpTo:
             {"file_path": small_bam_path, "position": 150, "contig": "chr1", "window": 200},
             config,
         )
-        payload = json.loads(result["content"][0]["text"])
+        # Payload is in _meta.ui/init
+        payload = result["_meta"]["ui/init"]
         assert "reads" in payload
         assert len(payload["reads"]) > 0
 
@@ -393,12 +432,16 @@ class TestHandleVisualizeRegion:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_content_is_json(self, small_bam_path, config):
+    async def test_content_is_summary(self, small_bam_path, config):
         result = await handle_visualize_region(
             {"file_path": small_bam_path, "region": "chr1:90-200"}, config
         )
+        # Content is now a summary string, not JSON payload
         text = result["content"][0]["text"]
-        payload = json.loads(text)
+        assert "Region chr1:90-200" in text
+        assert "reads" in text
+        # Payload is in _meta.ui/init
+        payload = result["_meta"]["ui/init"]
         assert "contig" in payload
         assert "reads" in payload
         assert "coverage" in payload

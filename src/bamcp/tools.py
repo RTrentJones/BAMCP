@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import bisect
 import json
 import logging
 import re
@@ -24,8 +23,6 @@ from .constants import (
     LOW_CONFIDENCE_MIN_DEPTH,
     LOW_CONFIDENCE_MIN_MEAN_QUALITY,
     LOW_CONFIDENCE_MIN_VAF,
-    POSITION_HISTOGRAM_BINS,
-    QUALITY_HISTOGRAM_BINS,
     REMOTE_FILE_SCHEMES,
     VIEWER_RESOURCE_URI,
 )
@@ -163,8 +160,10 @@ async def handle_browse_region(args: dict[str, Any], config: BAMCPConfig) -> dic
     data = await _fetch_region_with_timeout(file_path, region, reference, config)
     payload = _serialize_region_data(data)
 
+    # Return summary text in content (for LLM context), full data only in _meta
+    summary = f"Region {data.contig}:{data.start}-{data.end}: {len(data.reads)} reads, {len(data.variants)} variants"
     return {
-        "content": [{"type": "text", "text": json.dumps(payload)}],
+        "content": [{"type": "text", "text": summary}],
         "_meta": {
             "ui/resourceUri": VIEWER_RESOURCE_URI,
             "ui/init": payload,
@@ -289,8 +288,10 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     data = await _fetch_region_with_timeout(file_path, region, reference, config)
     payload = _serialize_region_data(data)
 
+    # Return summary text in content (for LLM context), full data only in _meta
+    summary = f"Jumped to {data.contig}:{position}: {len(data.reads)} reads, {len(data.variants)} variants"
     return {
-        "content": [{"type": "text", "text": json.dumps(payload)}],
+        "content": [{"type": "text", "text": summary}],
         "_meta": {
             "ui/resourceUri": VIEWER_RESOURCE_URI,
             "ui/init": payload,
@@ -313,8 +314,10 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     data = await _fetch_region_with_timeout(file_path, region, reference, config)
     payload = _serialize_region_data(data)
 
+    # Return summary text in content (for LLM context), full data only in _meta
+    summary = f"Region {data.contig}:{data.start}-{data.end}: {len(data.reads)} reads, {len(data.variants)} variants"
     return {
-        "content": [{"type": "text", "text": json.dumps(payload)}],
+        "content": [{"type": "text", "text": summary}],
         "_meta": {
             "ui/resourceUri": VIEWER_RESOURCE_URI,
             "ui/init": payload,
@@ -602,41 +605,6 @@ def _get_query_position(read: AlignedRead, ref_pos: int) -> int | None:
     return None
 
 
-def _bin_histogram(values: list[int], bins: list[int]) -> dict[str, int]:
-    """Bin values into a histogram with labeled ranges.
-
-    Uses binary search for O(n log b) instead of O(n*b) linear scan.
-
-    Args:
-        values: List of integer values to bin.
-        bins: List of bin edges (e.g., [0, 10, 20, 30, 40] creates bins 0-9, 10-19, etc.)
-
-    Returns:
-        Dict mapping bin labels to counts (e.g., {"0-9": 5, "10-19": 3, ...}).
-    """
-    # Pre-compute labels and initialize histogram
-    labels = []
-    for i in range(len(bins)):
-        label = f"{bins[i]}+" if i == len(bins) - 1 else f"{bins[i]}-{bins[i + 1] - 1}"
-        labels.append(label)
-
-    # Use list for counting (faster than dict for small number of bins)
-    counts = [0] * len(bins)
-
-    # Use binary search to find bin for each value - O(n log b)
-    for val in values:
-        # bisect_right gives us the insertion point
-        # Subtract 1 to get the bin index (values below first bin go to -1, clamp to 0)
-        idx = bisect.bisect_right(bins, val) - 1
-        if idx < 0:
-            idx = 0  # Values below first bin go to first bin
-        elif idx >= len(bins):
-            idx = len(bins) - 1  # Values above last bin go to last bin
-        counts[idx] += 1
-
-    return dict(zip(labels, counts, strict=True))
-
-
 def _build_mismatch_index(
     reads: list[AlignedRead],
 ) -> dict[tuple[int, str], list[tuple[AlignedRead, dict]]]:
@@ -672,7 +640,6 @@ def _compute_variant_evidence_from_index(
     forward_count = 0
     reverse_count = 0
     qualities: list[int] = []
-    read_positions: list[int] = []
 
     for read, mm in matches:
         if read.is_reverse:
@@ -684,9 +651,6 @@ def _compute_variant_evidence_from_index(
         query_pos = _get_query_position(read, mm["pos"])
         if query_pos is not None and query_pos < len(read.qualities):
             qualities.append(read.qualities[query_pos])
-            # Position from 5' end (adjusted for reverse reads)
-            pos_from_5prime = len(read.sequence) - query_pos - 1 if read.is_reverse else query_pos
-            read_positions.append(pos_from_5prime)
 
     # Strand bias: 0 = balanced, 1 = all one strand
     total = forward_count + reverse_count
@@ -698,33 +662,19 @@ def _compute_variant_evidence_from_index(
         "strand_bias": round(strand_bias, 3),
         "mean_quality": round(sum(qualities) / len(qualities), 1) if qualities else 0,
         "median_quality": sorted(qualities)[len(qualities) // 2] if qualities else 0,
-        "quality_histogram": _bin_histogram(qualities, QUALITY_HISTOGRAM_BINS),
-        "position_histogram": _bin_histogram(read_positions, POSITION_HISTOGRAM_BINS),
     }
 
 
-def _serialize_region_data(data: RegionData, compact: bool = False) -> dict:
+def _serialize_region_data(data: RegionData, compact: bool = True) -> dict:
     """Serialize RegionData to a JSON-compatible dict.
 
     Args:
         data: The region data to serialize.
-        compact: If True, omit sequences/qualities to reduce payload size.
-                 Use for overview zoom levels where individual bases aren't shown.
+        compact: If True (default), omit sequences to reduce payload size.
+                 Set False only for extreme zoom levels where bases are shown.
     """
     # Build mismatch index once for O(1) variant evidence lookups
     mismatch_index = _build_mismatch_index(data.reads)
-
-    # Aggregate mismatches by position for LLM summary
-    mismatch_counts: dict[tuple[int, str, str], int] = {}
-    for read in data.reads:
-        for mm in read.mismatches:
-            key = (mm["pos"], mm["ref"], mm["alt"])
-            mismatch_counts[key] = mismatch_counts.get(key, 0) + 1
-
-    mismatch_summary = [
-        {"pos": k[0], "ref": k[1], "alt": k[2], "count": v}
-        for k, v in sorted(mismatch_counts.items())
-    ]
 
     # Compute variant evidence using index (O(k) per variant instead of O(n*m) total)
     variant_evidence = {}
@@ -768,45 +718,31 @@ def _serialize_region_data(data: RegionData, compact: bool = False) -> dict:
 
         enhanced_variants.append(enhanced)
 
-    # Serialize reads - compact mode omits large sequence/quality data
-    if compact:
-        reads_data = [
-            {
-                "name": r.name,
-                "cigar": r.cigar,
-                "position": r.position,
-                "end_position": r.end_position,
-                "mapping_quality": r.mapping_quality,
-                "is_reverse": r.is_reverse,
-                "mismatches": r.mismatches,
-                "mate_position": r.mate_position,
-                "mate_contig": r.mate_contig,
-                "insert_size": r.insert_size,
-                "is_proper_pair": r.is_proper_pair,
-                "is_read1": r.is_read1,
-            }
-            for r in data.reads
-        ]
-    else:
-        reads_data = [
-            {
-                "name": r.name,
-                "sequence": r.sequence,
-                "qualities": r.qualities,
-                "cigar": r.cigar,
-                "position": r.position,
-                "end_position": r.end_position,
-                "mapping_quality": r.mapping_quality,
-                "is_reverse": r.is_reverse,
-                "mismatches": r.mismatches,
-                "mate_position": r.mate_position,
-                "mate_contig": r.mate_contig,
-                "insert_size": r.insert_size,
-                "is_proper_pair": r.is_proper_pair,
-                "is_read1": r.is_read1,
-            }
-            for r in data.reads
-        ]
+    # Serialize reads - compact mode omits sequences for smaller payload
+    def serialize_read(r: AlignedRead, include_sequence: bool) -> dict:
+        """Serialize a read, omitting null paired-end fields to reduce payload."""
+        d: dict[str, Any] = {
+            "name": r.name,
+            "cigar": r.cigar,
+            "position": r.position,
+            "end_position": r.end_position,
+            "mapping_quality": r.mapping_quality,
+            "is_reverse": r.is_reverse,
+            "mismatches": r.mismatches,
+        }
+        if include_sequence:
+            d["sequence"] = r.sequence
+        # Only include paired-end fields if the read is actually paired
+        if r.is_paired:
+            d["mate_position"] = r.mate_position
+            d["mate_contig"] = r.mate_contig
+            d["insert_size"] = r.insert_size
+            d["is_proper_pair"] = r.is_proper_pair
+            d["is_read1"] = r.is_read1
+            d["is_paired"] = True
+        return d
+
+    reads_data = [serialize_read(r, include_sequence=not compact) for r in data.reads]
 
     return {
         "contig": data.contig,
@@ -816,7 +752,6 @@ def _serialize_region_data(data: RegionData, compact: bool = False) -> dict:
         "coverage": data.coverage,
         "variants": enhanced_variants,
         "reference_sequence": data.reference_sequence,
-        "mismatch_summary": mismatch_summary,
         "variant_evidence": variant_evidence,
         "compact": compact,
     }

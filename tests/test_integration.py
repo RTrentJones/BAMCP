@@ -33,8 +33,14 @@ class TestBrowseRegionIntegration:
         # Verify structure
         assert result["_meta"]["ui/resourceUri"] == "ui://bamcp/viewer"
 
-        # Parse payload
-        payload = json.loads(result["content"][0]["text"])
+        # Content should be a summary string (not JSON payload)
+        content_text = result["content"][0]["text"]
+        assert "Region chr1:90-200" in content_text
+        assert "reads" in content_text
+        assert "variants" in content_text
+
+        # Payload is now only in _meta.ui/init (not duplicated in content)
+        payload = result["_meta"]["ui/init"]
 
         # Verify region
         assert payload["contig"] == "chr1"
@@ -44,27 +50,20 @@ class TestBrowseRegionIntegration:
         # Verify reads are present
         assert len(payload["reads"]) > 0
 
-        # Verify read structure
+        # Verify read structure (compact mode is now default)
         read = payload["reads"][0]
         required_fields = {
             "name",
-            "sequence",
-            "qualities",
             "cigar",
             "position",
             "end_position",
             "mapping_quality",
             "is_reverse",
             "mismatches",
-            # Paired-end fields
-            "mate_position",
-            "mate_contig",
-            "insert_size",
-            "is_proper_pair",
-            "is_read1",
         }
-        assert set(read.keys()) == required_fields
-        assert isinstance(read["qualities"], list)
+        # In compact mode, sequence and qualities are omitted
+        assert required_fields.issubset(set(read.keys()))
+        assert "qualities" not in read  # Qualities are never serialized (unused by frontend)
 
         # Verify coverage length
         assert len(payload["coverage"]) == 110
@@ -90,7 +89,8 @@ class TestBrowseRegionIntegration:
             config_with_ref,
         )
 
-        browse_payload = json.loads(browse_result["content"][0]["text"])
+        # browse_region payload is now in _meta.ui/init, not content
+        browse_payload = browse_result["_meta"]["ui/init"]
         variant_payload = json.loads(variant_result["content"][0]["text"])
 
         # Variant positions from browse should be a superset (get_variants may filter)
@@ -115,7 +115,8 @@ class TestCoverageIntegration:
             {"file_path": small_bam_path, "region": "chr1:100-200"}, config
         )
 
-        browse_payload = json.loads(browse_result["content"][0]["text"])
+        # browse_region payload is now in _meta.ui/init
+        browse_payload = browse_result["_meta"]["ui/init"]
         cov_payload = json.loads(coverage_result["content"][0]["text"])
 
         # If there are reads, coverage should be non-zero
@@ -160,7 +161,8 @@ class TestContigListIntegration:
             result = await handle_browse_region(
                 {"file_path": small_bam_path, "region": region}, config
             )
-            payload = json.loads(result["content"][0]["text"])
+            # browse_region payload is now in _meta.ui/init
+            payload = result["_meta"]["ui/init"]
             assert payload["contig"] == name
 
 
@@ -180,7 +182,8 @@ class TestMultiToolWorkflow:
         browse = await handle_browse_region(
             {"file_path": small_bam_path, "region": "chr1:90-200"}, config_with_ref
         )
-        browse_data = json.loads(browse["content"][0]["text"])
+        # browse_region payload is now in _meta.ui/init
+        browse_data = browse["_meta"]["ui/init"]
         assert len(browse_data["reads"]) > 0
 
         # Step 3: Get coverage for same region
@@ -201,7 +204,8 @@ class TestMultiToolWorkflow:
             result = await handle_browse_region(
                 {"file_path": small_bam_path, "region": region}, config
             )
-            payload = json.loads(result["content"][0]["text"])
+            # browse_region payload is now in _meta.ui/init
+            payload = result["_meta"]["ui/init"]
             assert "reads" in payload
             assert "coverage" in payload
 
@@ -219,7 +223,8 @@ class TestJumpToIntegration:
             {"file_path": small_bam_path, "position": 150, "contig": "chr1", "window": 200},
             config,
         )
-        payload = json.loads(result["content"][0]["text"])
+        # jump_to payload is now in _meta.ui/init
+        payload = result["_meta"]["ui/init"]
         assert payload["contig"] == "chr1"
         assert payload["start"] <= 150 <= payload["end"]
         assert payload["end"] - payload["start"] == 200
@@ -234,13 +239,15 @@ class TestJumpToIntegration:
             {"file_path": small_bam_path, "position": 150, "contig": "chr1", "window": 200},
             config,
         )
-        jump_payload = json.loads(jump_result["content"][0]["text"])
+        # jump_to payload is now in _meta.ui/init
+        jump_payload = jump_result["_meta"]["ui/init"]
 
         region = f"chr1:{jump_payload['start']}-{jump_payload['end']}"
         browse_result = await handle_browse_region(
             {"file_path": small_bam_path, "region": region}, config
         )
-        browse_payload = json.loads(browse_result["content"][0]["text"])
+        # browse_region payload is now in _meta.ui/init
+        browse_payload = browse_result["_meta"]["ui/init"]
 
         # Same region should yield same number of reads
         assert len(jump_payload["reads"]) == len(browse_payload["reads"])

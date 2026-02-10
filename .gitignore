@@ -210,6 +210,9 @@ __marimo__/
 src/bamcp/static/node_modules/
 src/bamcp/static/dist/
 
+# BAMCP index cache (remote BAM indexes)
+.cache/
+
 # Genomic data files (BAM indexes downloaded from remote URLs)
 *.bam
 *.bai

@@ -714,3 +714,277 @@ class TestLowConfidenceThresholds:
             result["variant_evidence"]["101:C>T"]["strand_bias"] <= LOW_CONFIDENCE_MAX_STRAND_BIAS
         )
         assert result["variants"][0]["is_low_confidence"] is False
+
+
+class TestBinValues:
+    """Tests for _bin_values helper function."""
+
+    @pytest.mark.unit
+    def test_empty_values(self):
+        from bamcp.tools import _bin_values
+
+        result = _bin_values([], [0, 10, 20, 30])
+        assert result == [0, 0, 0, 0]
+
+    @pytest.mark.unit
+    def test_single_bin(self):
+        from bamcp.tools import _bin_values
+
+        result = _bin_values([5, 15, 25], [0, 10, 20, 30])
+        assert result == [1, 1, 1, 0]
+
+    @pytest.mark.unit
+    def test_all_in_last_bin(self):
+        from bamcp.tools import _bin_values
+
+        result = _bin_values([35, 40, 100], [0, 10, 20, 30])
+        assert result == [0, 0, 0, 3]
+
+    @pytest.mark.unit
+    def test_quality_histogram_bins(self):
+        from bamcp.constants import QUALITY_HISTOGRAM_BINS
+        from bamcp.tools import _bin_values
+
+        values = [5, 15, 25, 35, 45, 50]
+        result = _bin_values(values, QUALITY_HISTOGRAM_BINS)
+        assert len(result) == 5
+        assert result == [1, 1, 1, 1, 2]  # 45 and 50 go in last bin
+
+
+class TestDetectHomopolymer:
+    """Tests for _detect_homopolymer helper function."""
+
+    @pytest.mark.unit
+    def test_single_base(self):
+        from bamcp.tools import _detect_homopolymer
+
+        result = _detect_homopolymer("ACGT", 0)
+        assert result == 1
+
+    @pytest.mark.unit
+    def test_homopolymer_run(self):
+        from bamcp.tools import _detect_homopolymer
+
+        result = _detect_homopolymer("AAAAAACGT", 3)
+        assert result == 6
+
+    @pytest.mark.unit
+    def test_position_at_end(self):
+        from bamcp.tools import _detect_homopolymer
+
+        result = _detect_homopolymer("CGTTTTT", 5)
+        assert result == 5
+
+    @pytest.mark.unit
+    def test_empty_sequence(self):
+        from bamcp.tools import _detect_homopolymer
+
+        result = _detect_homopolymer("", 0)
+        assert result == 0
+
+    @pytest.mark.unit
+    def test_position_out_of_range(self):
+        from bamcp.tools import _detect_homopolymer
+
+        result = _detect_homopolymer("ACGT", 10)
+        assert result == 0
+
+
+class TestComputeArtifactRisk:
+    """Tests for _compute_artifact_risk function."""
+
+    @pytest.mark.unit
+    def test_low_risk(self):
+        from bamcp.tools import _compute_artifact_risk
+
+        variant = {"position": 100, "depth": 50, "vaf": 0.5}
+        evidence = {
+            "strand_bias": 0.1,
+            "position_histogram": [0, 0, 5, 5, 5, 5],  # All in middle
+            "mapq_histogram": [0, 0, 0, 0, 5, 10, 20],  # High MAPQ
+        }
+        result = _compute_artifact_risk(variant, evidence, None, 0)
+        assert result["artifact_likelihood"] == "low"
+        assert len(result["risks"]) == 0
+
+    @pytest.mark.unit
+    def test_high_strand_bias(self):
+        from bamcp.tools import _compute_artifact_risk
+
+        variant = {"position": 100, "depth": 50, "vaf": 0.5}
+        evidence = {
+            "strand_bias": 0.98,
+            "position_histogram": [0, 0, 5, 5, 5, 5],
+            "mapq_histogram": [0, 0, 0, 0, 5, 10, 20],
+        }
+        result = _compute_artifact_risk(variant, evidence, None, 0)
+        assert result["artifact_likelihood"] in ["medium", "high"]
+        assert any(r["type"] == "strand_bias" for r in result["risks"])
+
+    @pytest.mark.unit
+    def test_near_end_bias(self):
+        from bamcp.tools import _compute_artifact_risk
+
+        variant = {"position": 100, "depth": 50, "vaf": 0.5}
+        evidence = {
+            "strand_bias": 0.1,
+            "position_histogram": [10, 10, 1, 0, 0, 0],  # Mostly near ends
+            "mapq_histogram": [0, 0, 0, 0, 5, 10, 20],
+        }
+        result = _compute_artifact_risk(variant, evidence, None, 0)
+        assert any(r["type"] == "read_position_bias" for r in result["risks"])
+
+    @pytest.mark.unit
+    def test_homopolymer_detection(self):
+        from bamcp.tools import _compute_artifact_risk
+
+        variant = {"position": 105, "depth": 50, "vaf": 0.5}
+        evidence = {
+            "strand_bias": 0.1,
+            "position_histogram": [0, 0, 5, 5, 5, 5],
+            "mapq_histogram": [0, 0, 0, 0, 5, 10, 20],
+        }
+        # Position 5 in reference is in an AAAAA run
+        ref_seq = "ACGTAAAAACGT"
+        result = _compute_artifact_risk(variant, evidence, ref_seq, 100)
+        assert any(r["type"] == "homopolymer" for r in result["risks"])
+
+    @pytest.mark.unit
+    def test_low_depth_risk(self):
+        from bamcp.tools import _compute_artifact_risk
+
+        variant = {"position": 100, "depth": 3, "vaf": 0.5}
+        evidence = {
+            "strand_bias": 0.1,
+            "position_histogram": [0, 0, 5, 5, 5, 5],
+            "mapq_histogram": [0, 0, 0, 0, 5, 10, 20],
+        }
+        result = _compute_artifact_risk(variant, evidence, None, 0)
+        assert any(r["type"] == "low_depth" for r in result["risks"])
+
+
+class TestVariantEvidenceHistograms:
+    """Tests for histogram data in variant evidence."""
+
+    @pytest.mark.unit
+    def test_evidence_includes_histograms(self):
+        read = AlignedRead(
+            name="r1",
+            sequence="ACGT",
+            qualities=[30, 30, 30, 30],
+            cigar="4M",
+            position=100,
+            end_position=104,
+            mapping_quality=60,
+            is_reverse=False,
+            mismatches=[{"pos": 101, "ref": "C", "alt": "T"}],
+        )
+        data = RegionData(
+            contig="chr1",
+            start=100,
+            end=120,
+            reads=[read],
+            coverage=[1] * 20,
+            variants=[
+                {
+                    "contig": "chr1",
+                    "position": 101,
+                    "ref": "C",
+                    "alt": "T",
+                    "vaf": 0.5,
+                    "depth": 20,
+                    "alt_count": 1,
+                }
+            ],
+        )
+
+        result = _serialize_region_data(data)
+        evidence = result["variant_evidence"]["101:C>T"]
+
+        assert "quality_histogram" in evidence
+        assert "position_histogram" in evidence
+        assert "mapq_histogram" in evidence
+        assert "artifact_risk" in evidence
+
+    @pytest.mark.unit
+    def test_evidence_artifact_risk_structure(self):
+        read = AlignedRead(
+            name="r1",
+            sequence="ACGT",
+            qualities=[30, 30, 30, 30],
+            cigar="4M",
+            position=100,
+            end_position=104,
+            mapping_quality=60,
+            is_reverse=False,
+            mismatches=[{"pos": 101, "ref": "C", "alt": "T"}],
+        )
+        data = RegionData(
+            contig="chr1",
+            start=100,
+            end=120,
+            reads=[read],
+            coverage=[1] * 20,
+            variants=[
+                {
+                    "contig": "chr1",
+                    "position": 101,
+                    "ref": "C",
+                    "alt": "T",
+                    "vaf": 0.5,
+                    "depth": 20,
+                    "alt_count": 1,
+                }
+            ],
+        )
+
+        result = _serialize_region_data(data)
+        evidence = result["variant_evidence"]["101:C>T"]
+        artifact_risk = evidence["artifact_risk"]
+
+        assert "risks" in artifact_risk
+        assert "risk_score" in artifact_risk
+        assert "artifact_likelihood" in artifact_risk
+        assert artifact_risk["artifact_likelihood"] in ["low", "medium", "high"]
+
+
+class TestHandleGetVariantCurationSummary:
+    """Tests for handle_get_variant_curation_summary tool handler."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_returns_formatted_summary(self, small_bam_path, config_with_ref):
+        from bamcp.tools import handle_get_variant_curation_summary
+
+        result = await handle_get_variant_curation_summary(
+            {
+                "file_path": small_bam_path,
+                "chrom": "chr1",
+                "pos": 105,
+                "ref": "A",
+                "alt": "T",
+                "window": 50,
+            },
+            config_with_ref,
+        )
+        text = result["content"][0]["text"]
+        # Should either find variant or report not found
+        assert "Variant" in text or "not found" in text.lower()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_invalid_chromosome_rejected(self, small_bam_path, config):
+        from bamcp.tools import handle_get_variant_curation_summary
+
+        result = await handle_get_variant_curation_summary(
+            {
+                "file_path": small_bam_path,
+                "chrom": "invalid_chr",
+                "pos": 100,
+                "ref": "A",
+                "alt": "T",
+            },
+            config,
+        )
+        text = result["content"][0]["text"]
+        assert "Invalid" in text

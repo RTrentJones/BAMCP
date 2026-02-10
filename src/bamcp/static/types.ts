@@ -16,6 +16,19 @@ export interface Read {
     is_paired?: boolean;
 }
 
+export interface ArtifactRisk {
+    type: 'read_position_bias' | 'strand_bias' | 'low_mapq' | 'homopolymer' | 'low_depth';
+    severity: 'low' | 'medium' | 'high';
+    description: string;
+    value: number;
+}
+
+export interface ArtifactAssessment {
+    risks: ArtifactRisk[];
+    risk_score: number;
+    artifact_likelihood: 'low' | 'medium' | 'high';
+}
+
 export interface Variant {
     contig: string;
     position: number;
@@ -30,6 +43,7 @@ export interface Variant {
     confidence?: 'high' | 'medium' | 'low';
     is_low_confidence?: boolean;
     alt_count?: number;
+    artifact_risk?: ArtifactAssessment;
 }
 
 export interface VariantEvidence {
@@ -38,6 +52,12 @@ export interface VariantEvidence {
     strand_bias: number;
     mean_quality: number;
     median_quality: number;
+    // Histogram distributions for curation
+    quality_histogram?: number[];
+    position_histogram?: number[];
+    mapq_histogram?: number[];
+    // Artifact risk assessment
+    artifact_risk?: ArtifactAssessment;
 }
 
 export interface RegionData {

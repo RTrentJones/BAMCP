@@ -14,6 +14,7 @@ from .tools import (
     handle_browse_region,
     handle_get_coverage,
     handle_get_region_summary,
+    handle_get_variant_curation_summary,
     handle_get_variants,
     handle_jump_to,
     handle_list_contigs,
@@ -234,6 +235,37 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             {"chrom": chrom, "pos": pos, "ref": ref, "alt": alt},
             config,
         )
+        return str(result["content"][0]["text"])
+
+    # -- Phase 3: Curation Tools ---------------------------------------------
+
+    @mcp.tool(
+        description=(
+            "Get a detailed curation summary for a specific variant with artifact risk "
+            "assessment, quality metrics, and recommendations for clinical interpretation. "
+            "Use this for in-depth variant review by genetic curators."
+        ),
+    )
+    async def get_variant_curation_summary(
+        file_path: str,
+        chrom: str,
+        pos: int,
+        ref: str,
+        alt: str,
+        window: int = 50,
+        reference: str | None = None,
+    ) -> str:
+        args: dict = {
+            "file_path": file_path,
+            "chrom": chrom,
+            "pos": pos,
+            "ref": ref,
+            "alt": alt,
+            "window": window,
+        }
+        if reference is not None:
+            args["reference"] = reference
+        result = await handle_get_variant_curation_summary(args, config)
         return str(result["content"][0]["text"])
 
     @mcp.tool(

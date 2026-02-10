@@ -14,7 +14,9 @@ DEFAULT_PORT = 8000
 DEFAULT_ISSUER_URL = "http://localhost:8000"
 DEFAULT_RESOURCE_SERVER_URL = "http://localhost:8000"
 DEFAULT_TRANSPORT = "stdio"
-DEFAULT_CACHE_DIR = Path.home() / ".cache" / "bamcp"
+# Project root is 3 levels up from this file: src/bamcp/constants.py -> BAMCP/
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+DEFAULT_CACHE_DIR = _PROJECT_ROOT / ".cache"
 
 # Genomics operation defaults
 DEFAULT_MAX_READS = 10_000
@@ -48,3 +50,10 @@ LOW_CONFIDENCE_MAX_STRAND_BIAS = 0.9
 
 QUALITY_HISTOGRAM_BINS = [0, 10, 20, 30, 40]
 POSITION_HISTOGRAM_BINS = [0, 25, 50, 75, 100, 150]
+MAPQ_HISTOGRAM_BINS = [0, 10, 20, 30, 40, 50, 60]
+
+# Artifact detection thresholds
+ARTIFACT_STRAND_BIAS_THRESHOLD = 0.8
+ARTIFACT_NEAR_END_FRACTION_THRESHOLD = 0.5
+ARTIFACT_LOW_MAPQ_FRACTION_THRESHOLD = 0.3
+ARTIFACT_HOMOPOLYMER_LENGTH_THRESHOLD = 4

@@ -14,7 +14,7 @@
 import { BAMCPClient } from "./client";
 import { Renderer } from "./renderer";
 import { StateManager } from "./state";
-import { Read, Variant } from "./types";
+import { ArtifactAssessment, Read, Variant, VariantEvidence } from "./types";
 
 const CONTEXT_UPDATE_DEBOUNCE_MS = 300;
 
@@ -444,6 +444,41 @@ class BAMCPViewer {
         }
 
         // Draw Strand Bias Chart
+        this.renderStrandChart(evidence);
+
+        // Draw Quality Histogram
+        this.renderHistogram(
+            'quality-chart',
+            evidence.quality_histogram || [],
+            ['0-10', '10-20', '20-30', '30-40', '40+'],
+            '#3b82f6'
+        );
+        document.getElementById('quality-stats')!.textContent =
+            `Mean: ${evidence.mean_quality.toFixed(1)} | Median: ${evidence.median_quality}`;
+
+        // Draw Position-in-Read Histogram
+        this.renderHistogram(
+            'position-chart',
+            evidence.position_histogram || [],
+            ['0-25', '25-50', '50-75', '75-100', '100-150', '150+'],
+            '#10b981'
+        );
+        document.getElementById('position-stats')!.textContent =
+            this.getPositionSummary(evidence.position_histogram);
+
+        // Draw MAPQ Histogram
+        this.renderHistogram(
+            'mapq-chart',
+            evidence.mapq_histogram || [],
+            ['0-10', '10-20', '20-30', '30-40', '40-50', '50-60', '60+'],
+            '#8b5cf6'
+        );
+
+        // Render Artifact Risk
+        this.renderArtifactRisk(evidence.artifact_risk);
+    }
+
+    private renderStrandChart(evidence: VariantEvidence): void {
         const strandCanvas = document.getElementById('strand-chart') as HTMLCanvasElement;
         const sCtx = strandCanvas.getContext('2d')!;
         sCtx.clearRect(0, 0, strandCanvas.width, strandCanvas.height);
@@ -466,17 +501,122 @@ class BAMCPViewer {
         document.getElementById('strand-ratio')!.textContent =
             `Fwd: ${evidence.forward_count} / Rev: ${evidence.reverse_count}`;
 
-        // Draw Quality Histogram
-        const qualCanvas = document.getElementById('quality-chart') as HTMLCanvasElement;
-        const qCtx = qualCanvas.getContext('2d')!;
-        qCtx.clearRect(0, 0, qualCanvas.width, qualCanvas.height);
+        // Show warning if high strand bias
+        const warningEl = document.getElementById('strand-warning')!;
+        if (evidence.strand_bias > 0.8) {
+            warningEl.style.display = 'flex';
+        } else {
+            warningEl.style.display = 'none';
+        }
+    }
 
-        // Simple bar chart for max quality bucket (mock viz for now as full histogram needs parsing)
-        qCtx.fillStyle = '#374151';
-        qCtx.font = '10px sans-serif';
-        qCtx.textAlign = 'left';
-        qCtx.fillText(`Mean Qual: ${evidence.mean_quality.toFixed(1)}`, 2, 14);
-        qCtx.fillText(`Med Qual: ${evidence.median_quality.toFixed(1)}`, 2, 28);
+    private renderHistogram(
+        canvasId: string,
+        data: number[],
+        labels: string[],
+        color: string
+    ): void {
+        const canvas = document.getElementById(canvasId) as HTMLCanvasElement;
+        if (!canvas) return;
+
+        const ctx = canvas.getContext('2d')!;
+        const width = canvas.width;
+        const height = canvas.height;
+
+        ctx.clearRect(0, 0, width, height);
+
+        if (!data || data.length === 0) {
+            ctx.fillStyle = '#9ca3af';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('No data', 10, height / 2);
+            return;
+        }
+
+        const maxValue = Math.max(...data, 1);
+        const barWidth = (width - 20) / data.length;
+        const barGap = 2;
+
+        // Draw bars
+        data.forEach((value, i) => {
+            const barHeight = (value / maxValue) * (height - 20);
+            const x = 10 + i * barWidth;
+            const y = height - 15 - barHeight;
+
+            ctx.fillStyle = color;
+            ctx.fillRect(x + barGap / 2, y, barWidth - barGap, barHeight);
+
+            // Value label on bar
+            if (value > 0) {
+                ctx.fillStyle = '#374151';
+                ctx.font = '9px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(value.toString(), x + barWidth / 2, y - 2);
+            }
+        });
+
+        // X-axis labels
+        ctx.fillStyle = '#6b7280';
+        ctx.font = '8px sans-serif';
+        ctx.textAlign = 'center';
+        labels.slice(0, data.length).forEach((label, i) => {
+            const x = 10 + i * barWidth + barWidth / 2;
+            ctx.fillText(label, x, height - 2);
+        });
+    }
+
+    private getPositionSummary(histogram: number[] | undefined): string {
+        if (!histogram || histogram.length === 0) return '';
+
+        const total = histogram.reduce((a, b) => a + b, 0);
+        if (total === 0) return '';
+
+        // First two bins (0-25, 25-50) represent near-end positions
+        const nearEnd = (histogram[0] || 0) + (histogram[1] || 0);
+        const pct = Math.round((nearEnd / total) * 100);
+
+        if (pct > 50) {
+            return `Warning: ${pct}% near ends`;
+        }
+        return `${pct}% near ends`;
+    }
+
+    private renderArtifactRisk(artifactRisk: ArtifactAssessment | undefined): void {
+        const meterEl = document.getElementById('artifact-risk-meter')!;
+        const listEl = document.getElementById('artifact-risk-list')!;
+
+        if (!artifactRisk) {
+            meterEl.innerHTML = '<span style="color:#6b7280">No data</span>';
+            listEl.innerHTML = '';
+            return;
+        }
+
+        // Risk meter visualization
+        const score = artifactRisk.risk_score;
+        const likelihood = artifactRisk.artifact_likelihood;
+        const color = likelihood === 'high' ? '#ef4444' :
+                      likelihood === 'medium' ? '#f97316' : '#22c55e';
+
+        meterEl.innerHTML = `
+            <div style="display:flex;align-items:center;gap:8px;">
+                <div style="width:100px;height:8px;background:#e5e7eb;border-radius:4px;overflow:hidden;">
+                    <div style="width:${score * 100}%;height:100%;background:${color};"></div>
+                </div>
+                <span style="color:${color};font-weight:600;text-transform:uppercase;font-size:11px;">
+                    ${likelihood}
+                </span>
+            </div>
+        `;
+
+        // Risk list
+        if (artifactRisk.risks.length > 0) {
+            listEl.innerHTML = artifactRisk.risks.map(risk => `
+                <li style="color:${risk.severity === 'high' ? '#ef4444' : '#f97316'};">
+                    ${risk.description}
+                </li>
+            `).join('');
+        } else {
+            listEl.innerHTML = '<li style="color:#22c55e;">No concerns identified</li>';
+        }
     }
 
     private async toggleFullscreen(): Promise<void> {

@@ -1,6 +1,7 @@
 """Unit tests for security validation."""
 
 import pytest
+
 from bamcp.config import BAMCPConfig
 from bamcp.tools import ALLELE_PATTERN, CHROM_PATTERN, validate_lookup_inputs, validate_path
 

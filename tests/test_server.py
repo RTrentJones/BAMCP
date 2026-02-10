@@ -44,6 +44,7 @@ class TestCreateServer:
             "get_region_summary",
             "lookup_clinvar",
             "lookup_gnomad",
+            "get_variant_curation_summary",
             "search_gene",
             "cleanup_cache",
         }

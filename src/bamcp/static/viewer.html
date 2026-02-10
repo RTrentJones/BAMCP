@@ -159,7 +159,7 @@
 
         /* Evidence Panel */
         #evidence-panel {
-            height: 140px;
+            height: 200px;
             border-top: 1px solid #ddd;
             background: #fafafa;
             padding: 8px 12px;
@@ -184,6 +184,11 @@
         .evidence-close:hover { color: #374151; }
         .evidence-content {
             display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .evidence-row {
+            display: flex;
             gap: 24px;
         }
         .evidence-section {
@@ -197,6 +202,10 @@
             font-size: 10px;
             text-transform: uppercase;
         }
+        .evidence-stats {
+            font-size: 10px;
+            color: #6b7280;
+        }
         .evidence-warning {
             color: #ef4444;
             font-size: 10px;
@@ -206,6 +215,18 @@
         }
         .evidence-warning::before {
             content: '⚠';
+        }
+        .artifact-risk-section {
+            min-width: 200px;
+        }
+        #artifact-risk-list {
+            list-style: none;
+            margin: 4px 0 0 0;
+            padding: 0;
+            font-size: 11px;
+        }
+        #artifact-risk-list li {
+            margin: 2px 0;
         }
 
         #variant-panel table {
@@ -345,6 +366,8 @@
             #evidence-panel { background: #1f2937; border-color: #374151; }
             .evidence-header strong { color: #f9fafb; }
             .evidence-label { color: #9ca3af; }
+            .evidence-stats { color: #9ca3af; }
+            #artifact-risk-list { color: #e5e7eb; }
         }
     </style>
 </head>
@@ -421,20 +444,34 @@
                 <button class="evidence-close" id="close-evidence" title="Close">&times;</button>
             </div>
             <div class="evidence-content">
-                <div class="evidence-section">
-                    <span class="evidence-label">Strand Bias</span>
-                    <canvas id="strand-chart" width="120" height="24"></canvas>
-                    <span id="strand-ratio"></span>
-                    <span id="strand-warning" class="evidence-warning" style="display:none">High strand bias</span>
+                <div class="evidence-row">
+                    <div class="evidence-section">
+                        <span class="evidence-label">Strand Bias</span>
+                        <canvas id="strand-chart" width="120" height="24"></canvas>
+                        <span id="strand-ratio" class="evidence-stats"></span>
+                        <span id="strand-warning" class="evidence-warning" style="display:none">High strand bias</span>
+                    </div>
+                    <div class="evidence-section">
+                        <span class="evidence-label">Base Quality</span>
+                        <canvas id="quality-chart" width="180" height="60"></canvas>
+                        <span id="quality-stats" class="evidence-stats"></span>
+                    </div>
+                    <div class="evidence-section">
+                        <span class="evidence-label">Position in Read</span>
+                        <canvas id="position-chart" width="180" height="60"></canvas>
+                        <span id="position-stats" class="evidence-stats"></span>
+                    </div>
                 </div>
-                <div class="evidence-section">
-                    <span class="evidence-label">Base Quality</span>
-                    <canvas id="quality-chart" width="160" height="50"></canvas>
-                    <span id="quality-stats"></span>
-                </div>
-                <div class="evidence-section">
-                    <span class="evidence-label">Position in Read</span>
-                    <canvas id="position-chart" width="160" height="50"></canvas>
+                <div class="evidence-row">
+                    <div class="evidence-section">
+                        <span class="evidence-label">Mapping Quality</span>
+                        <canvas id="mapq-chart" width="180" height="60"></canvas>
+                    </div>
+                    <div class="evidence-section artifact-risk-section">
+                        <span class="evidence-label">Artifact Risk</span>
+                        <div id="artifact-risk-meter"></div>
+                        <ul id="artifact-risk-list"></ul>
+                    </div>
                 </div>
             </div>
         </div>

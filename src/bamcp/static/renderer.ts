@@ -12,7 +12,6 @@ import {
 const RULER_HEIGHT = 20;
 const REFERENCE_HEIGHT = 24;
 const COVERAGE_HEIGHT = 60;
-const HEADER_OFFSET = RULER_HEIGHT + REFERENCE_HEIGHT;
 
 export class Renderer {
     private rulerCanvas: HTMLCanvasElement;
@@ -125,7 +124,6 @@ export class Renderer {
     public resize(): void {
         const container = document.getElementById('viewer')!;
         const width = Math.max(container.clientWidth, 300);
-        const containerHeight = Math.max(container.clientHeight, HEADER_OFFSET + COVERAGE_HEIGHT + 200);
 
         // Ruler canvas
         this.rulerCanvas.width = width;
@@ -139,18 +137,16 @@ export class Renderer {
         this.coverageCanvas.width = width;
         this.coverageCanvas.height = COVERAGE_HEIGHT;
 
-        // Reads canvas - remaining height (no artificial cap for fullscreen)
-        this.readsCanvas.width = width;
-        const readsHeight = containerHeight - HEADER_OFFSET - COVERAGE_HEIGHT;
-        this.readsCanvas.height = readsHeight;
-
-        // Expand if needed for packed reads (use dynamic dimensions)
+        // Calculate height needed for actual reads content
+        let readsHeight = 200; // Minimum height
         if (this.state.packedRows.length > 0) {
             const { height, gap } = this.getReadDimensions();
-            const neededHeight = this.state.packedRows.length * (height + gap);
-            // Use the larger of available space or needed space (no 800px cap)
-            this.readsCanvas.height = Math.max(readsHeight, neededHeight);
+            readsHeight = Math.max(readsHeight, this.state.packedRows.length * (height + gap) + 20);
         }
+
+        // Reads canvas - size to content
+        this.readsCanvas.width = width;
+        this.readsCanvas.height = readsHeight;
 
         this.render();
     }

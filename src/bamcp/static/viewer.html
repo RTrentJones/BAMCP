@@ -6,59 +6,158 @@
     <meta name="color-scheme" content="light dark">
     <title>BAMCP Viewer</title>
     <style>
+        /* CSS Variables - Single source of truth for colors */
+        :root {
+            /* Layout */
+            --header-height: 104px;
+            --variant-panel-min: 150px;
+
+            /* Spacing */
+            --spacing-xs: 2px;
+            --spacing-sm: 4px;
+            --spacing-md: 8px;
+            --spacing-lg: 12px;
+            --spacing-xl: 16px;
+
+            /* Colors - Primary */
+            --color-primary: #4a90d9;
+            --color-primary-hover: #357abd;
+            --color-primary-active: #2d6ba5;
+            --color-accent: #3b82f6;
+
+            /* Colors - Semantic */
+            --color-success: #22c55e;
+            --color-warning: #f59e0b;
+            --color-danger: #ef4444;
+
+            /* Colors - Nucleotides */
+            --color-base-a: #22c55e;
+            --color-base-t: #ef4444;
+            --color-base-g: #f97316;
+            --color-base-c: #3b82f6;
+
+            /* Colors - Reads */
+            --color-read-forward: #60a5fa;
+            --color-read-reverse: #a78bfa;
+            --color-soft-clip: #f59e0b;
+            --color-insertion: #9333ea;
+            --color-deletion: #1f2937;
+
+            /* Colors - Surface */
+            --color-bg: #fff;
+            --color-bg-secondary: #f5f5f5;
+            --color-bg-tertiary: #f9fafb;
+            --color-bg-hover: #f3f4f6;
+            --color-bg-selected: #dbeafe;
+            --color-bg-highlight: #f0f7ff;
+
+            /* Colors - Border */
+            --color-border: #ddd;
+            --color-border-light: #e5e7eb;
+            --color-border-input: #ccc;
+
+            /* Colors - Text */
+            --color-text: #374151;
+            --color-text-secondary: #4b5563;
+            --color-text-muted: #6b7280;
+            --color-text-faint: #9ca3af;
+
+            /* Canvas backgrounds */
+            --color-canvas-ruler: #fafafa;
+            --color-canvas-ref: #fff;
+            --color-canvas-coverage: #fff;
+            --color-canvas-reads: #fff;
+        }
+
+        /* Dark mode overrides */
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --color-primary: #3b82f6;
+                --color-primary-hover: #2563eb;
+                --color-deletion: #4b5563;
+
+                --color-bg: #111827;
+                --color-bg-secondary: #1f2937;
+                --color-bg-tertiary: #374151;
+                --color-bg-hover: #4b5563;
+                --color-bg-selected: #1e3a5f;
+                --color-bg-highlight: #374151;
+
+                --color-border: #374151;
+                --color-border-light: #4b5563;
+                --color-border-input: #4b5563;
+
+                --color-text: #f9fafb;
+                --color-text-secondary: #e5e7eb;
+                --color-text-muted: #9ca3af;
+                --color-text-faint: #6b7280;
+
+                --color-canvas-ruler: #1f2937;
+                --color-canvas-ref: #111827;
+                --color-canvas-coverage: #111827;
+                --color-canvas-reads: #111827;
+            }
+        }
+
+        /* Base reset */
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        html, body { height: 100%; overflow: hidden; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--color-bg);
+            color: var(--color-text);
+        }
 
-        #container { display: flex; flex-direction: column; min-height: 400px; height: 100vh; }
+        /* Utility */
+        .hidden { display: none !important; }
 
+        /* Main layout - flexbox column */
+        #container { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+        /* Bottom padding accounts for Claude Desktop Reply input overlay in fullscreen */
+        #container.fullscreen { padding-bottom: 140px; }
+
+        /* Toolbar */
         #toolbar {
             display: flex;
             flex-wrap: wrap;
-            gap: 8px;
-            padding: 8px;
-            background: #f5f5f5;
-            border-bottom: 1px solid #ddd;
+            gap: var(--spacing-md);
+            padding: var(--spacing-md);
+            background: var(--color-bg-secondary);
+            border-bottom: 1px solid var(--color-border);
             align-items: center;
+            flex-shrink: 0;
         }
 
         #toolbar input {
             padding: 6px 10px;
-            border: 1px solid #ccc;
+            border: 1px solid var(--color-border-input);
             border-radius: 4px;
+            background: var(--color-bg);
+            color: var(--color-text);
         }
 
-        #toolbar #region-input {
-            width: 140px;
-            flex-shrink: 0;
-        }
+        #toolbar #region-input { width: 140px; flex-shrink: 0; }
+        #toolbar #gene-input { width: 70px; flex-shrink: 0; }
 
-        #toolbar #gene-input {
-            width: 70px;
-            flex-shrink: 0;
-        }
-
-        .toolbar-spacer {
-            flex: 1;
-            min-width: 8px;
-        }
+        .toolbar-spacer { flex: 1; min-width: var(--spacing-md); }
 
         #toolbar button {
             padding: 6px 12px;
-            background: #4a90d9;
+            background: var(--color-primary);
             color: white;
             border: none;
             border-radius: 4px;
             cursor: pointer;
         }
-
-        #toolbar button:hover { background: #357abd; }
-        #toolbar button.active { background: #2d6ba5; }
+        #toolbar button:hover { background: var(--color-primary-hover); }
+        #toolbar button.active { background: var(--color-primary-active); }
 
         #toolbar select {
             padding: 5px 8px;
-            border: 1px solid #ccc;
+            border: 1px solid var(--color-border-input);
             border-radius: 4px;
-            background: white;
+            background: var(--color-bg);
+            color: var(--color-text);
             font-size: 12px;
             cursor: pointer;
         }
@@ -66,102 +165,121 @@
         .toolbar-separator {
             width: 1px;
             height: 24px;
-            background: #ddd;
-            margin: 0 4px;
+            background: var(--color-border);
+            margin: 0 var(--spacing-sm);
         }
 
         .toolbar-checkbox {
             display: flex;
             align-items: center;
-            gap: 4px;
+            gap: var(--spacing-sm);
             font-size: 12px;
-            color: #374151;
+            color: var(--color-text);
             cursor: pointer;
         }
+        .toolbar-checkbox input { cursor: pointer; }
 
-        .toolbar-checkbox input {
-            cursor: pointer;
-        }
-
-        /* Color Legend */
+        /* Legend */
         #legend {
             display: flex;
-            gap: 16px;
-            padding: 4px 8px;
-            background: #f9fafb;
-            border-bottom: 1px solid #e5e7eb;
+            gap: var(--spacing-xl);
+            padding: var(--spacing-sm) var(--spacing-md);
+            background: var(--color-bg-tertiary);
+            border-bottom: 1px solid var(--color-border-light);
             font-size: 11px;
+            flex-shrink: 0;
         }
-        .legend-section { display: flex; align-items: center; gap: 8px; }
-        .legend-title { font-weight: 600; color: #6b7280; }
+        .legend-section { display: flex; align-items: center; gap: var(--spacing-md); }
+        .legend-title { font-weight: 600; color: var(--color-text-muted); }
         .legend-item { display: flex; align-items: center; gap: 3px; }
-        .color-box { width: 12px; height: 12px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.1); }
+        .color-box {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+            border: 1px solid rgba(0,0,0,0.1);
+        }
+        /* Legend color classes */
+        .color-box.base-a { background: var(--color-base-a); }
+        .color-box.base-t { background: var(--color-base-t); }
+        .color-box.base-g { background: var(--color-base-g); }
+        .color-box.base-c { background: var(--color-base-c); }
+        .color-box.read-forward { background: var(--color-read-forward); }
+        .color-box.read-reverse { background: var(--color-read-reverse); }
+        .color-box.soft-clip { background: var(--color-soft-clip); opacity: 0.5; }
+        .color-box.insertion { background: var(--color-insertion); }
+        .color-box.deletion { background: var(--color-deletion); }
 
+        /* Viewer - fills available space, scrolls if needed */
         #viewer {
-            flex: 1;
+            flex: 1 1 auto;
             position: relative;
             overflow: auto;
             min-height: 200px;
+            background: var(--color-canvas-reads);
         }
 
-        /* Track canvases - positioned absolutely within viewer */
+        /* Track canvases - absolute positioned layers */
         #ruler-canvas, #reference-canvas, #coverage-canvas, #reads-canvas {
             position: absolute;
             left: 0;
         }
+        #ruler-canvas { top: 0; height: 20px; background: var(--color-canvas-ruler); }
+        #reference-canvas { top: 20px; height: 24px; background: var(--color-canvas-ref); }
+        #coverage-canvas { top: 44px; height: 60px; background: var(--color-canvas-coverage); }
+        #reads-canvas { top: 104px; background: var(--color-canvas-reads); }
 
-        #ruler-canvas { top: 0; height: 20px; background: #fafafa; }
-        #reference-canvas { top: 20px; height: 24px; background: #fff; }
-        #coverage-canvas { top: 44px; height: 60px; }
-        #reads-canvas { top: 104px; }
-
+        /* Tooltip - fixed position to float over everything */
         #tooltip {
-            position: absolute;
+            position: fixed;
             background: rgba(0, 0, 0, 0.85);
             color: white;
-            padding: 8px 10px;
+            padding: var(--spacing-md) 10px;
             border-radius: 4px;
             font-size: 12px;
             pointer-events: none;
             display: none;
             max-width: 300px;
-            z-index: 100;
+            z-index: 10000;
             line-height: 1.4;
         }
 
+        /* Variant Panel - fixed minimum height, never compressed */
         #variant-panel {
-            border-top: 1px solid #ddd;
+            flex: 0 0 var(--variant-panel-min);
+            min-height: var(--variant-panel-min);
+            border-top: 1px solid var(--color-border);
+            background: var(--color-bg-secondary);
             font-size: 12px;
             display: flex;
             flex-direction: column;
-            max-height: 200px;
+            overflow: hidden;
         }
 
         .variant-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 6px 8px;
-            background: #f5f5f5;
-            border-bottom: 1px solid #e5e7eb;
+            padding: 6px var(--spacing-md);
+            background: var(--color-bg-tertiary);
+            border-bottom: 1px solid var(--color-border-light);
             flex-shrink: 0;
         }
 
         .variant-header-left {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: var(--spacing-md);
         }
 
         .variant-header-left strong {
             font-size: 13px;
-            color: #374151;
+            color: var(--color-text);
         }
 
         .variant-count {
-            background: #e5e7eb;
-            color: #4b5563;
-            padding: 2px 8px;
+            background: var(--color-border-light);
+            color: var(--color-text-secondary);
+            padding: var(--spacing-xs) var(--spacing-md);
             border-radius: 10px;
             font-size: 11px;
             font-weight: 500;
@@ -169,33 +287,27 @@
 
         .filter-toggle {
             display: flex;
-            border: 1px solid #d1d5db;
+            border: 1px solid var(--color-border-light);
             border-radius: 4px;
             overflow: hidden;
             font-size: 11px;
         }
 
         .filter-toggle button {
-            padding: 4px 10px;
-            background: #fff;
+            padding: var(--spacing-sm) 10px;
+            background: var(--color-bg);
             border: none;
             cursor: pointer;
-            color: #6b7280;
+            color: var(--color-text-muted);
             transition: all 0.15s;
         }
 
         .filter-toggle button:first-child {
-            border-right: 1px solid #d1d5db;
+            border-right: 1px solid var(--color-border-light);
         }
 
-        .filter-toggle button:hover {
-            background: #f3f4f6;
-        }
-
-        .filter-toggle button.active {
-            background: #3b82f6;
-            color: white;
-        }
+        .filter-toggle button:hover { background: var(--color-bg-hover); }
+        .filter-toggle button.active { background: var(--color-accent); color: white; }
 
         .variant-table-container {
             overflow-y: auto;
@@ -205,220 +317,166 @@
         /* Evidence Panel */
         #evidence-panel {
             height: 200px;
-            border-top: 1px solid #ddd;
-            background: #fafafa;
-            padding: 8px 12px;
+            border-top: 1px solid var(--color-border);
+            background: var(--color-bg-tertiary);
+            padding: var(--spacing-md) var(--spacing-lg);
             font-size: 12px;
             display: none;
+            flex-shrink: 0;
         }
         #evidence-panel.visible { display: block; }
+
         .evidence-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 8px;
+            margin-bottom: var(--spacing-md);
         }
-        .evidence-header strong { color: #374151; }
+        .evidence-header strong { color: var(--color-text); }
+
         .evidence-close {
             background: none;
             border: none;
             font-size: 16px;
             cursor: pointer;
-            color: #9ca3af;
+            color: var(--color-text-faint);
         }
-        .evidence-close:hover { color: #374151; }
+        .evidence-close:hover { color: var(--color-text); }
+
         .evidence-content {
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: var(--spacing-lg);
         }
+
         .evidence-row {
             display: flex;
             gap: 24px;
         }
+
         .evidence-section {
             display: flex;
             flex-direction: column;
-            gap: 4px;
+            gap: var(--spacing-sm);
         }
+
         .evidence-label {
             font-weight: 600;
-            color: #6b7280;
+            color: var(--color-text-muted);
             font-size: 10px;
             text-transform: uppercase;
         }
+
         .evidence-stats {
             font-size: 10px;
-            color: #6b7280;
+            color: var(--color-text-muted);
         }
+
         .evidence-warning {
-            color: #ef4444;
+            color: var(--color-danger);
             font-size: 10px;
             display: flex;
             align-items: center;
-            gap: 4px;
+            gap: var(--spacing-sm);
         }
-        .evidence-warning::before {
-            content: '⚠';
-        }
-        .artifact-risk-section {
-            min-width: 200px;
-        }
+        .evidence-warning::before { content: '⚠'; }
+
+        .artifact-risk-section { min-width: 200px; }
+
         #artifact-risk-list {
             list-style: none;
-            margin: 4px 0 0 0;
+            margin: var(--spacing-sm) 0 0 0;
             padding: 0;
             font-size: 11px;
+            color: var(--color-text-secondary);
         }
-        #artifact-risk-list li {
-            margin: 2px 0;
-        }
+        #artifact-risk-list li { margin: var(--spacing-xs) 0; }
 
+        /* Variant table */
         #variant-panel table {
             width: 100%;
             border-collapse: collapse;
         }
 
-        #variant-panel th, #variant-panel td {
-            padding: 4px 8px;
+        #variant-panel th,
+        #variant-panel td {
+            padding: var(--spacing-sm) var(--spacing-md);
             text-align: left;
-            border-bottom: 1px solid #eee;
+            border-bottom: 1px solid var(--color-border-light);
         }
 
         #variant-panel th {
-            background: #f5f5f5;
+            background: var(--color-bg-secondary);
+            color: var(--color-text);
             position: sticky;
             top: 0;
             user-select: none;
         }
 
-        #variant-panel th.sortable {
-            cursor: pointer;
-        }
-
-        #variant-panel th.sortable:hover {
-            background: #e5e7eb;
-        }
-
-        #variant-panel th .sort-indicator {
-            margin-left: 4px;
-            color: #9ca3af;
-        }
-
+        #variant-panel th.sortable { cursor: pointer; }
+        #variant-panel th.sortable:hover { background: var(--color-bg-hover); }
+        #variant-panel th .sort-indicator { margin-left: var(--spacing-sm); color: var(--color-text-faint); }
         #variant-panel th.sorted-asc .sort-indicator::after { content: '▲'; }
         #variant-panel th.sorted-desc .sort-indicator::after { content: '▼'; }
 
-        #variant-panel tbody tr {
-            cursor: pointer;
-        }
+        #variant-panel td { color: var(--color-text-secondary); }
+        #variant-panel tbody tr { cursor: pointer; }
+        #variant-panel tbody tr:hover { background: var(--color-bg-highlight); }
+        #variant-panel tbody tr.selected { background: var(--color-bg-selected); }
 
-        #variant-panel tbody tr:hover { background: #f0f7ff; }
-        #variant-panel tbody tr.selected { background: #dbeafe; }
-
-        /* Low-confidence variant styling */
-        #variant-panel tbody tr.low-confidence {
-            opacity: 0.6;
-        }
-
+        /* Low-confidence variant */
+        #variant-panel tbody tr.low-confidence { opacity: 0.6; }
         #variant-panel tbody tr.low-confidence td:first-child::before {
             content: '⚠';
-            margin-right: 4px;
-            color: #f59e0b;
+            margin-right: var(--spacing-sm);
+            color: var(--color-warning);
         }
 
         /* Expanded row */
         #variant-panel tbody tr.expanded {
-            background: #eff6ff;
-            border-left: 3px solid #3b82f6;
+            background: var(--color-bg-highlight);
+            border-left: 3px solid var(--color-accent);
         }
 
-        /* Expansion detail row */
-        #variant-panel tbody tr.detail-row {
-            background: #f9fafb;
-        }
+        #variant-panel tbody tr.detail-row { background: var(--color-bg-tertiary); }
+        #variant-panel tbody tr.detail-row td { padding: var(--spacing-lg); }
 
-        #variant-panel tbody tr.detail-row td {
-            padding: 12px;
-        }
-
-        .detail-content {
-            display: flex;
-            gap: 24px;
-        }
+        .detail-content { display: flex; gap: 24px; }
 
         /* Action buttons */
         .action-btn {
-            padding: 2px 6px;
+            padding: var(--spacing-xs) 6px;
             font-size: 10px;
-            border: 1px solid #d1d5db;
+            border: 1px solid var(--color-border-light);
             border-radius: 3px;
-            background: #fff;
+            background: var(--color-bg);
+            color: var(--color-text-secondary);
             cursor: pointer;
-            margin-right: 4px;
+            margin-right: var(--spacing-sm);
         }
-
-        .action-btn:hover {
-            background: #f3f4f6;
-        }
-
+        .action-btn:hover { background: var(--color-bg-hover); }
         .action-btn.clinvar { color: #059669; border-color: #10b981; }
         .action-btn.gnomad { color: #7c3aed; border-color: #8b5cf6; }
 
-        /* Locked tooltip style */
+        /* Locked tooltip - draggable */
         #tooltip.locked {
             pointer-events: auto;
-            border: 2px solid #3b82f6;
+            cursor: move;
+            border: 2px solid var(--color-accent);
             box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            user-select: none;
         }
         #tooltip.locked::after {
-            content: '(click elsewhere to dismiss)';
+            content: '(drag to move, click elsewhere to dismiss)';
             display: block;
             font-size: 9px;
-            color: #9ca3af;
-            margin-top: 4px;
+            color: var(--color-text-faint);
+            margin-top: var(--spacing-sm);
+        }
+        #tooltip.dragging {
+            opacity: 0.9;
         }
 
-        /* Dark mode */
-        @media (prefers-color-scheme: dark) {
-            body { background: #111827; color: #f9fafb; }
-            #toolbar { background: #1f2937; border-color: #374151; }
-            #toolbar input { background: #374151; border-color: #4b5563; color: #f9fafb; }
-            #toolbar select { background: #374151; border-color: #4b5563; color: #f9fafb; }
-            #toolbar button { background: #3b82f6; }
-            #toolbar button:hover { background: #2563eb; }
-            .toolbar-separator { background: #4b5563; }
-            .toolbar-checkbox { color: #e5e7eb; }
-            #legend { background: #1f2937; border-color: #374151; }
-            .legend-title { color: #9ca3af; }
-            #viewer { background: #111827; }
-            #ruler-canvas { background: #1f2937; }
-            #reference-canvas { background: #111827; }
-            #coverage-canvas { background: #111827; }
-            #reads-canvas { background: #111827; }
-            #variant-panel { background: #1f2937; border-color: #374151; }
-            .variant-header { background: #374151; border-color: #4b5563; }
-            .variant-header-left strong { color: #f9fafb; }
-            .variant-count { background: #4b5563; color: #e5e7eb; }
-            .filter-toggle { border-color: #4b5563; }
-            .filter-toggle button { background: #374151; color: #9ca3af; border-color: #4b5563; }
-            .filter-toggle button:hover { background: #4b5563; }
-            .filter-toggle button.active { background: #3b82f6; color: #fff; }
-            #variant-panel th { background: #374151; color: #f9fafb; }
-            #variant-panel th.sortable:hover { background: #4b5563; }
-            #variant-panel td { border-color: #374151; color: #e5e7eb; }
-            #variant-panel tbody tr:hover { background: #374151; }
-            #variant-panel tbody tr.selected { background: #1e3a5f; }
-            #variant-panel tbody tr.expanded { background: #1e3a5f; border-left-color: #60a5fa; }
-            #variant-panel tbody tr.detail-row { background: #1f2937; }
-            .action-btn { background: #374151; border-color: #4b5563; color: #e5e7eb; }
-            .action-btn:hover { background: #4b5563; }
-            #tooltip { background: #374151; border-color: #4b5563; }
-            #evidence-panel { background: #1f2937; border-color: #374151; }
-            .evidence-header strong { color: #f9fafb; }
-            .evidence-label { color: #9ca3af; }
-            .evidence-stats { color: #9ca3af; }
-            #artifact-risk-list { color: #e5e7eb; }
-        }
     </style>
 </head>
 <body>
@@ -457,21 +515,21 @@
         <div id="legend">
             <span class="legend-section">
                 <span class="legend-title">Bases:</span>
-                <span class="legend-item"><span class="color-box" style="background:#22c55e"></span>A</span>
-                <span class="legend-item"><span class="color-box" style="background:#ef4444"></span>T</span>
-                <span class="legend-item"><span class="color-box" style="background:#f97316"></span>G</span>
-                <span class="legend-item"><span class="color-box" style="background:#3b82f6"></span>C</span>
+                <span class="legend-item"><span class="color-box base-a"></span>A</span>
+                <span class="legend-item"><span class="color-box base-t"></span>T</span>
+                <span class="legend-item"><span class="color-box base-g"></span>G</span>
+                <span class="legend-item"><span class="color-box base-c"></span>C</span>
             </span>
             <span class="legend-section">
                 <span class="legend-title">Reads:</span>
-                <span class="legend-item"><span class="color-box" style="background:#60a5fa"></span>Forward</span>
-                <span class="legend-item"><span class="color-box" style="background:#a78bfa"></span>Reverse</span>
+                <span class="legend-item"><span class="color-box read-forward"></span>Forward</span>
+                <span class="legend-item"><span class="color-box read-reverse"></span>Reverse</span>
             </span>
             <span class="legend-section">
                 <span class="legend-title">Features:</span>
-                <span class="legend-item"><span class="color-box" style="background:#f59e0b; opacity:0.5"></span>Soft-clip</span>
-                <span class="legend-item"><span class="color-box" style="background:#9333ea"></span>Insertion</span>
-                <span class="legend-item"><span class="color-box" style="background:#1f2937"></span>Deletion</span>
+                <span class="legend-item"><span class="color-box soft-clip"></span>Soft-clip</span>
+                <span class="legend-item"><span class="color-box insertion"></span>Insertion</span>
+                <span class="legend-item"><span class="color-box deletion"></span>Deletion</span>
             </span>
         </div>
         <div id="viewer">
@@ -521,7 +579,7 @@
                         <span class="evidence-label">Strand Bias</span>
                         <canvas id="strand-chart" width="120" height="24"></canvas>
                         <span id="strand-ratio" class="evidence-stats"></span>
-                        <span id="strand-warning" class="evidence-warning" style="display:none">High strand bias</span>
+                        <span id="strand-warning" class="evidence-warning hidden">High strand bias</span>
                     </div>
                     <div class="evidence-section">
                         <span class="evidence-label">Base Quality</span>

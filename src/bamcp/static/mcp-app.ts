@@ -12,6 +12,7 @@
  */
 
 import { BAMCPClient } from "./client";
+import { BASE_COLORS } from "./constants";
 import { Renderer } from "./renderer";
 import { StateManager, DEFAULT_SETTINGS } from "./state";
 import {
@@ -26,15 +27,6 @@ import {
 } from "./types";
 
 const CONTEXT_UPDATE_DEBOUNCE_MS = 300;
-
-// Base colors for nucleotides (shared with renderer.ts)
-const BASE_COLORS: Record<string, string> = {
-    'A': '#22c55e',  // Green
-    'T': '#ef4444',  // Red
-    'G': '#f97316',  // Orange
-    'C': '#3b82f6',  // Blue
-    'N': '#9ca3af',  // Gray
-};
 
 class BAMCPViewer {
     private client: BAMCPClient;
@@ -52,6 +44,10 @@ class BAMCPViewer {
     private hoverDelayTimer: ReturnType<typeof setTimeout> | null = null;
     private static readonly HOVER_DELAY_MS = 200;
     private isFullscreen = false;
+
+    // Tooltip drag state
+    private isDraggingTooltip = false;
+    private tooltipDragOffset = { x: 0, y: 0 };
 
     constructor() {
         this.client = new BAMCPClient();
@@ -78,11 +74,33 @@ class BAMCPViewer {
         // Window resize
         window.addEventListener('resize', () => this.renderer.resize());
 
-        // Init client
-        this.client.init();
+        // Init client and update UI based on available modes
+        this.client.init().then(() => {
+            this.updateDisplayModeButtons();
+        });
 
         // Initial render
         this.renderer.resize();
+    }
+
+    private updateDisplayModeButtons(): void {
+        const availableModes = this.client.getAvailableDisplayModes();
+        const pipBtn = document.getElementById('pip-btn') as HTMLButtonElement;
+        const fsBtn = document.getElementById('fullscreen-btn') as HTMLButtonElement;
+
+        // Disable PIP button if not supported by host
+        if (!availableModes.includes('pip')) {
+            pipBtn.disabled = true;
+            pipBtn.title = 'PIP mode not supported by host';
+            pipBtn.style.opacity = '0.5';
+        }
+
+        // Disable fullscreen button if not supported
+        if (!availableModes.includes('fullscreen')) {
+            fsBtn.disabled = true;
+            fsBtn.title = 'Fullscreen not supported by host';
+            fsBtn.style.opacity = '0.5';
+        }
     }
 
     private setupEventListeners(): void {
@@ -227,15 +245,59 @@ class BAMCPViewer {
                 this.state.hoveredRead = read;
                 this.renderer.render();
             } else {
-                this.state.lockedTooltip = null;
-                this.tooltip.classList.remove('locked');
-                this.tooltip.style.display = 'none';
-
-                if (this.state.hoveredRead) {
-                    this.state.hoveredRead = null;
-                    this.renderer.render();
-                }
+                this.unlockTooltip();
             }
+        });
+
+        // Tooltip drag handling
+        this.tooltip.addEventListener('mousedown', (e) => {
+            if (!this.state.lockedTooltip) return;
+            e.preventDefault();
+            e.stopPropagation();
+
+            this.isDraggingTooltip = true;
+            this.tooltip.classList.add('dragging');
+
+            const rect = this.tooltip.getBoundingClientRect();
+            this.tooltipDragOffset = {
+                x: e.clientX - rect.left,
+                y: e.clientY - rect.top
+            };
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!this.isDraggingTooltip) return;
+
+            const newX = e.clientX - this.tooltipDragOffset.x;
+            const newY = e.clientY - this.tooltipDragOffset.y;
+
+            // Keep tooltip within viewport bounds
+            const tooltipRect = this.tooltip.getBoundingClientRect();
+            const maxX = window.innerWidth - tooltipRect.width;
+            const maxY = window.innerHeight - tooltipRect.height;
+
+            this.tooltip.style.left = Math.max(0, Math.min(newX, maxX)) + 'px';
+            this.tooltip.style.top = Math.max(0, Math.min(newY, maxY)) + 'px';
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (this.isDraggingTooltip) {
+                this.isDraggingTooltip = false;
+                this.tooltip.classList.remove('dragging');
+            }
+        });
+
+        // Click outside locked tooltip to dismiss
+        document.addEventListener('click', (e) => {
+            if (!this.state.lockedTooltip) return;
+            if (this.isDraggingTooltip) return;
+
+            // Check if click is inside tooltip or canvas
+            const target = e.target as HTMLElement;
+            if (this.tooltip.contains(target)) return;
+            if (this.readsCanvas.contains(target)) return;
+
+            this.unlockTooltip();
         });
 
         // Mouse wheel zoom
@@ -451,10 +513,20 @@ class BAMCPViewer {
         this.showTooltipForRead(read, e.clientX, e.clientY);
     }
 
+    private unlockTooltip(): void {
+        this.state.lockedTooltip = null;
+        this.tooltip.classList.remove('locked');
+        this.tooltip.classList.remove('dragging');
+        this.tooltip.style.display = 'none';
+
+        if (this.state.hoveredRead) {
+            this.state.hoveredRead = null;
+            this.renderer.render();
+        }
+    }
+
     private showTooltipForRead(read: Read, x: number, y: number): void {
         this.tooltip.style.display = 'block';
-        this.tooltip.style.left = (x + 10) + 'px';
-        this.tooltip.style.top = (y + 10) + 'px';
 
         // MAPQ color coding: green ≥30, orange 10-30, red <10
         const mapqColor = read.mapping_quality >= 30 ? '#22c55e' :
@@ -468,14 +540,14 @@ class BAMCPViewer {
                 `<span style="color:${BASE_COLORS[mm.alt] || '#666'}">${mm.alt}</span>`
             ).join(', ');
             const more = read.mismatches.length > 5 ? ` +${read.mismatches.length - 5} more` : '';
-            mismatchHtml = `<br><span style="color:#9ca3af">Mismatches:</span> ${mmList}${more}`;
+            mismatchHtml = `<br><span style="color:var(--color-text-muted)">Mismatches:</span> ${mmList}${more}`;
         }
 
         // Paired-end info
         let pairInfo = read.is_paired ? 'Paired' : 'Single';
         if (read.is_paired && read.insert_size) {
-            const insertColor = Math.abs(read.insert_size) > 1000 ? '#ef4444' :
-                               Math.abs(read.insert_size) < 100 ? '#f97316' : '#22c55e';
+            const insertColor = Math.abs(read.insert_size) > 1000 ? 'var(--color-danger)' :
+                               Math.abs(read.insert_size) < 100 ? 'var(--color-warning)' : 'var(--color-success)';
             pairInfo += ` | Insert: <span style="color:${insertColor}">${Math.abs(read.insert_size)}bp</span>`;
         }
 
@@ -487,18 +559,31 @@ class BAMCPViewer {
             ${pairInfo}${mismatchHtml}
         `;
 
-        // Adjust position to keep tooltip in view
-        const containerRect = document.getElementById('container')!.getBoundingClientRect();
-        const tooltipRect = this.tooltip.getBoundingClientRect();
+        // Position tooltip using viewport coordinates (since position: fixed)
+        // Set initial position to get accurate dimensions
+        this.tooltip.style.left = (x + 10) + 'px';
+        this.tooltip.style.top = (y + 10) + 'px';
 
+        // Adjust to keep tooltip within viewport
+        const tooltipRect = this.tooltip.getBoundingClientRect();
         let left = x + 10;
         let top = y + 10;
 
-        if (left + tooltipRect.width > containerRect.right - 10) {
+        // Keep within right edge
+        if (left + tooltipRect.width > window.innerWidth - 10) {
             left = x - tooltipRect.width - 10;
         }
-        if (top + tooltipRect.height > containerRect.bottom - 10) {
+        // Keep within bottom edge
+        if (top + tooltipRect.height > window.innerHeight - 10) {
             top = y - tooltipRect.height - 10;
+        }
+        // Keep within left edge
+        if (left < 10) {
+            left = 10;
+        }
+        // Keep within top edge
+        if (top < 10) {
+            top = 10;
         }
 
         this.tooltip.style.left = left + 'px';
@@ -660,7 +745,7 @@ class BAMCPViewer {
         const listEl = document.getElementById('artifact-risk-list')!;
 
         if (!artifactRisk) {
-            meterEl.innerHTML = '<span style="color:#6b7280">No data</span>';
+            meterEl.innerHTML = '<span style="color:var(--color-text-muted)">No data</span>';
             listEl.innerHTML = '';
             return;
         }
@@ -668,12 +753,12 @@ class BAMCPViewer {
         // Risk meter visualization
         const score = artifactRisk.risk_score;
         const likelihood = artifactRisk.artifact_likelihood;
-        const color = likelihood === 'high' ? '#ef4444' :
-                      likelihood === 'medium' ? '#f97316' : '#22c55e';
+        const color = likelihood === 'high' ? 'var(--color-danger)' :
+                      likelihood === 'medium' ? 'var(--color-warning)' : 'var(--color-success)';
 
         meterEl.innerHTML = `
             <div style="display:flex;align-items:center;gap:8px;">
-                <div style="width:100px;height:8px;background:#e5e7eb;border-radius:4px;overflow:hidden;">
+                <div style="width:100px;height:8px;background:var(--color-border-light);border-radius:4px;overflow:hidden;">
                     <div style="width:${score * 100}%;height:100%;background:${color};"></div>
                 </div>
                 <span style="color:${color};font-weight:600;text-transform:uppercase;font-size:11px;">
@@ -685,17 +770,18 @@ class BAMCPViewer {
         // Risk list
         if (artifactRisk.risks.length > 0) {
             listEl.innerHTML = artifactRisk.risks.map(risk => `
-                <li style="color:${risk.severity === 'high' ? '#ef4444' : '#f97316'};">
+                <li style="color:${risk.severity === 'high' ? 'var(--color-danger)' : 'var(--color-warning)'};">
                     ${risk.description}
                 </li>
             `).join('');
         } else {
-            listEl.innerHTML = '<li style="color:#22c55e;">No concerns identified</li>';
+            listEl.innerHTML = '<li style="color:var(--color-success);">No concerns identified</li>';
         }
     }
 
     private async toggleFullscreen(): Promise<void> {
         const btn = document.getElementById('fullscreen-btn')!;
+        const container = document.getElementById('container')!;
 
         // Use MCP Apps display mode API (falls back to browser fullscreen)
         const success = await this.client.toggleFullscreen();
@@ -703,6 +789,7 @@ class BAMCPViewer {
         if (success) {
             this.isFullscreen = this.client.getCurrentDisplayMode() === 'fullscreen';
             btn.classList.toggle('active', this.isFullscreen);
+            container.classList.toggle('fullscreen', this.isFullscreen);
         }
     }
 

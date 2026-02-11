@@ -166,6 +166,10 @@ class BAMCPViewer {
             this.togglePip();
         });
 
+        document.getElementById('sync-btn')!.addEventListener('click', () => {
+            this.syncToAI();
+        });
+
         // Settings controls
         this.setupSettingsControls();
 
@@ -810,6 +814,13 @@ class BAMCPViewer {
             this.isFullscreen = this.client.getCurrentDisplayMode() === 'fullscreen';
             fsBtn.classList.toggle('active', this.isFullscreen);
         }
+    }
+
+    private syncToAI(): void {
+        if (!this.state.data) return;
+
+        const region = `${this.state.data.contig}:${Math.floor(this.state.viewport.start)}-${Math.floor(this.state.viewport.end)}`;
+        this.client.syncContext(region);
     }
 }
 

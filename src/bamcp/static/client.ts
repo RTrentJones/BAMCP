@@ -215,4 +215,21 @@ export class BAMCPClient {
             // Ignore errors
         }
     }
+
+    public async syncContext(region: string): Promise<void> {
+        if (!this.app) return;
+
+        const message =
+            `Get a summary of the current view at region ${region} ` +
+            `using get_region_summary with the same BAM file.`;
+
+        try {
+            await this.app.sendMessage({
+                role: 'user',
+                content: [{ type: 'text', text: message }]
+            });
+        } catch {
+            // Ignore errors
+        }
+    }
 }

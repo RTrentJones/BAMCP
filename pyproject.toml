@@ -82,6 +82,7 @@ warn_unused_configs = true
 
 [tool.coverage.run]
 source = ["bamcp"]
+omit = ["src/bamcp/__main__.py"]
 
 [tool.coverage.report]
 show_missing = true

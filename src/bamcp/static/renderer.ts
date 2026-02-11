@@ -139,7 +139,7 @@ export class Renderer {
         this.coverageCanvas.width = width;
         this.coverageCanvas.height = COVERAGE_HEIGHT;
 
-        // Reads canvas - remaining height
+        // Reads canvas - remaining height (no artificial cap for fullscreen)
         this.readsCanvas.width = width;
         const readsHeight = containerHeight - HEADER_OFFSET - COVERAGE_HEIGHT;
         this.readsCanvas.height = readsHeight;
@@ -148,9 +148,8 @@ export class Renderer {
         if (this.state.packedRows.length > 0) {
             const { height, gap } = this.getReadDimensions();
             const neededHeight = this.state.packedRows.length * (height + gap);
-            if (neededHeight > this.readsCanvas.height) {
-                this.readsCanvas.height = Math.min(neededHeight, 800);
-            }
+            // Use the larger of available space or needed space (no 800px cap)
+            this.readsCanvas.height = Math.max(readsHeight, neededHeight);
         }
 
         this.render();

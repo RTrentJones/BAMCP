@@ -477,9 +477,9 @@ class BAMCPViewer {
                 if ((e.target as HTMLElement).classList.contains('action-btn')) {
                     const btn = e.target as HTMLElement;
                     if (btn.classList.contains('clinvar')) {
-                        // TODO: Implement ClinVar lookup tool call
+                        this.client.lookupClinVar(v);
                     } else if (btn.classList.contains('gnomad')) {
-                        // TODO: Implement gnomAD lookup tool call
+                        this.client.lookupGnomAD(v);
                     } else if (btn.classList.contains('explain')) {
                         this.client.sendVariantMessage(v);
                     }

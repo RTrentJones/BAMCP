@@ -181,4 +181,38 @@ export class BAMCPClient {
             // Ignore errors
         }
     }
+
+    public async lookupClinVar(variant: Variant): Promise<void> {
+        if (!this.app) return;
+
+        const message =
+            `Look up the clinical significance of ${variant.contig}:${variant.position} ` +
+            `${variant.ref}>${variant.alt} in ClinVar using the lookup_clinvar tool.`;
+
+        try {
+            await this.app.sendMessage({
+                role: 'user',
+                content: [{ type: 'text', text: message }]
+            });
+        } catch {
+            // Ignore errors
+        }
+    }
+
+    public async lookupGnomAD(variant: Variant): Promise<void> {
+        if (!this.app) return;
+
+        const message =
+            `Look up the population allele frequency of ${variant.contig}:${variant.position} ` +
+            `${variant.ref}>${variant.alt} in gnomAD using the lookup_gnomad tool.`;
+
+        try {
+            await this.app.sendMessage({
+                role: 'user',
+                content: [{ type: 'text', text: message }]
+            });
+        } catch {
+            // Ignore errors
+        }
+    }
 }

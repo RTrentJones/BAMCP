@@ -11,7 +11,6 @@ from .config import BAMCPConfig
 from .resources import get_viewer_html
 from .tools import (
     get_cache,
-    handle_browse_region,
     handle_get_coverage,
     handle_get_region_summary,
     handle_get_variant_curation_summary,
@@ -69,25 +68,6 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     # -- Tools ---------------------------------------------------------------
     # Thin wrappers delegate to the existing handlers in tools.py.
     # FastMCP derives the JSON-Schema from the function signature.
-
-    @mcp.tool(
-        description="View aligned reads in a genomic region with interactive visualization",
-        meta=_VIEWER_META,
-    )
-    async def browse_region(
-        file_path: str,
-        region: str,
-        reference: str | None = None,
-    ) -> CallToolResult:
-        result = await handle_browse_region(
-            {"file_path": file_path, "region": region, "reference": reference},
-            config,
-        )
-        payload = result.get("_meta", {}).get("ui/init", {})
-        return CallToolResult(
-            content=[TextContent(type="text", text=result["content"][0]["text"])],
-            structuredContent=payload or None,
-        )
 
     @mcp.tool(description="Detect and return variants in a genomic region")
     async def get_variants(

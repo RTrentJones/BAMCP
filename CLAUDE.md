@@ -22,7 +22,7 @@ FastMCP server (server.py)
 | Module | Role |
 |--------|------|
 | `server.py` | FastMCP setup, tool/resource registration, auth wiring |
-| `tools.py` | All tool handlers (browse, variants, coverage, contigs, jump, visualize, summary, ClinVar, gnomAD) |
+| `tools.py` | All tool handlers (visualize, variants, coverage, contigs, jump, summary, ClinVar, gnomAD, curation) |
 | `parsers.py` | `fetch_region()` — pysam BAM/CRAM parsing, read extraction, coverage, variant detection |
 | `clinvar.py` | `ClinVarClient` — async NCBI E-utilities client for variant clinical significance |
 | `gnomad.py` | `GnomadClient` — async gnomAD GraphQL client for population allele frequencies |
@@ -36,15 +36,16 @@ FastMCP server (server.py)
 
 | Tool | Description |
 |------|-------------|
-| `browse_region` | View aligned reads with interactive visualization (returns UI + data) |
+| `visualize_region` | View aligned reads with interactive MCP Apps visualization (returns UI + data) |
 | `get_variants` | Detect and return variants in a region |
 | `get_coverage` | Calculate depth of coverage statistics |
 | `list_contigs` | List chromosomes/contigs and detect genome build (GRCh37/GRCh38) with suggested public reference URL |
 | `jump_to` | Jump to a specific genomic position with configurable window |
-| `visualize_region` | MCP Apps-aware region visualization (same as browse_region, App-centric name) |
 | `get_region_summary` | Text-only region summary for LLM reasoning (no UI) |
 | `lookup_clinvar` | Look up variant in ClinVar for clinical significance and conditions |
 | `lookup_gnomad` | Look up variant in gnomAD for population allele frequency data |
+| `get_variant_curation_summary` | Detailed curation summary with artifact risk assessment and recommendations |
+| `search_gene` | Search for a gene by symbol and return genomic coordinates |
 | `cleanup_cache` | Clean up expired BAM index cache files |
 
 ## Transport Modes

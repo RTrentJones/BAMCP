@@ -6,11 +6,11 @@ import pytest
 
 from bamcp.config import BAMCPConfig
 from bamcp.tools import (
-    handle_browse_region,
     handle_get_coverage,
     handle_get_variants,
     handle_jump_to,
     handle_list_contigs,
+    handle_visualize_region,
 )
 
 
@@ -26,7 +26,7 @@ class TestBrowseRegionIntegration:
     @pytest.mark.asyncio
     async def test_full_browse_region_flow(self, small_bam_path, config_with_ref):
         """Test complete browse_region: fetch -> serialize -> verify all data."""
-        result = await handle_browse_region(
+        result = await handle_visualize_region(
             {"file_path": small_bam_path, "region": "chr1:90-200"}, config_with_ref
         )
 
@@ -76,7 +76,7 @@ class TestBrowseRegionIntegration:
     @pytest.mark.asyncio
     async def test_browse_then_variant_consistency(self, small_bam_path, config_with_ref):
         """browse_region and get_variants should return consistent variant data."""
-        browse_result = await handle_browse_region(
+        browse_result = await handle_visualize_region(
             {"file_path": small_bam_path, "region": "chr1:490-600"}, config_with_ref
         )
         variant_result = await handle_get_variants(
@@ -108,7 +108,7 @@ class TestCoverageIntegration:
         """Coverage should correlate with reads in the region."""
         config = BAMCPConfig(reference=ref_fasta_path)
 
-        browse_result = await handle_browse_region(
+        browse_result = await handle_visualize_region(
             {"file_path": small_bam_path, "region": "chr1:100-200"}, config
         )
         coverage_result = await handle_get_coverage(
@@ -158,7 +158,7 @@ class TestContigListIntegration:
             length = contig["length"]
             region = f"{name}:0-{min(length, 100)}"
 
-            result = await handle_browse_region(
+            result = await handle_visualize_region(
                 {"file_path": small_bam_path, "region": region}, config
             )
             # browse_region payload is now in _meta.ui/init
@@ -179,7 +179,7 @@ class TestMultiToolWorkflow:
         next(c for c in contig_data["contigs"] if c["name"] == "chr1")
 
         # Step 2: Browse a region
-        browse = await handle_browse_region(
+        browse = await handle_visualize_region(
             {"file_path": small_bam_path, "region": "chr1:90-200"}, config_with_ref
         )
         # browse_region payload is now in _meta.ui/init
@@ -201,7 +201,7 @@ class TestMultiToolWorkflow:
 
         regions = ["chr1:90-200", "chr1:290-380", "chr1:490-600", "chr2:40-100"]
         for region in regions:
-            result = await handle_browse_region(
+            result = await handle_visualize_region(
                 {"file_path": small_bam_path, "region": region}, config
             )
             # browse_region payload is now in _meta.ui/init
@@ -243,7 +243,7 @@ class TestJumpToIntegration:
         jump_payload = jump_result["_meta"]["ui/init"]
 
         region = f"chr1:{jump_payload['start']}-{jump_payload['end']}"
-        browse_result = await handle_browse_region(
+        browse_result = await handle_visualize_region(
             {"file_path": small_bam_path, "region": region}, config
         )
         # browse_region payload is now in _meta.ui/init

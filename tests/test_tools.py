@@ -16,7 +16,6 @@ from bamcp.constants import (
 from bamcp.parsers import AlignedRead, RegionData
 from bamcp.tools import (
     _serialize_region_data,
-    handle_browse_region,
     handle_get_coverage,
     handle_get_region_summary,
     handle_get_variants,
@@ -78,12 +77,12 @@ class TestSerializeRegionData:
             coverage=[1] * 100,
             variants=[],
         )
-        # Default is compact=True, which omits sequence
+        # Default is compact=False, which includes sequence for zoomed views
         result = _serialize_region_data(data)
         assert len(result["reads"]) == 1
         r = result["reads"][0]
         assert r["name"] == "r1"
-        assert "sequence" not in r  # Compact mode omits sequence
+        assert r["sequence"] == "ACGT"  # Default includes sequence
         assert r["cigar"] == "4M"
         assert r["position"] == 100
         assert r["end_position"] == 104
@@ -93,8 +92,8 @@ class TestSerializeRegionData:
         assert len(r["mismatches"]) == 1
 
     @pytest.mark.unit
-    def test_non_compact_includes_sequence(self):
-        """Non-compact mode includes sequence but never qualities."""
+    def test_compact_mode_omits_sequence(self):
+        """Compact mode omits sequence but never qualities."""
         read = AlignedRead(
             name="r1",
             sequence="ACGT",
@@ -114,9 +113,9 @@ class TestSerializeRegionData:
             coverage=[1] * 100,
             variants=[],
         )
-        result = _serialize_region_data(data, compact=False)
+        result = _serialize_region_data(data, compact=True)
         r = result["reads"][0]
-        assert r["sequence"] == "ACGT"
+        assert "sequence" not in r  # Compact omits sequence
         assert "qualities" not in r  # Qualities never serialized
 
     @pytest.mark.unit
@@ -148,12 +147,12 @@ class TestSerializeRegionData:
 
 
 class TestHandleBrowseRegion:
-    """Tests for handle_browse_region tool handler."""
+    """Tests for handle_visualize_region tool handler."""
 
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_returns_ui_metadata(self, small_bam_path, config):
-        result = await handle_browse_region(
+        result = await handle_visualize_region(
             {"file_path": small_bam_path, "region": "chr1:90-200"}, config
         )
         assert "content" in result
@@ -164,7 +163,7 @@ class TestHandleBrowseRegion:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_content_is_summary(self, small_bam_path, config):
-        result = await handle_browse_region(
+        result = await handle_visualize_region(
             {"file_path": small_bam_path, "region": "chr1:90-200"}, config
         )
         # Content is now a summary string, not JSON payload
@@ -180,7 +179,7 @@ class TestHandleBrowseRegion:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_with_reference(self, small_bam_path, ref_fasta_path, config):
-        result = await handle_browse_region(
+        result = await handle_visualize_region(
             {"file_path": small_bam_path, "region": "chr1:90-200", "reference": ref_fasta_path},
             config,
         )
@@ -191,7 +190,7 @@ class TestHandleBrowseRegion:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_config_reference_fallback(self, small_bam_path, config_with_ref):
-        result = await handle_browse_region(
+        result = await handle_visualize_region(
             {"file_path": small_bam_path, "region": "chr1:90-200"}, config_with_ref
         )
         # Payload is in _meta.ui/init
@@ -202,7 +201,9 @@ class TestHandleBrowseRegion:
     @pytest.mark.asyncio
     async def test_invalid_region(self, small_bam_path, config):
         with pytest.raises(ValueError):
-            await handle_browse_region({"file_path": small_bam_path, "region": "invalid"}, config)
+            await handle_visualize_region(
+                {"file_path": small_bam_path, "region": "invalid"}, config
+            )
 
 
 class TestHandleGetVariants:

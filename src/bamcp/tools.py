@@ -220,36 +220,6 @@ def validate_path(file_path: str, config: BAMCPConfig) -> None:
             )
 
 
-async def handle_browse_region(args: dict[str, Any], config: BAMCPConfig) -> dict:
-    """
-    Handle browse_region tool call.
-
-    Returns serialized region data with UI metadata.
-    """
-    file_path = args["file_path"]
-    validate_path(file_path, config)
-    region = args["region"]
-    reference = args.get("reference", config.reference)
-
-    data = await _fetch_region_with_timeout(file_path, region, reference, config)
-    payload = _serialize_region_data(data)
-
-    # Return summary text in content (for LLM context), full data only in _meta
-    reads_count = len(data.reads)
-    variants_count = len(data.variants)
-    summary = (
-        f"Region {data.contig}:{data.start}-{data.end}: "
-        f"{reads_count} reads, {variants_count} variants"
-    )
-    return {
-        "content": [{"type": "text", "text": summary}],
-        "_meta": {
-            "ui/resourceUri": VIEWER_RESOURCE_URI,
-            "ui/init": payload,
-        },
-    }
-
-
 async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Return variants without UI."""
     file_path = args["file_path"]
@@ -950,14 +920,21 @@ def _compute_artifact_risk(
     }
 
 
-def _serialize_region_data(data: RegionData, compact: bool = True) -> dict:
+def _serialize_region_data(data: RegionData, compact: bool | None = None) -> dict:
     """Serialize RegionData to a JSON-compatible dict.
 
     Args:
         data: The region data to serialize.
-        compact: If True (default), omit sequences to reduce payload size.
-                 Set False only for extreme zoom levels where bases are shown.
+        compact: If True, omit sequences to reduce payload size.
+                 If None (default), auto-detect based on region size:
+                 include sequences for regions <= 500bp (base-level view possible).
     """
+    # Auto-detect compact mode based on region size
+    # Base rendering requires scale >= 10, which means ~80bp at 800px width
+    # Use 500bp threshold for safety margin
+    if compact is None:
+        region_size = data.end - data.start
+        compact = region_size > 500
     # Build mismatch index once for O(1) variant evidence lookups
     mismatch_index = _build_mismatch_index(data.reads)
 

@@ -639,7 +639,7 @@ export class Renderer {
                 this.renderSoftClips(ctx, read, x1, x2, y, READ_HEIGHT, scale);
 
                 // High Zoom: Render Bases
-                if (scale >= 10) {
+                if (scale >= 10 && read.sequence) {
                     ctx.font = '10px monospace';
                     ctx.textAlign = 'center';
                     ctx.textBaseline = 'middle';

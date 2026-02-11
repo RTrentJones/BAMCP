@@ -35,7 +35,6 @@ class TestCreateServer:
         server = create_server(BAMCPConfig())
         tool_names = {name for name in server._tool_manager._tools}
         expected = {
-            "browse_region",
             "get_variants",
             "get_coverage",
             "list_contigs",

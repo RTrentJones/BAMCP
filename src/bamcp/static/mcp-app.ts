@@ -38,6 +38,7 @@ class BAMCPViewer {
     private variantTable: HTMLElement;
     private evidencePanel: HTMLElement;
     private readsCanvas: HTMLCanvasElement;
+    private sequenceNotice: HTMLElement;
 
     // Interaction State
     private _contextUpdateTimer: ReturnType<typeof setTimeout> | null = null;
@@ -49,10 +50,8 @@ class BAMCPViewer {
     private isDraggingTooltip = false;
     private tooltipDragOffset = { x: 0, y: 0 };
 
-    // Auto re-query state for sequence data
+    // Sequence loading state
     private pendingSequenceRequest = false;
-    private sequenceRequestTimer: ReturnType<typeof setTimeout> | null = null;
-    private static readonly SEQUENCE_REQUEST_DEBOUNCE_MS = 500;
     private static readonly BASE_RENDER_SCALE = 10;
     private static readonly SEQUENCE_REGION_THRESHOLD = 500;
 
@@ -66,10 +65,12 @@ class BAMCPViewer {
         this.variantTable = document.getElementById('variant-table')!;
         this.evidencePanel = document.getElementById('evidence-panel')!;
         this.readsCanvas = document.getElementById('reads-canvas') as HTMLCanvasElement;
+        this.sequenceNotice = document.getElementById('sequence-notice')!;
 
         // Setup callbacks
         this.client.setOnDataReceived(data => {
             this.pendingSequenceRequest = false;  // Reset on new data
+            this.sequenceNotice.classList.add('hidden');  // Hide notice
             this.state.loadData(data);
             this.renderVariantTable();
             this.renderer.resize();
@@ -127,6 +128,18 @@ class BAMCPViewer {
             if (e.key === 'Enter') {
                 const gene = (e.target as HTMLInputElement).value.trim();
                 if (gene) this.client.searchGene(gene);
+            }
+        });
+
+        // Load detail button (for sequences at high zoom)
+        document.getElementById('load-detail-btn')!.addEventListener('click', () => {
+            this.loadDetailView();
+        });
+
+        (document.getElementById('region-input') as HTMLInputElement).addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const region = (e.target as HTMLInputElement).value.trim();
+                if (region) this.client.requestRegion(region);
             }
         });
 
@@ -425,41 +438,54 @@ class BAMCPViewer {
 
     /**
      * Check if we're zoomed in enough to show bases but missing sequence data.
-     * If so, request fresh data for the visible region.
+     * Shows a notice prompting user to load detail view.
      */
     private checkAndRequestSequences(): void {
-        if (!this.state.data || this.pendingSequenceRequest) return;
+        if (!this.state.data) {
+            this.sequenceNotice.classList.add('hidden');
+            return;
+        }
 
         const width = this.readsCanvas.width;
         const viewportSpan = this.state.viewport.end - this.state.viewport.start;
         const scale = width / viewportSpan;
 
         // Check if we're at base-level zoom
-        if (scale < BAMCPViewer.BASE_RENDER_SCALE) return;
+        if (scale < BAMCPViewer.BASE_RENDER_SCALE) {
+            this.sequenceNotice.classList.add('hidden');
+            return;
+        }
 
         // Check if region is small enough for sequences
-        if (viewportSpan > BAMCPViewer.SEQUENCE_REGION_THRESHOLD) return;
+        if (viewportSpan > BAMCPViewer.SEQUENCE_REGION_THRESHOLD) {
+            this.sequenceNotice.classList.add('hidden');
+            return;
+        }
 
         // Check if we're missing sequences (check first read)
         const firstRead = this.state.data.reads[0];
-        if (!firstRead || firstRead.sequence) return;
-
-        // Debounce the request
-        if (this.sequenceRequestTimer) {
-            clearTimeout(this.sequenceRequestTimer);
+        if (!firstRead || firstRead.sequence) {
+            this.sequenceNotice.classList.add('hidden');
+            return;
         }
 
-        this.sequenceRequestTimer = setTimeout(() => {
-            if (!this.state.data) return;
+        // Show notice - user needs to click to load detail
+        this.sequenceNotice.classList.remove('hidden');
+    }
 
-            // Build region string for visible viewport
-            const start = Math.max(0, Math.floor(this.state.viewport.start));
-            const end = Math.ceil(this.state.viewport.end);
-            const region = `${this.state.data.contig}:${start}-${end}`;
+    /**
+     * Request detailed data for current viewport (with sequences).
+     */
+    private loadDetailView(): void {
+        if (!this.state.data || this.pendingSequenceRequest) return;
 
-            this.pendingSequenceRequest = true;
-            this.client.requestRegion(region);
-        }, BAMCPViewer.SEQUENCE_REQUEST_DEBOUNCE_MS);
+        const start = Math.max(0, Math.floor(this.state.viewport.start));
+        const end = Math.ceil(this.state.viewport.end);
+        const region = `${this.state.data.contig}:${start}-${end}`;
+
+        this.pendingSequenceRequest = true;
+        this.sequenceNotice.classList.add('hidden');
+        this.client.requestRegion(region);
     }
 
     private scheduleContextUpdate(): void {

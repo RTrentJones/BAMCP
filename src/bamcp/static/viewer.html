@@ -484,6 +484,37 @@
             opacity: 0.9;
         }
 
+        /* Sequence loading notice */
+        #sequence-notice {
+            position: absolute;
+            bottom: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(59, 130, 246, 0.95);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            z-index: 100;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+        #sequence-notice.hidden { display: none; }
+        #sequence-notice button {
+            background: white;
+            color: #2563eb;
+            border: none;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        #sequence-notice button:hover {
+            background: #e0e7ff;
+        }
+
     </style>
 </head>
 <body>
@@ -546,6 +577,10 @@
             <canvas id="coverage-canvas"></canvas>
             <canvas id="reads-canvas"></canvas>
             <div id="tooltip"></div>
+            <div id="sequence-notice" class="hidden">
+                <span>Zoom level shows bases but sequences not loaded.</span>
+                <button id="load-detail-btn">Load Detail</button>
+            </div>
         </div>
         <div id="bottom-panel">
             <div id="variant-panel">

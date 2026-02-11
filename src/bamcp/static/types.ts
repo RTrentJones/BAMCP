@@ -91,6 +91,7 @@ export interface RegionData {
     variants: Variant[];
     reference_sequence?: string;
     variant_evidence?: Record<string, VariantEvidence>;
+    file_path?: string;  // For client-side re-queries
 }
 
 export interface ToolResultParams {

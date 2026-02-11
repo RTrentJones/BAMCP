@@ -122,14 +122,19 @@ export class BAMCPClient {
         }
     }
 
-    public async requestRegion(region: string): Promise<void> {
+    public async requestRegion(region: string, filePath?: string): Promise<void> {
         if (this.app) {
             try {
+                // Make the request explicit with file path for more reliable tool invocation
+                const message = filePath
+                    ? `Call visualize_region for file ${filePath} region ${region}`
+                    : `Please browse the genomic region ${region} and show the alignment visualization.`;
+
                 await this.app.sendMessage({
                     role: 'user',
                     content: [{
                         type: 'text',
-                        text: `Please browse the genomic region ${region} and show the alignment visualization.`
+                        text: message
                     }]
                 });
             } catch (e) {

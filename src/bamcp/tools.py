@@ -339,6 +339,7 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
 
     data = await _fetch_region_with_timeout(file_path, region, reference, config)
     payload = _serialize_region_data(data)
+    payload["file_path"] = file_path  # For client-side re-queries
 
     # Return summary text in content (for LLM context), full data only in _meta
     reads_count = len(data.reads)
@@ -367,6 +368,7 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
 
     data = await _fetch_region_with_timeout(file_path, region, reference, config)
     payload = _serialize_region_data(data)
+    payload["file_path"] = file_path  # For client-side re-queries
 
     # Return summary text in content (for LLM context), full data only in _meta
     reads_count = len(data.reads)

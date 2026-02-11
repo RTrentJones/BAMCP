@@ -52,8 +52,10 @@ class BAMCPViewer {
 
     // Sequence loading state
     private pendingSequenceRequest = false;
+    private sequenceFallbackTimer: ReturnType<typeof setTimeout> | null = null;
     private static readonly BASE_RENDER_SCALE = 10;
     private static readonly SEQUENCE_REGION_THRESHOLD = 500;
+    private static readonly SEQUENCE_FETCH_TIMEOUT_MS = 3000;
 
     constructor() {
         this.client = new BAMCPClient();
@@ -69,8 +71,15 @@ class BAMCPViewer {
 
         // Setup callbacks
         this.client.setOnDataReceived(data => {
-            this.pendingSequenceRequest = false;  // Reset on new data
-            this.sequenceNotice.classList.add('hidden');  // Hide notice
+            // Clear pending state and timers
+            this.pendingSequenceRequest = false;
+            if (this.sequenceFallbackTimer) {
+                clearTimeout(this.sequenceFallbackTimer);
+                this.sequenceFallbackTimer = null;
+            }
+            this.sequenceNotice.classList.add('hidden');
+            this.sequenceNotice.classList.remove('loading');
+
             this.state.loadData(data);
             this.renderVariantTable();
             this.renderer.resize();
@@ -438,7 +447,8 @@ class BAMCPViewer {
 
     /**
      * Check if we're zoomed in enough to show bases but missing sequence data.
-     * Shows a notice prompting user to load detail view.
+     * Auto-triggers fetch with file_path for explicit tool invocation.
+     * Falls back to button after timeout if LLM doesn't respond.
      */
     private checkAndRequestSequences(): void {
         if (!this.state.data) {
@@ -469,12 +479,40 @@ class BAMCPViewer {
             return;
         }
 
-        // Show notice - user needs to click to load detail
+        // Already requesting - don't duplicate
+        if (this.pendingSequenceRequest) {
+            return;
+        }
+
+        // Auto-trigger fetch with loading state
+        this.pendingSequenceRequest = true;
         this.sequenceNotice.classList.remove('hidden');
+        this.sequenceNotice.classList.add('loading');
+
+        // Build request parameters
+        const start = Math.max(0, Math.floor(this.state.viewport.start));
+        const end = Math.ceil(this.state.viewport.end);
+        const region = `${this.state.data.contig}:${start}-${end}`;
+        const filePath = this.state.data.file_path;
+
+        // Request with file_path for explicit tool invocation
+        this.client.requestRegion(region, filePath);
+
+        // Set fallback timeout - show button if LLM doesn't respond
+        if (this.sequenceFallbackTimer) {
+            clearTimeout(this.sequenceFallbackTimer);
+        }
+        this.sequenceFallbackTimer = setTimeout(() => {
+            if (this.pendingSequenceRequest) {
+                // Switch from loading to button fallback
+                this.sequenceNotice.classList.remove('loading');
+            }
+        }, BAMCPViewer.SEQUENCE_FETCH_TIMEOUT_MS);
     }
 
     /**
      * Request detailed data for current viewport (with sequences).
+     * Used as manual fallback when auto-fetch times out.
      */
     private loadDetailView(): void {
         if (!this.state.data || this.pendingSequenceRequest) return;
@@ -482,10 +520,11 @@ class BAMCPViewer {
         const start = Math.max(0, Math.floor(this.state.viewport.start));
         const end = Math.ceil(this.state.viewport.end);
         const region = `${this.state.data.contig}:${start}-${end}`;
+        const filePath = this.state.data.file_path;
 
         this.pendingSequenceRequest = true;
-        this.sequenceNotice.classList.add('hidden');
-        this.client.requestRegion(region);
+        this.sequenceNotice.classList.add('loading');
+        this.client.requestRegion(region, filePath);
     }
 
     private scheduleContextUpdate(): void {

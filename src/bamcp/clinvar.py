@@ -137,7 +137,7 @@ class ClinVarClient:
 
     api_key: str | None = None
     timeout: float = 30.0
-    _cache: BoundedTTLCache[ClinVarResult | None] = field(default=None, repr=False)  # type: ignore[assignment]
+    _cache: BoundedTTLCache[ClinVarResult | None] = field(default=None, repr=False)  # type: ignore[arg-type]
     _semaphore: asyncio.Semaphore = field(default=None, repr=False)  # type: ignore[assignment]
     _rate_limiter: TokenBucketRateLimiter = field(default=None, repr=False)  # type: ignore[assignment]
 

@@ -132,7 +132,7 @@ class GnomadClient:
 
     dataset: str = "gnomad_r4"
     timeout: float = 30.0
-    _cache: BoundedTTLCache[GnomadResult | None] = field(default=None, repr=False)  # type: ignore[assignment]
+    _cache: BoundedTTLCache[GnomadResult | None] = field(default=None, repr=False)  # type: ignore[arg-type]
     _semaphore: asyncio.Semaphore = field(default=None, repr=False)  # type: ignore[assignment]
 
     def __post_init__(self) -> None:

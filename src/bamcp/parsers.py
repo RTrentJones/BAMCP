@@ -1,5 +1,6 @@
 """BAM/CRAM file parsing using pysam."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -311,7 +312,7 @@ def fetch_region(
 
 
 def detect_variants(
-    coverage_counts: tuple[list[int], list[int], list[int], list[int]],
+    coverage_counts: tuple[Sequence[int], Sequence[int], Sequence[int], Sequence[int]],
     ref_seq: str | None,
     contig: str,
     start: int,

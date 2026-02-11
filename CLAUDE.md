@@ -36,17 +36,17 @@ FastMCP server (server.py)
 
 | Tool | Description |
 |------|-------------|
-| `visualize_region` | View aligned reads with interactive MCP Apps visualization (returns UI + data) |
+| `visualize_region` | View aligned reads with interactive MCP Apps visualization (returns UI + data). Auto-detects compact mode for large regions. |
 | `get_variants` | Detect and return variants in a region |
 | `get_coverage` | Calculate depth of coverage statistics |
 | `list_contigs` | List chromosomes/contigs and detect genome build (GRCh37/GRCh38) with suggested public reference URL |
-| `jump_to` | Jump to a specific genomic position with configurable window |
+| `jump_to` | Jump to a specific genomic position with configurable window (returns UI + data) |
 | `get_region_summary` | Text-only region summary for LLM reasoning (no UI) |
 | `lookup_clinvar` | Look up variant in ClinVar for clinical significance and conditions |
 | `lookup_gnomad` | Look up variant in gnomAD for population allele frequency data |
-| `get_variant_curation_summary` | Detailed curation summary with artifact risk assessment and recommendations |
-| `search_gene` | Search for a gene by symbol and return genomic coordinates |
-| `cleanup_cache` | Clean up expired BAM index cache files |
+| `get_variant_curation_summary` | Detailed curation summary for a variant with artifact risk assessment |
+| `search_gene` | Search for a gene by symbol and return genomic coordinates (uses NCBI) |
+| `cleanup_cache` | Clean up session's BAM index cache files |
 
 ## Transport Modes
 
@@ -145,8 +145,10 @@ docker/
   pull_request_template.md, ISSUE_TEMPLATE/
 ```
 
-## Vision Documents
+## Archived Planning Documents
+
+Located in `archived/` folder:
 
 - `BAMCP_Strategy.md` — MCP Apps architecture, viewer design, ClinVar/gnomAD integration roadmap
-- `BAMCP_EVAL_HARNESS.md` — LLM genomic reasoning evaluation framework (classify_variant, ACMG scaffolds, failure mode detection, ground truth benchmarks)
-- `BAMCP_IMPLEMENTATION_PLAN.md` — Full implementation schedule for Phases 1-4
+- `BAMCP_EVAL_HARNESS.md` — LLM genomic reasoning evaluation framework
+- `BAMCP_IMPLEMENTATION_PLAN.md` — Original implementation schedule

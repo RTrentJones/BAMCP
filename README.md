@@ -77,11 +77,11 @@ Existing genomics MCP servers (bio-mcp-samtools, AWS HealthOmics MCP) provide co
 │  │                 │  │                 │  │                             │  │
 │  │  pysam Layer    │  │  Tool Handlers  │  │  UI Resource Provider       │  │
 │  │                 │  │                 │  │                             │  │
-│  │  • AlignmentFile│  │  • browse_region│  │  • ui://bamcp/viewer        │  │
+│  │  • AlignmentFile│  │  • visualize    │  │  • ui://bamcp/viewer        │  │
 │  │  • fetch()      │  │  • get_variants │  │  • text/html+mcp            │  │
-│  │  • pileup()     │  │  • get_coverage │  │  • Sandboxed iframe content │  │
-│  │  • CRAM support │  │  • list_contigs │  │                             │  │
-│  │                 │  │  • jump_to      │  │                             │  │
+│  │  • pileup()     │  │  • lookup_*     │  │  • Sandboxed iframe content │  │
+│  │  • CRAM support │  │  • search_gene  │  │                             │  │
+│  │                 │  │  • +6 more      │  │                             │  │
 │  └─────────────────┘  └─────────────────┘  └─────────────────────────────┘  │
 │                                                                             │
 │  ┌─────────────────┐  ┌─────────────────────────────────────────────────┐  │
@@ -103,7 +103,7 @@ User: "Show me reads at chr17:7577000-7577500 in tumor.bam"
                     │  MCP Client     │
                     │  (Claude)       │
                     └────────┬────────┘
-                             │ tools/call: browse_region
+                             │ tools/call: visualize_region
                              ▼
                     ┌─────────────────┐
                     │  BAMCP Server   │
@@ -221,7 +221,7 @@ Add to `~/.config/claude/claude_desktop_config.json`:
 
 > "Show me the reads at chr17:7577000-7577500 in /data/tumor.bam"
 
-The assistant will call `browse_region` and render an interactive alignment viewer inline.
+The assistant will call `visualize_region` and render an interactive alignment viewer inline.
 
 ### Jump to a Position
 
@@ -251,11 +251,17 @@ Returns coverage statistics without visualization.
 
 | Tool | Description | Required Args | Optional Args |
 |------|-------------|---------------|---------------|
-| `browse_region` | View aligned reads with interactive UI | `file_path`, `region` | `reference` |
+| `visualize_region` | View aligned reads with interactive UI | `file_path`, `region` | `reference` |
 | `get_variants` | Detect and return variants in a region | `file_path`, `region` | `reference`, `min_vaf`, `min_depth` |
 | `get_coverage` | Calculate depth statistics | `file_path`, `region` | `reference` |
-| `list_contigs` | List chromosomes in BAM/CRAM header | `file_path` | `reference` |
+| `list_contigs` | List chromosomes and detect genome build | `file_path` | `reference` |
 | `jump_to` | Jump to a specific genomic position | `file_path`, `position` | `contig`, `window`, `reference` |
+| `get_region_summary` | Text summary for LLM reasoning (no UI) | `file_path`, `region` | `reference` |
+| `lookup_clinvar` | Look up variant in ClinVar | `chrom`, `pos`, `ref`, `alt` | — |
+| `lookup_gnomad` | Look up variant in gnomAD | `chrom`, `pos`, `ref`, `alt` | — |
+| `get_variant_curation_summary` | Detailed curation with artifact risk | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference` |
+| `search_gene` | Search gene by symbol (NCBI) | `symbol` | — |
+| `cleanup_cache` | Clean up session's index cache | — | — |
 
 ### Region Format
 
@@ -467,8 +473,8 @@ docker compose --profile prod up
 - [x] **v0.2** — CRAM support, coverage track, MCP Apps UI resource
 - [x] **v0.3** — FastMCP migration, SSE/HTTP transports, OAuth 2.0
 - [x] **v0.4** — Docker infrastructure (prod/dev/beta), CI/CD
-- [ ] **v0.5** — MCP Apps SDK integration (`updateModelContext`, `callServerTool`, app-only tools)
-- [ ] **v0.6** — ClinVar + gnomAD API clients
+- [x] **v0.5** — MCP Apps SDK integration (`updateModelContext`, display modes, auto-fetch)
+- [x] **v0.6** — ClinVar + gnomAD API clients, gene search, variant curation tools
 - [ ] **v0.7** — Evaluation harness (ACMG scaffolds, failure mode detection, ground truth benchmarks)
 - [ ] **v0.8** — Gene annotation track (RefSeq)
 - [ ] **v0.9** — VCF overlay, multi-sample comparison

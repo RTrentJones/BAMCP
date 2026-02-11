@@ -152,7 +152,8 @@ class TestParseResponse:
         assert isinstance(afr, PopulationFrequency)
         assert afr.ac == 2
         assert afr.an == 41406
-        assert afr.af == pytest.approx(4.83e-05)
+        # af is calculated from ac/an (not returned by gnomAD API for populations)
+        assert afr.af == pytest.approx(2 / 41406)
 
     @pytest.mark.unit
     def test_parse_not_found(self):
@@ -255,3 +256,50 @@ class TestGnomadClient:
         client = GnomadClient(timeout=1.0)
         with pytest.raises(httpx.ReadTimeout):
             await client.lookup("chr17", 7674220, "G", "A")
+
+
+class TestGnomadIntegration:
+    """Integration tests that hit the real gnomAD API."""
+
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_real_api_known_variant(self):
+        """Test lookup of a known common variant (rs1042522 in TP53).
+
+        This is a well-characterized SNP (Pro72Arg) in TP53 with high
+        population frequency, so it should always be present in gnomAD.
+        GRCh38 coordinates: chr17:7676154 G>C
+        """
+        client = GnomadClient(dataset="gnomad_r4")
+        result = await client.lookup("chr17", 7676154, "G", "C")
+
+        # Variant should be found
+        assert result is not None, "Known variant rs1042522 not found in gnomAD"
+        assert isinstance(result, GnomadResult)
+
+        # Should have frequency data
+        assert result.global_af > 0, "Expected non-zero allele frequency"
+        assert result.ac > 0, "Expected non-zero allele count"
+        assert result.an > 0, "Expected non-zero allele number"
+
+        # Should have population data
+        assert len(result.populations) > 0, "Expected population frequency data"
+
+        # Population af should be calculated correctly
+        for pop in result.populations:
+            if pop.an > 0:
+                expected_af = pop.ac / pop.an
+                assert pop.af == pytest.approx(expected_af), (
+                    f"Population {pop.id} af mismatch: {pop.af} != {expected_af}"
+                )
+
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_real_api_not_found(self):
+        """Test lookup of a variant that shouldn't exist."""
+        client = GnomadClient(dataset="gnomad_r4")
+        # Made-up variant at a position unlikely to have this specific change
+        result = await client.lookup("chr1", 1, "A", "T")
+
+        # Should return None for non-existent variant
+        assert result is None

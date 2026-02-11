@@ -119,17 +119,13 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
                 if resp.status_code == 200:
                     # Save to cache
                     Path(index_path).write_bytes(resp.content)
-                    logger.info(
-                        "Cached index (%d bytes): %s", len(resp.content), index_path
-                    )
+                    logger.info("Cached index (%d bytes): %s", len(resp.content), index_path)
                     return index_path
                 elif resp.status_code == 404:
                     logger.debug("Index not found at %s, trying next", index_url)
                     continue
                 else:
-                    logger.warning(
-                        "Index download failed (%d): %s", resp.status_code, index_url
-                    )
+                    logger.warning("Index download failed (%d): %s", resp.status_code, index_url)
             except (httpx.RequestError, OSError) as e:
                 logger.warning("Index download error for %s: %s", index_url, e)
                 continue
@@ -1042,6 +1038,17 @@ def _serialize_region_data(data: RegionData, compact: bool = True) -> dict:
             d["is_proper_pair"] = r.is_proper_pair
             d["is_read1"] = r.is_read1
             d["is_paired"] = True
+        # Include soft clips if present
+        if r.soft_clips:
+            d["soft_clips"] = [
+                {
+                    "position": sc.position,
+                    "length": sc.length,
+                    "sequence": sc.sequence,
+                    "side": sc.side,
+                }
+                for sc in r.soft_clips
+            ]
         return d
 
     reads_data = [serialize_read(r, include_sequence=not compact) for r in data.reads]

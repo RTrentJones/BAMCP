@@ -13,8 +13,17 @@
 
 import { BAMCPClient } from "./client";
 import { Renderer } from "./renderer";
-import { StateManager } from "./state";
-import { ArtifactAssessment, Read, Variant, VariantEvidence } from "./types";
+import { StateManager, DEFAULT_SETTINGS } from "./state";
+import {
+    ArtifactAssessment,
+    ColorBy,
+    Read,
+    ReadDisplayMode,
+    SortBy,
+    Variant,
+    VariantEvidence,
+    ViewerSettings,
+} from "./types";
 
 const CONTEXT_UPDATE_DEBOUNCE_MS = 300;
 
@@ -135,6 +144,13 @@ class BAMCPViewer {
             this.toggleFullscreen();
         });
 
+        document.getElementById('pip-btn')!.addEventListener('click', () => {
+            this.togglePip();
+        });
+
+        // Settings controls
+        this.setupSettingsControls();
+
         // Pan via drag on reads canvas
         let isDragging = false;
         let lastX = 0;
@@ -246,6 +262,65 @@ class BAMCPViewer {
                 // ... other shortcuts
             }
         });
+    }
+
+    private setupSettingsControls(): void {
+        // Load saved settings from localStorage
+        this.loadSettings();
+
+        // Display mode selector
+        const displayModeSelect = document.getElementById('display-mode-select') as HTMLSelectElement;
+        displayModeSelect.value = this.state.settings.displayMode;
+        displayModeSelect.addEventListener('change', () => {
+            this.state.settings.displayMode = displayModeSelect.value as ReadDisplayMode;
+            this.state.resortAndRepack();
+            this.renderer.resize();
+            this.saveSettings();
+        });
+
+        // Color-by selector
+        const colorBySelect = document.getElementById('color-by-select') as HTMLSelectElement;
+        colorBySelect.value = this.state.settings.colorBy;
+        colorBySelect.addEventListener('change', () => {
+            this.state.settings.colorBy = colorBySelect.value as ColorBy;
+            this.renderer.render();
+            this.saveSettings();
+        });
+
+        // Sort-by selector
+        const sortBySelect = document.getElementById('sort-by-select') as HTMLSelectElement;
+        sortBySelect.value = this.state.settings.sortBy;
+        sortBySelect.addEventListener('change', () => {
+            this.state.settings.sortBy = sortBySelect.value as SortBy;
+            this.state.resortAndRepack();
+            this.renderer.render();
+            this.saveSettings();
+        });
+
+        // Soft clips toggle
+        const showSoftClips = document.getElementById('show-soft-clips') as HTMLInputElement;
+        showSoftClips.checked = this.state.settings.showSoftClips;
+        showSoftClips.addEventListener('change', () => {
+            this.state.settings.showSoftClips = showSoftClips.checked;
+            this.renderer.render();
+            this.saveSettings();
+        });
+    }
+
+    private loadSettings(): void {
+        const saved = localStorage.getItem('bamcp-viewer-settings');
+        if (saved) {
+            try {
+                const parsed = JSON.parse(saved) as Partial<ViewerSettings>;
+                this.state.settings = { ...DEFAULT_SETTINGS, ...parsed };
+            } catch {
+                // Ignore parse errors, use defaults
+            }
+        }
+    }
+
+    private saveSettings(): void {
+        localStorage.setItem('bamcp-viewer-settings', JSON.stringify(this.state.settings));
     }
 
     private pan(dxPixels: number): void {
@@ -620,21 +695,33 @@ class BAMCPViewer {
     }
 
     private async toggleFullscreen(): Promise<void> {
-        this.isFullscreen = !this.isFullscreen;
         const btn = document.getElementById('fullscreen-btn')!;
-        btn.classList.toggle('active', this.isFullscreen);
 
-        const container = document.getElementById('container');
-        if (container) {
-            try {
-                if (this.isFullscreen && !document.fullscreenElement) {
-                    await container.requestFullscreen();
-                } else if (!this.isFullscreen && document.fullscreenElement) {
-                    await document.exitFullscreen();
-                }
-            } catch {
-                // Fullscreen not supported or denied
-            }
+        // Use MCP Apps display mode API (falls back to browser fullscreen)
+        const success = await this.client.toggleFullscreen();
+
+        if (success) {
+            this.isFullscreen = this.client.getCurrentDisplayMode() === 'fullscreen';
+            btn.classList.toggle('active', this.isFullscreen);
+        }
+    }
+
+    private async togglePip(): Promise<void> {
+        const btn = document.getElementById('pip-btn')!;
+        const currentMode = this.client.getCurrentDisplayMode();
+
+        // Toggle between pip and inline
+        const newMode = currentMode === 'pip' ? 'inline' : 'pip';
+        const success = await this.client.requestDisplayMode(newMode);
+
+        if (success) {
+            const isPip = this.client.getCurrentDisplayMode() === 'pip';
+            btn.classList.toggle('active', isPip);
+
+            // Also update fullscreen button state
+            const fsBtn = document.getElementById('fullscreen-btn')!;
+            this.isFullscreen = this.client.getCurrentDisplayMode() === 'fullscreen';
+            fsBtn.classList.toggle('active', this.isFullscreen);
         }
     }
 }

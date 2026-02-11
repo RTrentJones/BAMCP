@@ -1,4 +1,13 @@
-import { Read, RegionData, Variant } from "./types";
+import { Read, RegionData, Variant, ViewerSettings } from "./types";
+
+// Default viewer settings
+export const DEFAULT_SETTINGS: ViewerSettings = {
+    displayMode: 'compact',
+    colorBy: 'strand',
+    sortBy: 'position',
+    showSoftClips: false,
+    showMismatches: true,
+};
 
 export class StateManager {
     public data: RegionData | null = null;
@@ -20,6 +29,9 @@ export class StateManager {
     public selectedVariantIndex: number = -1;
     public expandedVariantIndex: number = -1;
 
+    // Viewer settings (IGV-style display options)
+    public settings: ViewerSettings = { ...DEFAULT_SETTINGS };
+
     constructor() { }
 
     public loadData(data: RegionData): void {
@@ -28,6 +40,38 @@ export class StateManager {
 
         this.buildMateIndex();
         this.packReads();
+    }
+
+    /**
+     * Re-sort and repack reads when sort settings change.
+     */
+    public resortAndRepack(): void {
+        if (!this.data) return;
+        this.packReads();
+    }
+
+    /**
+     * Get sorted reads based on current sort settings.
+     */
+    private getSortedReads(): Read[] {
+        if (!this.data) return [];
+
+        const reads = [...this.data.reads];
+
+        switch (this.settings.sortBy) {
+            case 'mapq':
+                return reads.sort((a, b) => b.mapping_quality - a.mapping_quality);
+            case 'insertSize':
+                return reads.sort((a, b) =>
+                    Math.abs(a.insert_size || 0) - Math.abs(b.insert_size || 0)
+                );
+            case 'strand':
+                return reads.sort((a, b) =>
+                    (a.is_reverse ? 1 : 0) - (b.is_reverse ? 1 : 0)
+                );
+            default: // position
+                return reads.sort((a, b) => a.position - b.position);
+        }
     }
 
     private buildMateIndex(): void {
@@ -70,12 +114,14 @@ export class StateManager {
             else readsByName.set(read.name, [read]);
         }
 
-        // Sort reads by position, but process pairs together
+        // Get reads sorted according to current settings
+        const baseSortedReads = this.getSortedReads();
+
+        // Process reads, keeping pairs together
         const sortedReads: Read[] = [];
         const processed = new Set<string>();
-        const allReads = [...this.data.reads].sort((a, b) => a.position - b.position);
 
-        for (const read of allReads) {
+        for (const read of baseSortedReads) {
             const key = `${read.name}:${read.position}`;
             if (processed.has(key)) continue;
 

@@ -1,29 +1,18 @@
 import { StateManager } from "./state";
 import { Read } from "./types";
+import {
+    BASE_COLORS,
+    COLOR_PALETTES,
+    DISPLAY_MODE_CONFIGS,
+    INSERT_SIZE_THRESHOLDS,
+    SOFT_CLIP_STYLE,
+} from "./constants";
 
-// Constants
+// Layout constants
 const RULER_HEIGHT = 20;
 const REFERENCE_HEIGHT = 24;
 const COVERAGE_HEIGHT = 60;
-const READ_HEIGHT = 12;
-const READ_GAP = 2;
 const HEADER_OFFSET = RULER_HEIGHT + REFERENCE_HEIGHT;
-
-const BASE_COLORS: Record<string, string> = {
-    'A': '#22c55e',  // Green
-    'T': '#ef4444',  // Red
-    'G': '#f97316',  // Orange
-    'C': '#3b82f6',  // Blue
-    'N': '#9ca3af'   // Gray
-};
-
-// Insert size color coding for mate-pair visualization
-const INSERT_SIZE_COLORS = {
-    NORMAL: '#22c55e',    // Green - normal insert (150-500bp)
-    SHORT: '#f97316',     // Orange - too short (<100bp) or chimeric
-    LONG: '#ef4444',      // Red - too long (>1000bp, potential SV)
-    UNKNOWN: '#6b7280',   // Gray - unknown or intermediate
-};
 
 export class Renderer {
     private rulerCanvas: HTMLCanvasElement;
@@ -53,19 +42,77 @@ export class Renderer {
     }
 
     /**
+     * Get read dimensions based on current display mode setting.
+     */
+    private getReadDimensions(): { height: number; gap: number; showLabels: boolean } {
+        const mode = this.state.settings.displayMode;
+        const config = DISPLAY_MODE_CONFIGS[mode] || DISPLAY_MODE_CONFIGS.compact;
+        return {
+            height: config.readHeight,
+            gap: config.readGap,
+            showLabels: config.showLabels,
+        };
+    }
+
+    /**
      * Get color based on insert size for mate-pair visualization.
-     * Green = normal (150-500bp), Orange = short (<100bp) or chimeric, Red = long (>1000bp)
      */
     private getInsertSizeColor(read: Read): string {
         const insertSize = read.insert_size ? Math.abs(read.insert_size) : null;
         const isChimeric = read.mate_contig && read.mate_contig !== this.state.data?.contig;
+        const palette = COLOR_PALETTES.insertSize;
 
-        if (isChimeric) return INSERT_SIZE_COLORS.SHORT;  // Orange - different chromosome
-        if (!insertSize) return INSERT_SIZE_COLORS.UNKNOWN;  // Gray - unknown
-        if (insertSize < 100) return INSERT_SIZE_COLORS.SHORT;  // Orange - too short
-        if (insertSize > 1000) return INSERT_SIZE_COLORS.LONG;  // Red - too long (potential SV)
-        if (insertSize >= 150 && insertSize <= 500) return INSERT_SIZE_COLORS.NORMAL;  // Green - normal
-        return INSERT_SIZE_COLORS.UNKNOWN;  // Gray - intermediate
+        if (isChimeric) return palette.chimeric;
+        if (!insertSize) return palette.normal;
+        if (insertSize < INSERT_SIZE_THRESHOLDS.tooShort) return palette.small;
+        if (insertSize > INSERT_SIZE_THRESHOLDS.veryLong) return palette.veryLarge;
+        if (insertSize > INSERT_SIZE_THRESHOLDS.tooLong) return palette.large;
+        if (insertSize >= INSERT_SIZE_THRESHOLDS.normalMin &&
+            insertSize <= INSERT_SIZE_THRESHOLDS.normalMax) return '#22c55e';  // Green - normal
+        return palette.normal;
+    }
+
+    /**
+     * Get read color based on current colorBy setting.
+     */
+    private getReadColor(read: Read): string {
+        const colorBy = this.state.settings.colorBy;
+
+        switch (colorBy) {
+            case 'strand':
+                return read.is_reverse
+                    ? COLOR_PALETTES.strand.reverse
+                    : COLOR_PALETTES.strand.forward;
+
+            case 'mapq':
+                return this.getColorFromScale(read.mapping_quality, COLOR_PALETTES.mapq);
+
+            case 'insertSize':
+                return this.getInsertSizeColor(read);
+
+            case 'baseQuality':
+                // Use average base quality if available
+                // For now, fall back to MAPQ as a proxy
+                return this.getColorFromScale(read.mapping_quality, COLOR_PALETTES.baseQuality);
+
+            default:
+                return '#94a3b8';  // Slate gray fallback
+        }
+    }
+
+    /**
+     * Get color from a threshold-based scale.
+     */
+    private getColorFromScale(
+        value: number,
+        scale: Array<{ threshold: number; color: string }>
+    ): string {
+        for (let i = scale.length - 1; i >= 0; i--) {
+            if (value >= scale[i].threshold) {
+                return scale[i].color;
+            }
+        }
+        return scale[0].color;
     }
 
     /**
@@ -97,9 +144,10 @@ export class Renderer {
         const readsHeight = containerHeight - HEADER_OFFSET - COVERAGE_HEIGHT;
         this.readsCanvas.height = readsHeight;
 
-        // Expand if needed for packed reads
+        // Expand if needed for packed reads (use dynamic dimensions)
         if (this.state.packedRows.length > 0) {
-            const neededHeight = this.state.packedRows.length * (READ_HEIGHT + READ_GAP);
+            const { height, gap } = this.getReadDimensions();
+            const neededHeight = this.state.packedRows.length * (height + gap);
             if (neededHeight > this.readsCanvas.height) {
                 this.readsCanvas.height = Math.min(neededHeight, 800);
             }
@@ -412,6 +460,7 @@ export class Renderer {
         const height = this.readsCanvas.height;
         const scale = this.getScale();
         const data = this.state.data;
+        const { height: READ_HEIGHT, gap: READ_GAP, showLabels } = this.getReadDimensions();
 
         ctx.clearRect(0, 0, width, height);
 
@@ -433,12 +482,12 @@ export class Renderer {
                 // Skip if off-screen
                 if (x2 < 0 || x1 > width) continue;
 
-                // Determine styling based on state
-                let color = read.is_reverse ? '#818cf8' : '#f87171'; // Blue/Red
+                // Determine styling based on colorBy setting
+                let color = this.getReadColor(read);
                 let opacity = Math.max(read.mapping_quality / 60, 0.2);
                 let stroke = false;
 
-                // Low MAPQ logic
+                // Low MAPQ logic - always show MAPQ=0 reads distinctly
                 if (read.mapping_quality === 0) {
                     color = '#fff';
                     stroke = true;
@@ -591,6 +640,9 @@ export class Renderer {
 
                 ctx.globalAlpha = 1; // Reset
 
+                // Render soft clips if enabled
+                this.renderSoftClips(ctx, read, x1, x2, y, READ_HEIGHT, scale);
+
                 // High Zoom: Render Bases
                 if (scale >= 10) {
                     ctx.font = '10px monospace';
@@ -637,6 +689,8 @@ export class Renderer {
 
         // Only show markers if zoomed in enough
         if (scale < 0.5) return;
+
+        const { height: READ_HEIGHT, gap: READ_GAP } = this.getReadDimensions();
 
         // Build a map of variant positions for quick lookup
         const variantMap = new Map<number, { alt: string; ref: string }[]>();
@@ -699,11 +753,51 @@ export class Renderer {
         ctx.restore();
     }
 
+    /**
+     * Render soft clips as dashed rectangles extending beyond read boundaries.
+     */
+    private renderSoftClips(
+        ctx: CanvasRenderingContext2D,
+        read: Read,
+        x1: number,
+        x2: number,
+        y: number,
+        height: number,
+        scale: number
+    ): void {
+        if (!this.state.settings.showSoftClips || !read.soft_clips?.length) return;
+
+        ctx.save();
+        ctx.fillStyle = SOFT_CLIP_STYLE.fillColor;
+        ctx.strokeStyle = SOFT_CLIP_STYLE.strokeColor;
+        ctx.setLineDash(SOFT_CLIP_STYLE.dashPattern);
+        ctx.lineWidth = 1;
+
+        for (const clip of read.soft_clips) {
+            const clipWidth = clip.length * scale;
+
+            if (clip.side === 'left') {
+                // Draw before the read
+                const clipX = x1 - clipWidth;
+                ctx.fillRect(clipX, y, clipWidth, height);
+                ctx.strokeRect(clipX, y, clipWidth, height);
+            } else {
+                // Draw after the read
+                ctx.fillRect(x2, y, clipWidth, height);
+                ctx.strokeRect(x2, y, clipWidth, height);
+            }
+        }
+
+        ctx.setLineDash([]);
+        ctx.restore();
+    }
+
     public getReadAtPosition(event: MouseEvent): Read | null {
         const rect = this.readsCanvas.getBoundingClientRect();
         const x = event.clientX - rect.left;
         const y = event.clientY - rect.top;
 
+        const { height: READ_HEIGHT, gap: READ_GAP } = this.getReadDimensions();
         const rowIndex = Math.floor(y / (READ_HEIGHT + READ_GAP));
         if (rowIndex < 0 || rowIndex >= this.state.packedRows.length) return null;
 

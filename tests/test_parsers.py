@@ -5,7 +5,9 @@ import pytest
 from bamcp.parsers import (
     AlignedRead,
     RegionData,
+    SoftClip,
     detect_variants,
+    extract_soft_clips,
     fetch_region,
     parse_region,
 )
@@ -417,3 +419,87 @@ class TestRegionData:
             variants=[],
         )
         assert data.reference_sequence is None
+
+
+class TestSoftClip:
+    """Tests for the SoftClip dataclass."""
+
+    @pytest.mark.unit
+    def test_soft_clip_creation(self):
+        """SoftClip should store all fields."""
+        clip = SoftClip(
+            position=100,
+            length=10,
+            sequence="ACGTACGTAC",
+            side="left",
+        )
+        assert clip.position == 100
+        assert clip.length == 10
+        assert clip.sequence == "ACGTACGTAC"
+        assert clip.side == "left"
+
+    @pytest.mark.unit
+    def test_soft_clip_optional_sequence(self):
+        """sequence can be None."""
+        clip = SoftClip(
+            position=100,
+            length=10,
+            sequence=None,
+            side="right",
+        )
+        assert clip.sequence is None
+
+
+class TestExtractSoftClips:
+    """Tests for the extract_soft_clips function."""
+
+    @pytest.mark.unit
+    def test_no_soft_clips(self, small_bam_path):
+        """Reads without soft clips should return empty list."""
+        import pysam
+
+        with pysam.AlignmentFile(small_bam_path, "rb") as samfile:
+            for read in samfile.fetch("chr1", 100, 200):
+                if read.cigarstring and "S" not in read.cigarstring:
+                    clips = extract_soft_clips(read)
+                    assert clips == []
+                    return
+        # If no reads without S, skip test
+        pytest.skip("No reads without soft clips found")
+
+    @pytest.mark.unit
+    def test_aligned_read_has_soft_clips_field(self):
+        """AlignedRead should have soft_clips field."""
+        read = AlignedRead(
+            name="test",
+            sequence="ACGT",
+            qualities=[30, 30, 30, 30],
+            cigar="4M",
+            position=100,
+            end_position=104,
+            mapping_quality=60,
+            is_reverse=False,
+        )
+        assert hasattr(read, "soft_clips")
+        assert read.soft_clips == []
+
+    @pytest.mark.unit
+    def test_aligned_read_with_soft_clips(self):
+        """AlignedRead should store soft_clips."""
+        clips = [
+            SoftClip(position=95, length=5, sequence="NNNNN", side="left"),
+        ]
+        read = AlignedRead(
+            name="test",
+            sequence="NNNNNACGT",
+            qualities=[30] * 9,
+            cigar="5S4M",
+            position=100,
+            end_position=104,
+            mapping_quality=60,
+            is_reverse=False,
+            soft_clips=clips,
+        )
+        assert len(read.soft_clips) == 1
+        assert read.soft_clips[0].side == "left"
+        assert read.soft_clips[0].length == 5

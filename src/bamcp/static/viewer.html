@@ -13,17 +13,33 @@
 
         #toolbar {
             display: flex;
+            flex-wrap: wrap;
             gap: 8px;
             padding: 8px;
             background: #f5f5f5;
             border-bottom: 1px solid #ddd;
+            align-items: center;
         }
 
         #toolbar input {
-            flex: 1;
             padding: 6px 10px;
             border: 1px solid #ccc;
             border-radius: 4px;
+        }
+
+        #toolbar #region-input {
+            width: 140px;
+            flex-shrink: 0;
+        }
+
+        #toolbar #gene-input {
+            width: 70px;
+            flex-shrink: 0;
+        }
+
+        .toolbar-spacer {
+            flex: 1;
+            min-width: 8px;
         }
 
         #toolbar button {
@@ -37,6 +53,35 @@
 
         #toolbar button:hover { background: #357abd; }
         #toolbar button.active { background: #2d6ba5; }
+
+        #toolbar select {
+            padding: 5px 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: white;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .toolbar-separator {
+            width: 1px;
+            height: 24px;
+            background: #ddd;
+            margin: 0 4px;
+        }
+
+        .toolbar-checkbox {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 12px;
+            color: #374151;
+            cursor: pointer;
+        }
+
+        .toolbar-checkbox input {
+            cursor: pointer;
+        }
 
         /* Color Legend */
         #legend {
@@ -338,8 +383,11 @@
             body { background: #111827; color: #f9fafb; }
             #toolbar { background: #1f2937; border-color: #374151; }
             #toolbar input { background: #374151; border-color: #4b5563; color: #f9fafb; }
+            #toolbar select { background: #374151; border-color: #4b5563; color: #f9fafb; }
             #toolbar button { background: #3b82f6; }
             #toolbar button:hover { background: #2563eb; }
+            .toolbar-separator { background: #4b5563; }
+            .toolbar-checkbox { color: #e5e7eb; }
             #legend { background: #1f2937; border-color: #374151; }
             .legend-title { color: #9ca3af; }
             #viewer { background: #1f2937; }
@@ -376,10 +424,32 @@
         <div id="toolbar">
             <input type="text" id="region-input" placeholder="chr1:1000-2000">
             <button id="go-btn">Go</button>
-            <input type="text" id="gene-input" placeholder="Gene" style="width: 80px">
+            <input type="text" id="gene-input" placeholder="Gene">
             <button id="gene-btn">Gene</button>
             <button id="zoom-in">+</button>
             <button id="zoom-out">&minus;</button>
+            <span class="toolbar-separator"></span>
+            <select id="display-mode-select" title="Display mode">
+                <option value="squished">Squished</option>
+                <option value="compact" selected>Compact</option>
+                <option value="expanded">Expanded</option>
+            </select>
+            <select id="color-by-select" title="Color reads by">
+                <option value="strand" selected>Strand</option>
+                <option value="mapq">MAPQ</option>
+                <option value="insertSize">Insert Size</option>
+            </select>
+            <select id="sort-by-select" title="Sort reads by">
+                <option value="position" selected>Position</option>
+                <option value="mapq">MAPQ</option>
+                <option value="insertSize">Insert Size</option>
+                <option value="strand">Strand</option>
+            </select>
+            <label class="toolbar-checkbox" title="Show soft-clipped bases">
+                <input type="checkbox" id="show-soft-clips"> Clips
+            </label>
+            <span class="toolbar-spacer"></span>
+            <button id="pip-btn" title="Detach to floating window">&#x2398;</button>
             <button id="fullscreen-btn" title="Toggle fullscreen">&#x26F6;</button>
         </div>
         <div id="legend">

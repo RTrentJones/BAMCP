@@ -57,3 +57,11 @@ ARTIFACT_STRAND_BIAS_THRESHOLD = 0.8
 ARTIFACT_NEAR_END_FRACTION_THRESHOLD = 0.5
 ARTIFACT_LOW_MAPQ_FRACTION_THRESHOLD = 0.3
 ARTIFACT_HOMOPOLYMER_LENGTH_THRESHOLD = 4
+
+# Display mode configurations for IGV-like read visualization
+DISPLAY_MODES = {
+    "squished": {"read_height": 6, "read_gap": 1, "show_labels": False},
+    "compact": {"read_height": 12, "read_gap": 2, "show_labels": False},
+    "expanded": {"read_height": 24, "read_gap": 4, "show_labels": True},
+}
+DEFAULT_DISPLAY_MODE = "compact"

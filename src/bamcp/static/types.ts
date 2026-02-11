@@ -1,3 +1,23 @@
+// IGV-style display mode types
+export type ReadDisplayMode = 'squished' | 'compact' | 'expanded';
+export type ColorBy = 'strand' | 'mapq' | 'insertSize' | 'baseQuality';
+export type SortBy = 'position' | 'mapq' | 'insertSize' | 'strand';
+
+export interface ViewerSettings {
+    displayMode: ReadDisplayMode;
+    colorBy: ColorBy;
+    sortBy: SortBy;
+    showSoftClips: boolean;
+    showMismatches: boolean;
+}
+
+export interface SoftClip {
+    position: number;
+    length: number;
+    sequence: string | null;
+    side: 'left' | 'right';
+}
+
 export interface Read {
     name: string;
     sequence?: string;  // Only in non-compact mode (high zoom)
@@ -7,6 +27,8 @@ export interface Read {
     mapping_quality: number;
     is_reverse: boolean;
     mismatches: Array<{ pos: number; ref: string; alt: string }>;
+    // Soft clips (extracted from CIGAR)
+    soft_clips?: SoftClip[];
     // Paired-end fields (only present if is_paired=true)
     mate_position?: number | null;
     mate_contig?: string | null;

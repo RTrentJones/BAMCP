@@ -75,7 +75,6 @@ query GnomadVariant($variantId: String!, $dataset: DatasetId!) {
         ac
         an
         homozygote_count
-        af
       }
       filters
     }
@@ -89,7 +88,6 @@ query GnomadVariant($variantId: String!, $dataset: DatasetId!) {
         ac
         an
         homozygote_count
-        af
       }
       filters
     }
@@ -223,16 +221,21 @@ def _parse_response(data: dict, variant_id: str) -> GnomadResult | None:
 
     source = "genome" if variant_data.get("genome") else "exome"
 
-    populations = [
-        PopulationFrequency(
-            id=pop.get("id", ""),
-            ac=pop.get("ac", 0),
-            an=pop.get("an", 0),
-            homozygote_count=pop.get("homozygote_count", 0),
-            af=pop.get("af", 0.0),
+    populations = []
+    for pop in source_data.get("populations", []):
+        ac = pop.get("ac", 0)
+        an = pop.get("an", 0)
+        # Calculate af from ac/an (not exposed in API for populations)
+        af = ac / an if an > 0 else 0.0
+        populations.append(
+            PopulationFrequency(
+                id=pop.get("id", ""),
+                ac=ac,
+                an=an,
+                homozygote_count=pop.get("homozygote_count", 0),
+                af=af,
+            )
         )
-        for pop in source_data.get("populations", [])
-    ]
 
     return GnomadResult(
         variant_id=variant_data.get("variant_id", variant_id),

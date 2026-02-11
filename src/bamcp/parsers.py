@@ -7,6 +7,16 @@ import pysam
 
 
 @dataclass
+class SoftClip:
+    """A soft-clipped region from a read."""
+
+    position: int  # Reference position where clip starts
+    length: int  # Number of bases clipped
+    sequence: str | None  # Clipped sequence if available
+    side: str  # 'left' or 'right'
+
+
+@dataclass
 class AlignedRead:
     """A single aligned read extracted from a BAM/CRAM file."""
 
@@ -19,6 +29,7 @@ class AlignedRead:
     mapping_quality: int
     is_reverse: bool
     mismatches: list[dict] = field(default_factory=list)
+    soft_clips: list[SoftClip] = field(default_factory=list)
 
     # Paired-end fields
     mate_position: int | None = None
@@ -44,6 +55,59 @@ class RegionData:
 
 # Maximum region size to prevent DoS via unbounded memory allocation
 MAX_REGION_SIZE = 1_000_000  # 1 Mbp
+
+# CIGAR operation codes
+CIGAR_SOFT_CLIP = 4  # S operation
+
+
+def extract_soft_clips(read: pysam.AlignedSegment) -> list[SoftClip]:
+    """
+    Extract soft clip positions and sequences from CIGAR.
+
+    Args:
+        read: A pysam aligned segment.
+
+    Returns:
+        List of SoftClip objects for left and right soft clips.
+    """
+    clips: list[SoftClip] = []
+    cigar = read.cigartuples
+
+    if not cigar:
+        return clips
+
+    query_seq = read.query_sequence
+    ref_start = read.reference_start or 0
+    query_pos = 0
+
+    for op, length in cigar:
+        if op == CIGAR_SOFT_CLIP:
+            # Get clipped sequence
+            clip_seq = None
+            if query_seq and query_pos < len(query_seq):
+                clip_seq = query_seq[query_pos : query_pos + length]
+
+            # Determine if left or right clip
+            side = "left" if query_pos == 0 else "right"
+
+            clips.append(
+                SoftClip(
+                    position=ref_start,
+                    length=length,
+                    sequence=clip_seq,
+                    side=side,
+                )
+            )
+
+        # Update positions based on CIGAR operation
+        # Operations that consume query: M, I, S, =, X (0, 1, 4, 7, 8)
+        if op in (0, 1, 4, 7, 8):
+            query_pos += length
+        # Operations that consume reference: M, D, N, =, X (0, 2, 3, 7, 8)
+        if op in (0, 2, 3, 7, 8):
+            ref_start += length
+
+    return clips
 
 
 def parse_region(region: str) -> tuple[str, int, int]:
@@ -201,6 +265,9 @@ def fetch_region(
                     mate_position = read.next_reference_start
                     mate_contig = samfile.get_reference_name(read.next_reference_id)
 
+            # Extract soft clips from CIGAR
+            soft_clips = extract_soft_clips(read)
+
             reads.append(
                 AlignedRead(
                     name=read.query_name or "",
@@ -216,6 +283,7 @@ def fetch_region(
                     mapping_quality=read.mapping_quality,
                     is_reverse=read.is_reverse,
                     mismatches=mismatches,
+                    soft_clips=soft_clips,
                     mate_position=mate_position,
                     mate_contig=mate_contig,
                     insert_size=insert_size,

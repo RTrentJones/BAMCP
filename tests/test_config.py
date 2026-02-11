@@ -158,7 +158,8 @@ class TestBAMCPConfig:
                 monkeypatch.delenv(key, raising=False)
 
         config = BAMCPConfig.from_env()
-        assert config.cache_dir.endswith(".cache/bamcp")
+        # Cache is now in project root .cache directory
+        assert config.cache_dir.endswith(".cache")
         assert config.cache_ttl == DEFAULT_CACHE_TTL_SECONDS
 
     @pytest.mark.unit

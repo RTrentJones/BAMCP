@@ -49,6 +49,13 @@ class BAMCPViewer {
     private isDraggingTooltip = false;
     private tooltipDragOffset = { x: 0, y: 0 };
 
+    // Auto re-query state for sequence data
+    private pendingSequenceRequest = false;
+    private sequenceRequestTimer: ReturnType<typeof setTimeout> | null = null;
+    private static readonly SEQUENCE_REQUEST_DEBOUNCE_MS = 500;
+    private static readonly BASE_RENDER_SCALE = 10;
+    private static readonly SEQUENCE_REGION_THRESHOLD = 500;
+
     constructor() {
         this.client = new BAMCPClient();
         this.state = new StateManager();
@@ -62,6 +69,7 @@ class BAMCPViewer {
 
         // Setup callbacks
         this.client.setOnDataReceived(data => {
+            this.pendingSequenceRequest = false;  // Reset on new data
             this.state.loadData(data);
             this.renderVariantTable();
             this.renderer.resize();
@@ -410,6 +418,48 @@ class BAMCPViewer {
         this.state.viewport.end = center + newSpan / 2;
         this.renderer.render();
         this.scheduleContextUpdate();
+
+        // Check if we need to fetch sequences for base-level view
+        this.checkAndRequestSequences();
+    }
+
+    /**
+     * Check if we're zoomed in enough to show bases but missing sequence data.
+     * If so, request fresh data for the visible region.
+     */
+    private checkAndRequestSequences(): void {
+        if (!this.state.data || this.pendingSequenceRequest) return;
+
+        const width = this.readsCanvas.width;
+        const viewportSpan = this.state.viewport.end - this.state.viewport.start;
+        const scale = width / viewportSpan;
+
+        // Check if we're at base-level zoom
+        if (scale < BAMCPViewer.BASE_RENDER_SCALE) return;
+
+        // Check if region is small enough for sequences
+        if (viewportSpan > BAMCPViewer.SEQUENCE_REGION_THRESHOLD) return;
+
+        // Check if we're missing sequences (check first read)
+        const firstRead = this.state.data.reads[0];
+        if (!firstRead || firstRead.sequence) return;
+
+        // Debounce the request
+        if (this.sequenceRequestTimer) {
+            clearTimeout(this.sequenceRequestTimer);
+        }
+
+        this.sequenceRequestTimer = setTimeout(() => {
+            if (!this.state.data) return;
+
+            // Build region string for visible viewport
+            const start = Math.max(0, Math.floor(this.state.viewport.start));
+            const end = Math.ceil(this.state.viewport.end);
+            const region = `${this.state.data.contig}:${start}-${end}`;
+
+            this.pendingSequenceRequest = true;
+            this.client.requestRegion(region);
+        }, BAMCPViewer.SEQUENCE_REQUEST_DEBOUNCE_MS);
     }
 
     private scheduleContextUpdate(): void {

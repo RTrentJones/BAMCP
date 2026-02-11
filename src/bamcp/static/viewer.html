@@ -243,16 +243,24 @@
             line-height: 1.4;
         }
 
-        /* Variant Panel - fixed minimum height, never compressed */
-        #variant-panel {
-            flex: 0 0 var(--variant-panel-min);
-            min-height: var(--variant-panel-min);
+        /* Bottom panel - contains variant table and evidence panel */
+        #bottom-panel {
+            flex: 0 1 auto;
+            max-height: 50%;
             border-top: 1px solid var(--color-border);
+            display: flex;
+            flex-direction: column;
+            overflow: auto;
+        }
+
+        /* Variant Panel */
+        #variant-panel {
+            flex: 0 0 auto;
+            min-height: var(--variant-panel-min);
             background: var(--color-bg-secondary);
             font-size: 12px;
             display: flex;
             flex-direction: column;
-            overflow: hidden;
         }
 
         .variant-header {
@@ -316,13 +324,12 @@
 
         /* Evidence Panel */
         #evidence-panel {
-            height: 200px;
+            flex: 0 0 auto;
             border-top: 1px solid var(--color-border);
             background: var(--color-bg-tertiary);
             padding: var(--spacing-md) var(--spacing-lg);
             font-size: 12px;
             display: none;
-            flex-shrink: 0;
         }
         #evidence-panel.visible { display: block; }
 
@@ -539,68 +546,70 @@
             <canvas id="reads-canvas"></canvas>
             <div id="tooltip"></div>
         </div>
-        <div id="variant-panel">
-            <div class="variant-header">
-                <div class="variant-header-left">
-                    <strong>Variants</strong>
-                    <span class="variant-count" id="variant-count">0</span>
-                </div>
-                <div class="filter-toggle">
-                    <button id="filter-high" class="active">High-conf</button>
-                    <button id="filter-all">All</button>
-                </div>
-            </div>
-            <div class="variant-table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th class="sortable" data-sort="position">Position<span class="sort-indicator"></span></th>
-                            <th>Ref</th>
-                            <th>Alt</th>
-                            <th class="sortable" data-sort="vaf">VAF<span class="sort-indicator"></span></th>
-                            <th class="sortable" data-sort="depth">Depth<span class="sort-indicator"></span></th>
-                            <th>Strand</th>
-                            <th class="sortable" data-sort="quality">Qual<span class="sort-indicator"></span></th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="variant-table"></tbody>
-                </table>
-            </div>
-        </div>
-        <div id="evidence-panel">
-            <div class="evidence-header">
-                <strong id="evidence-title">Variant Evidence</strong>
-                <button class="evidence-close" id="close-evidence" title="Close">&times;</button>
-            </div>
-            <div class="evidence-content">
-                <div class="evidence-row">
-                    <div class="evidence-section">
-                        <span class="evidence-label">Strand Bias</span>
-                        <canvas id="strand-chart" width="120" height="24"></canvas>
-                        <span id="strand-ratio" class="evidence-stats"></span>
-                        <span id="strand-warning" class="evidence-warning hidden">High strand bias</span>
+        <div id="bottom-panel">
+            <div id="variant-panel">
+                <div class="variant-header">
+                    <div class="variant-header-left">
+                        <strong>Variants</strong>
+                        <span class="variant-count" id="variant-count">0</span>
                     </div>
-                    <div class="evidence-section">
-                        <span class="evidence-label">Base Quality</span>
-                        <canvas id="quality-chart" width="180" height="60"></canvas>
-                        <span id="quality-stats" class="evidence-stats"></span>
-                    </div>
-                    <div class="evidence-section">
-                        <span class="evidence-label">Position in Read</span>
-                        <canvas id="position-chart" width="180" height="60"></canvas>
-                        <span id="position-stats" class="evidence-stats"></span>
+                    <div class="filter-toggle">
+                        <button id="filter-high" class="active">High-conf</button>
+                        <button id="filter-all">All</button>
                     </div>
                 </div>
-                <div class="evidence-row">
-                    <div class="evidence-section">
-                        <span class="evidence-label">Mapping Quality</span>
-                        <canvas id="mapq-chart" width="180" height="60"></canvas>
+                <div class="variant-table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-sort="position">Position<span class="sort-indicator"></span></th>
+                                <th>Ref</th>
+                                <th>Alt</th>
+                                <th class="sortable" data-sort="vaf">VAF<span class="sort-indicator"></span></th>
+                                <th class="sortable" data-sort="depth">Depth<span class="sort-indicator"></span></th>
+                                <th>Strand</th>
+                                <th class="sortable" data-sort="quality">Qual<span class="sort-indicator"></span></th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="variant-table"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div id="evidence-panel">
+                <div class="evidence-header">
+                    <strong id="evidence-title">Variant Evidence</strong>
+                    <button class="evidence-close" id="close-evidence" title="Close">&times;</button>
+                </div>
+                <div class="evidence-content">
+                    <div class="evidence-row">
+                        <div class="evidence-section">
+                            <span class="evidence-label">Strand Bias</span>
+                            <canvas id="strand-chart" width="120" height="24"></canvas>
+                            <span id="strand-ratio" class="evidence-stats"></span>
+                            <span id="strand-warning" class="evidence-warning hidden">High strand bias</span>
+                        </div>
+                        <div class="evidence-section">
+                            <span class="evidence-label">Base Quality</span>
+                            <canvas id="quality-chart" width="180" height="60"></canvas>
+                            <span id="quality-stats" class="evidence-stats"></span>
+                        </div>
+                        <div class="evidence-section">
+                            <span class="evidence-label">Position in Read</span>
+                            <canvas id="position-chart" width="180" height="60"></canvas>
+                            <span id="position-stats" class="evidence-stats"></span>
+                        </div>
                     </div>
-                    <div class="evidence-section artifact-risk-section">
-                        <span class="evidence-label">Artifact Risk</span>
-                        <div id="artifact-risk-meter"></div>
-                        <ul id="artifact-risk-list"></ul>
+                    <div class="evidence-row">
+                        <div class="evidence-section">
+                            <span class="evidence-label">Mapping Quality</span>
+                            <canvas id="mapq-chart" width="180" height="60"></canvas>
+                        </div>
+                        <div class="evidence-section artifact-risk-section">
+                            <span class="evidence-label">Artifact Risk</span>
+                            <div id="artifact-risk-meter"></div>
+                            <ul id="artifact-risk-list"></ul>
+                        </div>
                     </div>
                 </div>
             </div>

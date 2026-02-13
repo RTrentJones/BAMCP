@@ -11,7 +11,7 @@
  * This module is bundled into viewer.html by Vite.
  */
 
-import { BAMCPClient } from "./client";
+import { BAMCPClient, DebugInfo } from "./client";
 import { BASE_COLORS } from "./constants";
 import { Renderer } from "./renderer";
 import { StateManager, DEFAULT_SETTINGS } from "./state";
@@ -39,6 +39,9 @@ class BAMCPViewer {
     private evidencePanel: HTMLElement;
     private readsCanvas: HTMLCanvasElement;
     private sequenceNotice: HTMLElement;
+    private debugOverlay: HTMLElement;
+    private debugContext: HTMLElement;
+    private debugToolCall: HTMLElement;
 
     // Interaction State
     private _contextUpdateTimer: ReturnType<typeof setTimeout> | null = null;
@@ -68,6 +71,9 @@ class BAMCPViewer {
         this.evidencePanel = document.getElementById('evidence-panel')!;
         this.readsCanvas = document.getElementById('reads-canvas') as HTMLCanvasElement;
         this.sequenceNotice = document.getElementById('sequence-notice')!;
+        this.debugOverlay = document.getElementById('debug-overlay')!;
+        this.debugContext = document.getElementById('debug-context')!;
+        this.debugToolCall = document.getElementById('debug-toolcall')!;
 
         // Setup callbacks
         this.client.setOnDataReceived(data => {
@@ -84,6 +90,18 @@ class BAMCPViewer {
             this.renderVariantTable();
             this.renderer.resize();
             this.scheduleContextUpdate();
+        });
+
+        // Debug overlay callback
+        this.client.setOnDebugUpdate((info: DebugInfo) => {
+            this.debugContext.textContent = info.lastContext || '—';
+            this.debugToolCall.textContent = info.lastToolCall || '—';
+            this.debugOverlay.classList.remove('hidden');
+        });
+
+        // Debug close button
+        document.getElementById('debug-close')!.addEventListener('click', () => {
+            this.debugOverlay.classList.add('hidden');
         });
 
         this.setupEventListeners();
@@ -495,10 +513,14 @@ class BAMCPViewer {
         const region = `${this.state.data.contig}:${start}-${end}`;
         const filePath = this.state.data.file_path;
 
-        // Request with file_path for explicit tool invocation
-        this.client.requestRegion(region, filePath);
+        // Use direct tool call if file_path available (reliable), else fallback to sendMessage
+        if (filePath) {
+            this.client.fetchRegionDirect(filePath, region);
+        } else {
+            this.client.requestRegion(region);
+        }
 
-        // Set fallback timeout - show button if LLM doesn't respond
+        // Set fallback timeout - show button if fetch fails
         if (this.sequenceFallbackTimer) {
             clearTimeout(this.sequenceFallbackTimer);
         }
@@ -524,7 +546,13 @@ class BAMCPViewer {
 
         this.pendingSequenceRequest = true;
         this.sequenceNotice.classList.add('loading');
-        this.client.requestRegion(region, filePath);
+
+        // Use direct tool call if file_path available
+        if (filePath) {
+            this.client.fetchRegionDirect(filePath, region);
+        } else {
+            this.client.requestRegion(region);
+        }
     }
 
     private scheduleContextUpdate(): void {

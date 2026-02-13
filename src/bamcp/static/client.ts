@@ -3,14 +3,38 @@ import { RegionData, ToolResultParams, Variant } from "./types";
 
 export type DisplayMode = 'inline' | 'fullscreen' | 'pip';
 
+export interface DebugInfo {
+    lastContext: string | null;
+    lastToolCall: string | null;
+}
+
 export class BAMCPClient {
     private app: App | null = null;
     private onDataCallback: ((data: RegionData) => void) | null = null;
     private currentDisplayMode: DisplayMode = 'inline';
     private availableDisplayModes: DisplayMode[] = ['inline'];
 
+    // Debug tracking
+    private debugInfo: DebugInfo = { lastContext: null, lastToolCall: null };
+    private onDebugCallback: ((info: DebugInfo) => void) | null = null;
+
     constructor() {
         // Initialize callback
+    }
+
+    public setOnDebugUpdate(callback: (info: DebugInfo) => void): void {
+        this.onDebugCallback = callback;
+    }
+
+    public getDebugInfo(): DebugInfo {
+        return this.debugInfo;
+    }
+
+    private updateDebug(field: keyof DebugInfo, value: string): void {
+        this.debugInfo[field] = value;
+        if (this.onDebugCallback) {
+            this.onDebugCallback(this.debugInfo);
+        }
     }
 
     public getAvailableDisplayModes(): DisplayMode[] {
@@ -162,9 +186,40 @@ export class BAMCPClient {
     public async updateModelContext(context: any): Promise<void> {
         if (!this.app) return;
         try {
-            await this.app.updateModelContext(context);
-        } catch {
-            // Ignore errors
+            // MCP Apps SDK requires content array format
+            const contextText = `Viewer: ${context.region}, ${context.reads} reads, ${context.meanCoverage}x coverage, ${context.variantCount} variants`;
+            await this.app.updateModelContext({
+                content: [{ type: 'text', text: contextText }]
+            });
+            this.updateDebug('lastContext', contextText);
+        } catch (e) {
+            this.updateDebug('lastContext', `ERROR: ${e}`);
+            console.warn('updateModelContext failed:', e);
+        }
+    }
+
+    /**
+     * Directly invoke visualize_region tool using callServerTool.
+     * More reliable than sendMessage which depends on LLM parsing.
+     */
+    public async fetchRegionDirect(filePath: string, region: string, reference?: string): Promise<void> {
+        if (!this.app) return;
+        const args: Record<string, string> = { file_path: filePath, region: region };
+        if (reference) {
+            args.reference = reference;
+        }
+        const toolCallInfo = `visualize_region(${JSON.stringify(args)})`;
+        this.updateDebug('lastToolCall', toolCallInfo);
+
+        try {
+            await this.app.callServerTool({
+                name: 'visualize_region',
+                arguments: args
+            });
+            // Result comes via ontoolresult callback
+        } catch (e) {
+            this.updateDebug('lastToolCall', `${toolCallInfo} → ERROR: ${e}`);
+            console.warn('callServerTool failed:', e);
         }
     }
 

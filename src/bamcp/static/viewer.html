@@ -533,6 +533,56 @@
             to { transform: rotate(360deg); }
         }
 
+        /* Debug overlay */
+        #debug-overlay {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.85);
+            color: #e5e7eb;
+            padding: 0;
+            border-radius: 6px;
+            font-size: 11px;
+            z-index: 200;
+            max-width: 300px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            font-family: monospace;
+        }
+        #debug-overlay.hidden { display: none; }
+        .debug-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 10px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 6px 6px 0 0;
+            font-weight: 600;
+        }
+        .debug-header button {
+            background: none;
+            border: none;
+            color: #9ca3af;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .debug-header button:hover { color: #fff; }
+        #debug-content { padding: 8px 10px; }
+        .debug-section { margin-bottom: 8px; }
+        .debug-section:last-child { margin-bottom: 0; }
+        .debug-label {
+            color: #9ca3af;
+            display: block;
+            margin-bottom: 2px;
+        }
+        #debug-content pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-break: break-all;
+            color: #22c55e;
+            max-height: 80px;
+            overflow-y: auto;
+        }
+
     </style>
 </head>
 <body>
@@ -599,6 +649,22 @@
                 <span class="loading-text">Loading sequences...</span>
                 <span class="notice-text">Sequences not loaded.</span>
                 <button id="load-detail-btn">Load Detail</button>
+            </div>
+            <div id="debug-overlay" class="hidden">
+                <div class="debug-header">
+                    <span>Debug</span>
+                    <button id="debug-close">&times;</button>
+                </div>
+                <div id="debug-content">
+                    <div class="debug-section">
+                        <span class="debug-label">Last Context:</span>
+                        <pre id="debug-context">—</pre>
+                    </div>
+                    <div class="debug-section">
+                        <span class="debug-label">Last Tool Call:</span>
+                        <pre id="debug-toolcall">—</pre>
+                    </div>
+                </div>
             </div>
         </div>
         <div id="bottom-panel">

@@ -104,6 +104,11 @@ class BAMCPViewer {
             this.debugOverlay.classList.add('hidden');
         });
 
+        // Debug toggle button in toolbar
+        document.getElementById('debug-btn')!.addEventListener('click', () => {
+            this.debugOverlay.classList.toggle('hidden');
+        });
+
         this.setupEventListeners();
         this.setupKeyboardShortcuts();
 

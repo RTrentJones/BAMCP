@@ -2,7 +2,7 @@
 
 import pytest
 
-from bamcp.parsers import (
+from bamcp.core.parsers import (
     AlignedRead,
     RegionData,
     SoftClip,

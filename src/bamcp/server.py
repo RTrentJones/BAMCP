@@ -7,13 +7,12 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 
+from .analysis.curation import handle_get_variant_curation_summary
 from .config import BAMCPConfig
-from .resources import get_viewer_html
-from .tools import (
+from .core.tools import (
     get_cache,
     handle_get_coverage,
     handle_get_region_summary,
-    handle_get_variant_curation_summary,
     handle_get_variants,
     handle_jump_to,
     handle_list_contigs,
@@ -21,6 +20,7 @@ from .tools import (
     handle_lookup_gnomad,
     handle_visualize_region,
 )
+from .resources import get_viewer_html
 
 _VIEWER_URI = "ui://bamcp/viewer"
 _VIEWER_META: dict = {"ui": {"resourceUri": _VIEWER_URI}}
@@ -41,7 +41,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     }
 
     if config.auth_enabled:
-        from .auth import BAMCPAuthProvider, build_auth_settings
+        from .middleware.auth import BAMCPAuthProvider, build_auth_settings
 
         kwargs["auth_server_provider"] = BAMCPAuthProvider(
             token_expiry=config.token_expiry,
@@ -257,7 +257,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     async def search_gene(symbol: str) -> str:
         import json
 
-        from .genes import GeneClient
+        from .clients.genes import GeneClient
 
         client = GeneClient(
             api_key=config.ncbi_api_key,

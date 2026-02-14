@@ -13,9 +13,9 @@ from bamcp.constants import (
     LOW_CONFIDENCE_MIN_VAF,
     VIEWER_RESOURCE_URI,
 )
-from bamcp.parsers import AlignedRead, RegionData
-from bamcp.tools import (
-    _serialize_region_data,
+from bamcp.core.parsers import AlignedRead, RegionData
+from bamcp.core.serialization import serialize_region_data
+from bamcp.core.tools import (
     handle_get_coverage,
     handle_get_region_summary,
     handle_get_variants,
@@ -40,14 +40,14 @@ def config_with_ref(ref_fasta_path):
 
 
 class TestSerializeRegionData:
-    """Tests for _serialize_region_data helper."""
+    """Tests for serialize_region_data helper."""
 
     @pytest.mark.unit
     def test_empty_region(self):
         data = RegionData(
             contig="chr1", start=100, end=200, reads=[], coverage=[0] * 100, variants=[]
         )
-        result = _serialize_region_data(data)
+        result = serialize_region_data(data)
         assert result["contig"] == "chr1"
         assert result["start"] == 100
         assert result["end"] == 200
@@ -78,7 +78,7 @@ class TestSerializeRegionData:
             variants=[],
         )
         # Default is compact=False, which includes sequence for zoomed views
-        result = _serialize_region_data(data)
+        result = serialize_region_data(data)
         assert len(result["reads"]) == 1
         r = result["reads"][0]
         assert r["name"] == "r1"
@@ -113,7 +113,7 @@ class TestSerializeRegionData:
             coverage=[1] * 100,
             variants=[],
         )
-        result = _serialize_region_data(data, compact=True)
+        result = serialize_region_data(data, compact=True)
         r = result["reads"][0]
         assert "sequence" not in r  # Compact omits sequence
         assert "qualities" not in r  # Qualities never serialized
@@ -139,7 +139,7 @@ class TestSerializeRegionData:
             ],
             reference_sequence="ACGTACGTAC",
         )
-        result = _serialize_region_data(data)
+        result = serialize_region_data(data)
         # Should be JSON serializable
         json_str = json.dumps(result)
         parsed = json.loads(json_str)
@@ -484,7 +484,7 @@ class TestHandleLookupClinvar:
     @pytest.mark.asyncio
     async def test_returns_annotation(self, config, monkeypatch):
         """Mock ClinVarClient to return a known result."""
-        from bamcp.clinvar import ClinVarResult
+        from bamcp.clients.clinvar import ClinVarResult
 
         async def mock_lookup(self, chrom, pos, ref, alt):
             return ClinVarResult(
@@ -498,7 +498,7 @@ class TestHandleLookupClinvar:
                 variant_name="NM_000546.6(TP53):c.743G>A",
             )
 
-        from bamcp import clinvar
+        from bamcp.clients import clinvar
 
         monkeypatch.setattr(clinvar.ClinVarClient, "lookup", mock_lookup)
 
@@ -514,7 +514,7 @@ class TestHandleLookupClinvar:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_includes_disclaimer(self, config, monkeypatch):
-        from bamcp.clinvar import ClinVarResult
+        from bamcp.clients.clinvar import ClinVarResult
 
         async def mock_lookup(self, chrom, pos, ref, alt):
             return ClinVarResult(
@@ -528,7 +528,7 @@ class TestHandleLookupClinvar:
                 variant_name=None,
             )
 
-        from bamcp import clinvar
+        from bamcp.clients import clinvar
 
         monkeypatch.setattr(clinvar.ClinVarClient, "lookup", mock_lookup)
 
@@ -547,7 +547,7 @@ class TestHandleLookupClinvar:
         async def mock_lookup(self, chrom, pos, ref, alt):
             return None
 
-        from bamcp import clinvar
+        from bamcp.clients import clinvar
 
         monkeypatch.setattr(clinvar.ClinVarClient, "lookup", mock_lookup)
 
@@ -564,7 +564,7 @@ class TestHandleLookupClinvar:
         async def mock_lookup(self, chrom, pos, ref, alt):
             raise ConnectionError("API unavailable")
 
-        from bamcp import clinvar
+        from bamcp.clients import clinvar
 
         monkeypatch.setattr(clinvar.ClinVarClient, "lookup", mock_lookup)
 
@@ -581,7 +581,7 @@ class TestHandleLookupGnomad:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_returns_frequency(self, config, monkeypatch):
-        from bamcp.gnomad import GnomadResult, PopulationFrequency
+        from bamcp.clients.gnomad import GnomadResult, PopulationFrequency
 
         async def mock_lookup(self, chrom, pos, ref, alt):
             return GnomadResult(
@@ -597,7 +597,7 @@ class TestHandleLookupGnomad:
                 source="genome",
             )
 
-        from bamcp import gnomad
+        from bamcp.clients import gnomad
 
         monkeypatch.setattr(gnomad.GnomadClient, "lookup", mock_lookup)
 
@@ -615,7 +615,7 @@ class TestHandleLookupGnomad:
         async def mock_lookup(self, chrom, pos, ref, alt):
             return None
 
-        from bamcp import gnomad
+        from bamcp.clients import gnomad
 
         monkeypatch.setattr(gnomad.GnomadClient, "lookup", mock_lookup)
 
@@ -662,7 +662,7 @@ class TestLowConfidenceThresholds:
             ],
         )
 
-        result = _serialize_region_data(data)
+        result = serialize_region_data(data)
 
         assert result["variants"][0]["is_low_confidence"] is True
 
@@ -709,7 +709,7 @@ class TestLowConfidenceThresholds:
             ],
         )
 
-        result = _serialize_region_data(data)
+        result = serialize_region_data(data)
 
         assert (
             result["variant_evidence"]["101:C>T"]["strand_bias"] <= LOW_CONFIDENCE_MAX_STRAND_BIAS
@@ -718,85 +718,85 @@ class TestLowConfidenceThresholds:
 
 
 class TestBinValues:
-    """Tests for _bin_values helper function."""
+    """Tests for bin_values helper function."""
 
     @pytest.mark.unit
     def test_empty_values(self):
-        from bamcp.tools import _bin_values
+        from bamcp.analysis.evidence import bin_values
 
-        result = _bin_values([], [0, 10, 20, 30])
+        result = bin_values([], [0, 10, 20, 30])
         assert result == [0, 0, 0, 0]
 
     @pytest.mark.unit
     def test_single_bin(self):
-        from bamcp.tools import _bin_values
+        from bamcp.analysis.evidence import bin_values
 
-        result = _bin_values([5, 15, 25], [0, 10, 20, 30])
+        result = bin_values([5, 15, 25], [0, 10, 20, 30])
         assert result == [1, 1, 1, 0]
 
     @pytest.mark.unit
     def test_all_in_last_bin(self):
-        from bamcp.tools import _bin_values
+        from bamcp.analysis.evidence import bin_values
 
-        result = _bin_values([35, 40, 100], [0, 10, 20, 30])
+        result = bin_values([35, 40, 100], [0, 10, 20, 30])
         assert result == [0, 0, 0, 3]
 
     @pytest.mark.unit
     def test_quality_histogram_bins(self):
+        from bamcp.analysis.evidence import bin_values
         from bamcp.constants import QUALITY_HISTOGRAM_BINS
-        from bamcp.tools import _bin_values
 
         values = [5, 15, 25, 35, 45, 50]
-        result = _bin_values(values, QUALITY_HISTOGRAM_BINS)
+        result = bin_values(values, QUALITY_HISTOGRAM_BINS)
         assert len(result) == 5
         assert result == [1, 1, 1, 1, 2]  # 45 and 50 go in last bin
 
 
 class TestDetectHomopolymer:
-    """Tests for _detect_homopolymer helper function."""
+    """Tests for detect_homopolymer helper function."""
 
     @pytest.mark.unit
     def test_single_base(self):
-        from bamcp.tools import _detect_homopolymer
+        from bamcp.analysis.evidence import detect_homopolymer
 
-        result = _detect_homopolymer("ACGT", 0)
+        result = detect_homopolymer("ACGT", 0)
         assert result == 1
 
     @pytest.mark.unit
     def test_homopolymer_run(self):
-        from bamcp.tools import _detect_homopolymer
+        from bamcp.analysis.evidence import detect_homopolymer
 
-        result = _detect_homopolymer("AAAAAACGT", 3)
+        result = detect_homopolymer("AAAAAACGT", 3)
         assert result == 6
 
     @pytest.mark.unit
     def test_position_at_end(self):
-        from bamcp.tools import _detect_homopolymer
+        from bamcp.analysis.evidence import detect_homopolymer
 
-        result = _detect_homopolymer("CGTTTTT", 5)
+        result = detect_homopolymer("CGTTTTT", 5)
         assert result == 5
 
     @pytest.mark.unit
     def test_empty_sequence(self):
-        from bamcp.tools import _detect_homopolymer
+        from bamcp.analysis.evidence import detect_homopolymer
 
-        result = _detect_homopolymer("", 0)
+        result = detect_homopolymer("", 0)
         assert result == 0
 
     @pytest.mark.unit
     def test_position_out_of_range(self):
-        from bamcp.tools import _detect_homopolymer
+        from bamcp.analysis.evidence import detect_homopolymer
 
-        result = _detect_homopolymer("ACGT", 10)
+        result = detect_homopolymer("ACGT", 10)
         assert result == 0
 
 
 class TestComputeArtifactRisk:
-    """Tests for _compute_artifact_risk function."""
+    """Tests for compute_artifact_risk function."""
 
     @pytest.mark.unit
     def test_low_risk(self):
-        from bamcp.tools import _compute_artifact_risk
+        from bamcp.analysis.evidence import compute_artifact_risk
 
         variant = {"position": 100, "depth": 50, "vaf": 0.5}
         evidence = {
@@ -804,13 +804,13 @@ class TestComputeArtifactRisk:
             "position_histogram": [0, 0, 5, 5, 5, 5],  # All in middle
             "mapq_histogram": [0, 0, 0, 0, 5, 10, 20],  # High MAPQ
         }
-        result = _compute_artifact_risk(variant, evidence, None, 0)
+        result = compute_artifact_risk(variant, evidence, None, 0)
         assert result["artifact_likelihood"] == "low"
         assert len(result["risks"]) == 0
 
     @pytest.mark.unit
     def test_high_strand_bias(self):
-        from bamcp.tools import _compute_artifact_risk
+        from bamcp.analysis.evidence import compute_artifact_risk
 
         variant = {"position": 100, "depth": 50, "vaf": 0.5}
         evidence = {
@@ -818,13 +818,13 @@ class TestComputeArtifactRisk:
             "position_histogram": [0, 0, 5, 5, 5, 5],
             "mapq_histogram": [0, 0, 0, 0, 5, 10, 20],
         }
-        result = _compute_artifact_risk(variant, evidence, None, 0)
+        result = compute_artifact_risk(variant, evidence, None, 0)
         assert result["artifact_likelihood"] in ["medium", "high"]
         assert any(r["type"] == "strand_bias" for r in result["risks"])
 
     @pytest.mark.unit
     def test_near_end_bias(self):
-        from bamcp.tools import _compute_artifact_risk
+        from bamcp.analysis.evidence import compute_artifact_risk
 
         variant = {"position": 100, "depth": 50, "vaf": 0.5}
         evidence = {
@@ -832,12 +832,12 @@ class TestComputeArtifactRisk:
             "position_histogram": [10, 10, 1, 0, 0, 0],  # Mostly near ends
             "mapq_histogram": [0, 0, 0, 0, 5, 10, 20],
         }
-        result = _compute_artifact_risk(variant, evidence, None, 0)
+        result = compute_artifact_risk(variant, evidence, None, 0)
         assert any(r["type"] == "read_position_bias" for r in result["risks"])
 
     @pytest.mark.unit
     def test_homopolymer_detection(self):
-        from bamcp.tools import _compute_artifact_risk
+        from bamcp.analysis.evidence import compute_artifact_risk
 
         variant = {"position": 105, "depth": 50, "vaf": 0.5}
         evidence = {
@@ -847,12 +847,12 @@ class TestComputeArtifactRisk:
         }
         # Position 5 in reference is in an AAAAA run
         ref_seq = "ACGTAAAAACGT"
-        result = _compute_artifact_risk(variant, evidence, ref_seq, 100)
+        result = compute_artifact_risk(variant, evidence, ref_seq, 100)
         assert any(r["type"] == "homopolymer" for r in result["risks"])
 
     @pytest.mark.unit
     def test_low_depth_risk(self):
-        from bamcp.tools import _compute_artifact_risk
+        from bamcp.analysis.evidence import compute_artifact_risk
 
         variant = {"position": 100, "depth": 3, "vaf": 0.5}
         evidence = {
@@ -860,7 +860,7 @@ class TestComputeArtifactRisk:
             "position_histogram": [0, 0, 5, 5, 5, 5],
             "mapq_histogram": [0, 0, 0, 0, 5, 10, 20],
         }
-        result = _compute_artifact_risk(variant, evidence, None, 0)
+        result = compute_artifact_risk(variant, evidence, None, 0)
         assert any(r["type"] == "low_depth" for r in result["risks"])
 
 
@@ -899,7 +899,7 @@ class TestVariantEvidenceHistograms:
             ],
         )
 
-        result = _serialize_region_data(data)
+        result = serialize_region_data(data)
         evidence = result["variant_evidence"]["101:C>T"]
 
         assert "quality_histogram" in evidence
@@ -939,7 +939,7 @@ class TestVariantEvidenceHistograms:
             ],
         )
 
-        result = _serialize_region_data(data)
+        result = serialize_region_data(data)
         evidence = result["variant_evidence"]["101:C>T"]
         artifact_risk = evidence["artifact_risk"]
 
@@ -955,7 +955,7 @@ class TestHandleGetVariantCurationSummary:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_returns_formatted_summary(self, small_bam_path, config_with_ref):
-        from bamcp.tools import handle_get_variant_curation_summary
+        from bamcp.analysis.curation import handle_get_variant_curation_summary
 
         result = await handle_get_variant_curation_summary(
             {
@@ -975,7 +975,7 @@ class TestHandleGetVariantCurationSummary:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_invalid_chromosome_rejected(self, small_bam_path, config):
-        from bamcp.tools import handle_get_variant_curation_summary
+        from bamcp.analysis.curation import handle_get_variant_curation_summary
 
         result = await handle_get_variant_curation_summary(
             {

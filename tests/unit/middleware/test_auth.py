@@ -7,8 +7,8 @@ from mcp.server.auth.provider import AuthorizationParams
 from mcp.shared.auth import OAuthClientInformationFull
 from pydantic import AnyUrl
 
-from bamcp.auth import BAMCPAuthProvider, build_auth_settings
 from bamcp.config import BAMCPConfig
+from bamcp.middleware.auth import BAMCPAuthProvider, build_auth_settings
 
 
 @pytest.fixture

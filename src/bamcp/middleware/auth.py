@@ -27,7 +27,7 @@ from mcp.server.auth.settings import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import AnyHttpUrl
 
-from .config import BAMCPConfig
+from ..config import BAMCPConfig
 
 
 def build_auth_settings(config: BAMCPConfig) -> AuthSettings:

@@ -5,8 +5,8 @@ import sys
 from typing import Literal, get_args
 
 from .config import BAMCPConfig
+from .core.tools import get_cache
 from .server import create_server
-from .tools import get_cache
 
 Transport = Literal["stdio", "sse", "streamable-http"]
 VALID_TRANSPORTS: tuple[str, ...] = get_args(Transport)
@@ -16,8 +16,8 @@ def _add_http_middleware(app, config: BAMCPConfig):  # noqa: ANN001, ANN201
     """Add security middleware to a Starlette app for HTTP transports."""
     from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-    from .ratelimit import RateLimitMiddleware
-    from .security import SecurityHeadersMiddleware
+    from .middleware.ratelimit import RateLimitMiddleware
+    from .middleware.security import SecurityHeadersMiddleware
 
     # Order matters: outermost middleware runs first
     # 1. Rate limiting (reject before doing work)

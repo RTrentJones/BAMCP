@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from bamcp.cache import BAMIndexCache
 from bamcp.constants import CACHE_SESSION_ID_LENGTH, DEFAULT_CACHE_TTL_SECONDS
+from bamcp.core.cache import BAMIndexCache
 
 
 class TestBAMIndexCache:

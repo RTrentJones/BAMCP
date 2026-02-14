@@ -6,31 +6,55 @@ Interactive BAM/CRAM variant visualization MCP server with MCP Apps UI.
 
 ```
 FastMCP server (server.py)
-  ├── Tool handlers (tools.py) → pysam parsers (parsers.py)
-  ├── ClinVar client (clinvar.py) → NCBI E-utilities API
-  ├── gnomAD client (gnomad.py) → gnomAD GraphQL API
-  ├── UI resource (resources.py → static/viewer.html)
-  ├── Auth provider (auth.py) — opt-in OAuth 2.0
-  ├── Cache manager (cache.py) — remote BAM index caching
-  └── Config (config.py) — all settings from env vars
+  ├── core/
+  │   ├── tools.py        — tool handler orchestration + cache helpers
+  │   ├── parsers.py      — pysam BAM/CRAM parsing, read extraction
+  │   ├── validation.py   — input validation, SSRF prevention
+  │   ├── serialization.py — RegionData → JSON serialization
+  │   ├── cache.py        — remote BAM index file cache
+  │   └── reference.py    — genome build detection
+  ├── analysis/
+  │   ├── evidence.py     — variant evidence, artifact risk scoring
+  │   └── curation.py     — curation summaries, recommendations
+  ├── clients/
+  │   ├── clinvar.py      — NCBI E-utilities API client
+  │   ├── gnomad.py       — gnomAD GraphQL API client
+  │   ├── genes.py        — NCBI gene search client
+  │   └── ttl_cache.py    — shared BoundedTTLCache utility
+  ├── middleware/
+  │   ├── auth.py         — OAuth 2.0 provider
+  │   ├── ratelimit.py    — sliding-window rate limiting
+  │   └── security.py     — security headers
+  ├── resources.py        — UI resource provider
+  ├── config.py           — all settings from env vars
+  └── constants.py        — shared constants
 ```
 
 **Entry point**: `src/bamcp/__main__.py` — reads `BAMCPConfig.from_env()`, creates FastMCP server, runs with selected transport.
 
 ## Key Modules
 
-| Module | Role |
-|--------|------|
-| `server.py` | FastMCP setup, tool/resource registration, auth wiring |
-| `tools.py` | All tool handlers (visualize, variants, coverage, contigs, jump, summary, ClinVar, gnomAD, curation) |
-| `parsers.py` | `fetch_region()` — pysam BAM/CRAM parsing, read extraction, coverage, variant detection |
-| `clinvar.py` | `ClinVarClient` — async NCBI E-utilities client for variant clinical significance |
-| `gnomad.py` | `GnomadClient` — async gnomAD GraphQL client for population allele frequencies |
-| `resources.py` | `get_viewer_html()` — serves bundled HTML from `static/viewer.html` |
-| `config.py` | `BAMCPConfig` dataclass with `from_env()` classmethod |
-| `auth.py` | `BAMCPAuthProvider` (in-memory OAuth 2.0), `build_auth_settings()` |
-| `cache.py` | `BAMIndexCache` — file-based cache for remote BAM index files with TTL |
-| `reference.py` | Genome build registry (`GENOME_BUILDS`), `detect_genome_build()`, `get_public_reference_url()` |
+| Subpackage | Module | Role |
+|------------|--------|------|
+| root | `server.py` | FastMCP setup, tool/resource registration, auth wiring |
+| root | `config.py` | `BAMCPConfig` dataclass with `from_env()` classmethod |
+| root | `constants.py` | Shared constants (defaults, thresholds, bins) |
+| root | `resources.py` | `get_viewer_html()` — serves bundled HTML from `static/viewer.html` |
+| `core/` | `tools.py` | Tool handlers (visualize, variants, coverage, contigs, jump, summary, ClinVar, gnomAD) |
+| `core/` | `parsers.py` | `fetch_region()` — pysam BAM/CRAM parsing, read extraction, coverage, variant detection |
+| `core/` | `validation.py` | Input validation for regions, paths, URLs (SSRF prevention), variant params |
+| `core/` | `serialization.py` | `serialize_region_data()` — RegionData to JSON with evidence enhancement |
+| `core/` | `cache.py` | `BAMIndexCache` — file-based cache for remote BAM index files with TTL |
+| `core/` | `reference.py` | Genome build registry, `detect_genome_build()`, `get_public_reference_url()` |
+| `analysis/` | `evidence.py` | Variant evidence computation, artifact risk scoring, confidence levels |
+| `analysis/` | `curation.py` | Curation summaries, recommendations, `handle_get_variant_curation_summary()` |
+| `clients/` | `clinvar.py` | `ClinVarClient` — async NCBI E-utilities client for variant clinical significance |
+| `clients/` | `gnomad.py` | `GnomadClient` — async gnomAD GraphQL client for population allele frequencies |
+| `clients/` | `genes.py` | `GeneClient` — NCBI gene search by symbol |
+| `clients/` | `ttl_cache.py` | `BoundedTTLCache` — shared LRU cache with TTL eviction |
+| `middleware/` | `auth.py` | `BAMCPAuthProvider` (in-memory OAuth 2.0), `build_auth_settings()` |
+| `middleware/` | `ratelimit.py` | `RateLimitMiddleware` — sliding-window IP rate limiting |
+| `middleware/` | `security.py` | `SecurityHeadersMiddleware` — security response headers |
 
 ## Registered Tools
 
@@ -125,12 +149,12 @@ make clean        # remove build artifacts
 
 When running with HTTP transports, `__main__.py` adds Starlette middleware:
 1. **`TrustedHostMiddleware`** — DNS rebinding protection (configured via `BAMCP_TRUSTED_HOSTS`)
-2. **`SecurityHeadersMiddleware`** (`security.py`) — X-Content-Type-Options, X-Frame-Options, CSP, etc.
-3. **`RateLimitMiddleware`** (`ratelimit.py`) — sliding-window IP rate limiting (default: 60 req/min/IP)
+2. **`SecurityHeadersMiddleware`** (`middleware/security.py`) — X-Content-Type-Options, X-Frame-Options, CSP, etc.
+3. **`RateLimitMiddleware`** (`middleware/ratelimit.py`) — sliding-window IP rate limiting (default: 60 req/min/IP)
 
 ### SSRF Prevention
 
-`validate_remote_url()` in `tools.py` resolves hostnames and blocks private/internal IPs:
+`validate_remote_url()` in `core/validation.py` resolves hostnames and blocks private/internal IPs:
 - `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (RFC 1918)
 - `169.254.0.0/16` (cloud metadata endpoints)
 - IPv6 private, loopback, link-local
@@ -181,16 +205,32 @@ Deploy workflow: `.github/workflows/deploy.yml`
 
 ```
 src/bamcp/
-  __init__.py, __main__.py, server.py, tools.py, parsers.py,
-  clinvar.py, gnomad.py, cache.py, reference.py, ratelimit.py, security.py,
-  resources.py, config.py, auth.py, static/viewer.html
+  __init__.py, __main__.py, server.py, config.py, constants.py, resources.py
+  core/
+    parsers.py, tools.py, validation.py, serialization.py, cache.py, reference.py
+  analysis/
+    evidence.py, curation.py
+  clients/
+    clinvar.py, gnomad.py, genes.py, ttl_cache.py
+  middleware/
+    auth.py, ratelimit.py, security.py
+  static/
+    viewer.html, client.ts, mcp-app.ts, renderer.ts, state.ts, types.ts, constants.ts
 tests/
-  conftest.py, create_fixtures.py, fixtures/,
-  test_parsers.py, test_tools.py, test_server.py, test_config.py,
-  test_auth.py, test_resources.py, test_integration.py, test_docker.py,
-  test_clinvar.py, test_gnomad.py, test_cache.py, test_reference.py,
-  test_ratelimit.py, test_security.py, test_security_headers.py,
-  e2e/conftest.py, e2e/test_viewer_e2e.py
+  conftest.py, create_fixtures.py, fixtures/
+  unit/
+    core/
+      test_parsers.py, test_tools.py, test_config.py, test_cache.py,
+      test_reference.py, test_validation.py
+    clients/
+      test_clinvar.py, test_gnomad.py, test_genes.py
+    middleware/
+      test_auth.py, test_ratelimit.py, test_security_headers.py
+    test_resources.py
+  integration/
+    test_server.py, test_integration.py, test_docker.py
+  e2e/
+    conftest.py, test_viewer_e2e.py
 docker/
   entrypoint.sh, healthcheck.py
 .github/
@@ -264,7 +304,7 @@ if (result.structuredContent) { handleData(result.structuredContent); }
 ### 1. Region Visualization (`visualize_region` tool)
 - **Feature**: Render aligned reads with coverage track, reference sequence, and variant calls
 - **Compact mode**: Regions >500bp auto-omit sequences to reduce payload size
-- **Test**: `tests/test_tools.py::test_visualize_region*`, `tests/e2e/test_viewer_e2e.py`
+- **Test**: `tests/unit/core/test_tools.py::test_visualize_region*`, `tests/e2e/test_viewer_e2e.py`
 
 ### 2. Auto-fetch Sequences on Zoom
 - **Feature**: When zoomed to scale ≥10 (base-level), auto-fetch sequences if missing
@@ -276,22 +316,22 @@ if (result.structuredContent) { handleData(result.structuredContent); }
 ### 3. Variant Detection & Evidence
 - **Feature**: Call SNVs/indels with VAF, depth, strand bias, MAPQ histograms
 - **Artifact risk**: Position-in-read bias, strand bias detection
-- **Test**: `tests/test_parsers.py::test_variant*`, `tests/test_tools.py::test_get_variant*`
+- **Test**: `tests/unit/core/test_parsers.py::test_variant*`, `tests/unit/core/test_tools.py::test_get_variant*`
 
 ### 4. External Database Lookups
 - **ClinVar**: Clinical significance via NCBI E-utilities
 - **gnomAD**: Population allele frequency via GraphQL API
-- **Test**: `tests/test_clinvar.py`, `tests/test_gnomad.py` (uses `pytest-httpx` mocking)
+- **Test**: `tests/unit/clients/test_clinvar.py`, `tests/unit/clients/test_gnomad.py` (uses `pytest-httpx` mocking)
 
 ### 5. Genome Build Detection
 - **Feature**: Auto-detect GRCh37/GRCh38 from chr1 length
 - **Suggests**: Public UCSC reference FASTA URLs
-- **Test**: `tests/test_reference.py`
+- **Test**: `tests/unit/core/test_reference.py`
 
 ### 6. Remote BAM Support
 - **Feature**: Stream BAM/CRAM from HTTP/S3 URLs with cached index files
 - **Cache**: Session-isolated, 24h TTL by default
-- **Test**: `tests/test_cache.py`
+- **Test**: `tests/unit/core/test_cache.py`
 
 ## Archived Planning Documents
 

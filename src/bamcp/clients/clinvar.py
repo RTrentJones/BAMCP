@@ -5,64 +5,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar
 
 import httpx
+
+from .ttl_cache import API_CACHE_MAX_SIZE, API_CACHE_TTL_SECONDS, BoundedTTLCache
 
 logger = logging.getLogger(__name__)
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 
-# Cache configuration
-CACHE_MAX_SIZE = 1000  # Maximum number of cached entries
-CACHE_TTL_SECONDS = 3600  # 1 hour TTL
-
 # NCBI rate limits (requests per second)
 NCBI_RATE_LIMIT_NO_KEY = 3  # 3 req/sec without API key
 NCBI_RATE_LIMIT_WITH_KEY = 10  # 10 req/sec with API key
-
-T = TypeVar("T")
-
-
-class BoundedTTLCache(Generic[T]):
-    """Thread-safe bounded cache with TTL eviction.
-
-    Implements LRU eviction when maxsize is exceeded and TTL-based expiry.
-    """
-
-    def __init__(self, maxsize: int = CACHE_MAX_SIZE, ttl: float = CACHE_TTL_SECONDS):
-        self._cache: OrderedDict[tuple, tuple[T, float]] = OrderedDict()
-        self._maxsize = maxsize
-        self._ttl = ttl
-        self._lock = asyncio.Lock()
-
-    async def get(self, key: tuple) -> T | None:
-        """Get value from cache, returning None if missing or expired."""
-        async with self._lock:
-            if key not in self._cache:
-                return None
-
-            value, timestamp = self._cache[key]
-            if time.monotonic() - timestamp > self._ttl:
-                del self._cache[key]
-                return None
-
-            # Move to end (most recently used)
-            self._cache.move_to_end(key)
-            return value
-
-    async def set(self, key: tuple, value: T) -> None:
-        """Set value in cache, evicting oldest if at capacity."""
-        async with self._lock:
-            if key in self._cache:
-                del self._cache[key]
-            elif len(self._cache) >= self._maxsize:
-                # Evict oldest (first) item
-                self._cache.popitem(last=False)
-
-            self._cache[key] = (value, time.monotonic())
 
 
 class TokenBucketRateLimiter:
@@ -148,7 +103,7 @@ class ClinVarClient:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._rate_limiter = TokenBucketRateLimiter(rate)
         self._cache = BoundedTTLCache[ClinVarResult | None](
-            maxsize=CACHE_MAX_SIZE, ttl=CACHE_TTL_SECONDS
+            maxsize=API_CACHE_MAX_SIZE, ttl=API_CACHE_TTL_SECONDS
         )
 
     async def lookup(self, chrom: str, pos: int, ref: str, alt: str) -> ClinVarResult | None:

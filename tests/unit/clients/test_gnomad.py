@@ -3,11 +3,10 @@
 import httpx
 import pytest
 
-from bamcp.gnomad import (
+from bamcp.clients.gnomad import (
     GnomadClient,
     GnomadResult,
     PopulationFrequency,
-    _build_query,
     _build_variant_id,
     _parse_response,
 )
@@ -106,21 +105,6 @@ class TestBuildVariantId:
     def test_x_chromosome(self):
         vid = _build_variant_id("chrX", 100, "C", "G")
         assert vid == "X-100-C-G"
-
-
-class TestBuildQuery:
-    """Tests for _build_query."""
-
-    @pytest.mark.unit
-    def test_returns_graphql_query(self):
-        query = _build_query()
-        assert "variant" in query
-        assert "variantId" in query
-        assert "dataset" in query
-        assert "genome" in query
-        assert "exome" in query
-        assert "populations" in query
-        assert "af" in query
 
 
 class TestParseResponse:

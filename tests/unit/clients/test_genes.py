@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from bamcp.genes import GeneClient, GeneInfo
+from bamcp.clients.genes import GeneClient, GeneInfo
 
 
 class TestGeneInfo:

@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from .constants import (
+from ..constants import (
     CACHE_SESSION_ID_LENGTH,
     DEFAULT_CACHE_TTL_SECONDS,
     REMOTE_FILE_SCHEMES,

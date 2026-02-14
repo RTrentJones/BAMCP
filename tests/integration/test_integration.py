@@ -5,7 +5,7 @@ import json
 import pytest
 
 from bamcp.config import BAMCPConfig
-from bamcp.tools import (
+from bamcp.core.tools import (
     handle_get_coverage,
     handle_get_variants,
     handle_jump_to,

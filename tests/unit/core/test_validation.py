@@ -5,15 +5,15 @@ from unittest.mock import patch
 import pytest
 
 from bamcp.config import BAMCPConfig
-from bamcp.tools import (
+from bamcp.core.validation import (
     ALLELE_PATTERN,
     CHROM_PATTERN,
     REGION_PATTERN,
     _is_private_ip,
-    validate_lookup_inputs,
     validate_path,
     validate_region,
     validate_remote_url,
+    validate_variant_input,
 )
 
 
@@ -136,7 +136,7 @@ class TestSSRFPrevention:
     @pytest.mark.unit
     def test_block_private_10_range(self):
         config = BAMCPConfig(allow_remote_files=True)
-        with patch("bamcp.tools.socket.getaddrinfo") as mock_getaddrinfo:
+        with patch("bamcp.core.validation.socket.getaddrinfo") as mock_getaddrinfo:
             mock_getaddrinfo.return_value = [
                 (2, 1, 6, "", ("10.0.0.1", 443)),
             ]
@@ -146,7 +146,7 @@ class TestSSRFPrevention:
     @pytest.mark.unit
     def test_block_private_172_range(self):
         config = BAMCPConfig(allow_remote_files=True)
-        with patch("bamcp.tools.socket.getaddrinfo") as mock_getaddrinfo:
+        with patch("bamcp.core.validation.socket.getaddrinfo") as mock_getaddrinfo:
             mock_getaddrinfo.return_value = [
                 (2, 1, 6, "", ("172.16.0.1", 443)),
             ]
@@ -156,7 +156,7 @@ class TestSSRFPrevention:
     @pytest.mark.unit
     def test_block_private_192_range(self):
         config = BAMCPConfig(allow_remote_files=True)
-        with patch("bamcp.tools.socket.getaddrinfo") as mock_getaddrinfo:
+        with patch("bamcp.core.validation.socket.getaddrinfo") as mock_getaddrinfo:
             mock_getaddrinfo.return_value = [
                 (2, 1, 6, "", ("192.168.1.1", 443)),
             ]
@@ -167,7 +167,7 @@ class TestSSRFPrevention:
     def test_block_metadata_endpoint(self):
         """Block cloud metadata endpoint (169.254.169.254)."""
         config = BAMCPConfig(allow_remote_files=True)
-        with patch("bamcp.tools.socket.getaddrinfo") as mock_getaddrinfo:
+        with patch("bamcp.core.validation.socket.getaddrinfo") as mock_getaddrinfo:
             mock_getaddrinfo.return_value = [
                 (2, 1, 6, "", ("169.254.169.254", 443)),
             ]
@@ -339,58 +339,64 @@ class TestAllelePattern:
             assert not ALLELE_PATTERN.match(allele), f"{allele} should be invalid"
 
 
-class TestValidateLookupInputs:
-    """Tests for validate_lookup_inputs function."""
+class TestValidateVariantInput:
+    """Tests for validate_variant_input function."""
 
     @pytest.mark.unit
     def test_valid_input(self):
         """Valid chromosome, position, ref, alt should pass validation."""
-        # Should not raise
-        validate_lookup_inputs("chr17", 7674220, "G", "A")
+        assert validate_variant_input("chr17", 7674220, "G", "A") is None
 
     @pytest.mark.unit
     def test_valid_input_without_chr_prefix(self):
         """Chromosome without chr prefix should be valid."""
-        validate_lookup_inputs("17", 7674220, "G", "A")
+        assert validate_variant_input("17", 7674220, "G", "A") is None
 
     @pytest.mark.unit
     def test_invalid_chromosome(self):
-        """Invalid chromosome should raise ValueError."""
-        with pytest.raises(ValueError, match="Invalid chromosome"):
-            validate_lookup_inputs("chrABC", 100, "A", "T")
+        """Invalid chromosome should return error."""
+        result = validate_variant_input("chrABC", 100, "A", "T")
+        assert result is not None
+        assert "Invalid chromosome" in result
 
     @pytest.mark.unit
     def test_negative_position(self):
-        """Negative position should raise ValueError."""
-        with pytest.raises(ValueError, match="Position must be positive"):
-            validate_lookup_inputs("chr1", -1, "A", "T")
+        """Negative position should return error."""
+        result = validate_variant_input("chr1", -1, "A", "T")
+        assert result is not None
+        assert "Position must be positive" in result
 
     @pytest.mark.unit
     def test_zero_position(self):
-        """Zero position should raise ValueError."""
-        with pytest.raises(ValueError, match="Position must be positive"):
-            validate_lookup_inputs("chr1", 0, "A", "T")
+        """Zero position should return error."""
+        result = validate_variant_input("chr1", 0, "A", "T")
+        assert result is not None
+        assert "Position must be positive" in result
 
     @pytest.mark.unit
     def test_invalid_ref_allele(self):
-        """Invalid reference allele should raise ValueError."""
-        with pytest.raises(ValueError, match="Invalid reference allele"):
-            validate_lookup_inputs("chr1", 100, "X", "A")
+        """Invalid reference allele should return error."""
+        result = validate_variant_input("chr1", 100, "X", "A")
+        assert result is not None
+        assert "Invalid reference allele" in result
 
     @pytest.mark.unit
     def test_invalid_alt_allele(self):
-        """Invalid alternate allele should raise ValueError."""
-        with pytest.raises(ValueError, match="Invalid alternate allele"):
-            validate_lookup_inputs("chr1", 100, "A", "X")
+        """Invalid alternate allele should return error."""
+        result = validate_variant_input("chr1", 100, "A", "X")
+        assert result is not None
+        assert "Invalid alternate allele" in result
 
     @pytest.mark.unit
     def test_empty_ref_allele(self):
-        """Empty reference allele should raise ValueError."""
-        with pytest.raises(ValueError, match="Invalid reference allele"):
-            validate_lookup_inputs("chr1", 100, "", "A")
+        """Empty reference allele should return error."""
+        result = validate_variant_input("chr1", 100, "", "A")
+        assert result is not None
+        assert "Invalid reference allele" in result
 
     @pytest.mark.unit
     def test_empty_alt_allele(self):
-        """Empty alternate allele should raise ValueError."""
-        with pytest.raises(ValueError, match="Invalid alternate allele"):
-            validate_lookup_inputs("chr1", 100, "A", "")
+        """Empty alternate allele should return error."""
+        result = validate_variant_input("chr1", 100, "A", "")
+        assert result is not None
+        assert "Invalid alternate allele" in result

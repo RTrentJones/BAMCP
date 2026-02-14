@@ -7,7 +7,7 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from bamcp.ratelimit import RateLimitMiddleware
+from bamcp.middleware.ratelimit import RateLimitMiddleware
 
 
 def _make_app(requests_per_minute: int = 5) -> Starlette:

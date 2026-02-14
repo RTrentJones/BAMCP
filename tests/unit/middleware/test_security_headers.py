@@ -7,7 +7,7 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from bamcp.security import SecurityHeadersMiddleware
+from bamcp.middleware.security import SecurityHeadersMiddleware
 
 
 def _make_app() -> Starlette:

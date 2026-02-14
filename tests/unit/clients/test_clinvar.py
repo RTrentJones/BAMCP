@@ -5,7 +5,7 @@ import re
 import httpx
 import pytest
 
-from bamcp.clinvar import (
+from bamcp.clients.clinvar import (
     REVIEW_STARS,
     ClinVarClient,
     ClinVarResult,
@@ -251,7 +251,7 @@ class TestBoundedTTLCache:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_cache_basic_set_get(self):
-        from bamcp.clinvar import BoundedTTLCache
+        from bamcp.clients.clinvar import BoundedTTLCache
 
         cache: BoundedTTLCache[str] = BoundedTTLCache(maxsize=100, ttl=3600)
         await cache.set(("key1",), "value1")
@@ -261,7 +261,7 @@ class TestBoundedTTLCache:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_cache_miss_returns_none(self):
-        from bamcp.clinvar import BoundedTTLCache
+        from bamcp.clients.clinvar import BoundedTTLCache
 
         cache: BoundedTTLCache[str] = BoundedTTLCache(maxsize=100, ttl=3600)
         result = await cache.get(("nonexistent",))
@@ -270,7 +270,7 @@ class TestBoundedTTLCache:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_cache_evicts_oldest_when_full(self):
-        from bamcp.clinvar import BoundedTTLCache
+        from bamcp.clients.clinvar import BoundedTTLCache
 
         cache: BoundedTTLCache[str] = BoundedTTLCache(maxsize=3, ttl=3600)
         await cache.set(("key1",), "value1")
@@ -289,7 +289,7 @@ class TestBoundedTTLCache:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_cache_lru_access_updates_order(self):
-        from bamcp.clinvar import BoundedTTLCache
+        from bamcp.clients.clinvar import BoundedTTLCache
 
         cache: BoundedTTLCache[str] = BoundedTTLCache(maxsize=3, ttl=3600)
         await cache.set(("key1",), "value1")
@@ -314,7 +314,7 @@ class TestTokenBucketRateLimiter:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_rate_limiter_allows_initial_requests(self):
-        from bamcp.clinvar import TokenBucketRateLimiter
+        from bamcp.clients.clinvar import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate=5.0)  # 5 requests per second
         # Should be able to make 5 requests immediately
@@ -325,7 +325,7 @@ class TestTokenBucketRateLimiter:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_rate_limiter_initialized_with_rate(self):
-        from bamcp.clinvar import TokenBucketRateLimiter
+        from bamcp.clients.clinvar import TokenBucketRateLimiter
 
         limiter = TokenBucketRateLimiter(rate=10.0)
         assert limiter._rate == 10.0

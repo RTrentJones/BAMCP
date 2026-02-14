@@ -2,7 +2,7 @@
 
 import pytest
 
-from bamcp.reference import (
+from bamcp.core.reference import (
     GENOME_BUILDS,
     detect_genome_build,
     get_public_reference_url,

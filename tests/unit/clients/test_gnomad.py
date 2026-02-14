@@ -242,8 +242,27 @@ class TestGnomadClient:
             await client.lookup("chr17", 7674220, "G", "A")
 
 
+async def _gnomad_lookup_with_retry(client, *args, retries=3, backoff=2.0, **kwargs):
+    """Retry gnomAD lookups with exponential backoff for CI resilience.
+
+    Waits at least 2s between attempts to stay under 0.5 req/s.
+    """
+    import asyncio
+
+    for attempt in range(retries):
+        try:
+            return await client.lookup(*args, **kwargs)
+        except (httpx.ReadTimeout, httpx.ConnectTimeout):
+            if attempt == retries - 1:
+                raise
+            await asyncio.sleep(backoff * (attempt + 1))
+
+
 class TestGnomadIntegration:
-    """Integration tests that hit the real gnomAD API."""
+    """Integration tests that hit the real gnomAD API.
+
+    Uses retry with backoff and inter-test delays to stay under 0.5 req/s.
+    """
 
     @pytest.mark.integration
     @pytest.mark.asyncio
@@ -254,8 +273,8 @@ class TestGnomadIntegration:
         population frequency, so it should always be present in gnomAD.
         GRCh38 coordinates: chr17:7676154 G>C
         """
-        client = GnomadClient(dataset="gnomad_r4")
-        result = await client.lookup("chr17", 7676154, "G", "C")
+        client = GnomadClient(dataset="gnomad_r4", timeout=60.0)
+        result = await _gnomad_lookup_with_retry(client, "chr17", 7676154, "G", "C")
 
         # Variant should be found
         assert result is not None, "Known variant rs1042522 not found in gnomAD"
@@ -281,9 +300,12 @@ class TestGnomadIntegration:
     @pytest.mark.asyncio
     async def test_real_api_not_found(self):
         """Test lookup of a variant that shouldn't exist."""
-        client = GnomadClient(dataset="gnomad_r4")
+        import asyncio
+
+        await asyncio.sleep(2.0)  # Rate limit: stay under 0.5 req/s
+        client = GnomadClient(dataset="gnomad_r4", timeout=60.0)
         # Made-up variant at a position unlikely to have this specific change
-        result = await client.lookup("chr1", 1, "A", "T")
+        result = await _gnomad_lookup_with_retry(client, "chr1", 1, "A", "T")
 
         # Should return None for non-existent variant
         assert result is None

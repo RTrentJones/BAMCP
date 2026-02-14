@@ -645,16 +645,20 @@ export class Renderer {
                     ctx.textBaseline = 'middle';
 
                     const seq = read.sequence;
-                    // Draw each base
+                    // Draw each base with colored background and contrasting text
                     for (let i = 0; i < seq.length; i++) {
                         const baseX = x1 + (i * scale);
                         if (baseX + scale < 0 || baseX > width) continue;
 
                         const base = seq[i].toUpperCase();
-                        ctx.fillStyle = BASE_COLORS[base] || '#374151';
+                        const bgColor = BASE_COLORS[base] || '#374151';
 
-                        // If it's a mismatch, the background might already be drawn by the shape,
-                        // but let's draw text
+                        // Draw colored background for the base
+                        ctx.fillStyle = bgColor;
+                        ctx.fillRect(baseX, y, Math.max(scale - 0.5, 1), READ_HEIGHT);
+
+                        // Draw white text on colored background for contrast
+                        ctx.fillStyle = '#fff';
                         ctx.fillText(base, baseX + scale / 2, y + READ_HEIGHT / 2);
                     }
                 }

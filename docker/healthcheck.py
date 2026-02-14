@@ -15,10 +15,8 @@ import sys
 
 
 def check_health() -> bool:
-    transport = os.environ.get("BAMCP_TRANSPORT", "stdio")
-
-    if transport in ("sse", "streamable-http"):
-        return _check_http()
+    # Pre-flight always does import checks.
+    # HTTP liveness checks are for runtime probes, not pre-flight.
     return _check_imports()
 
 

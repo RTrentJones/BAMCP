@@ -189,6 +189,20 @@ Deploy workflow: `.github/workflows/deploy.yml`
 
 **Required GitHub Secrets**: `OCI_CLI_USER`, `OCI_CLI_TENANCY`, `OCI_CLI_FINGERPRINT`, `OCI_CLI_KEY_CONTENT`, `OCI_CLI_REGION`, `OCI_COMPARTMENT_OCID`, `OCI_CONTAINER_INSTANCE_OCID`, `OCI_AUTH_TOKEN`
 
+### Public Access via Cloudflare Tunnel
+
+The container instance runs on a private subnet with no public IP. External access (e.g., Claude Desktop) is provided via a Cloudflare Tunnel:
+
+```
+Internet (HTTPS) → Cloudflare Edge → Tunnel → cloudflared sidecar → BAMCP (localhost:8000)
+```
+
+- `cloudflared` runs as a sidecar container in the same OCI Container Instance
+- Outbound-only connection — no inbound firewall rules, no public IP, no load balancer
+- Cloudflare terminates TLS; traffic to BAMCP is plain HTTP over localhost
+- Setup: `./scripts/setup-cloudflared.sh` (recreates container instance with sidecar)
+- Additional secret: `CLOUDFLARE_TUNNEL_TOKEN`
+
 ### Entrypoint
 
 `docker/entrypoint.sh` respects cloud-provider `PORT` env var (falls back to `BAMCP_PORT`).

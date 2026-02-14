@@ -145,6 +145,101 @@ docker/
   pull_request_template.md, ISSUE_TEMPLATE/
 ```
 
+## Viewer UI Build Process
+
+The interactive viewer is a TypeScript/Vite application in `src/bamcp/static/`.
+
+**Build steps:**
+```bash
+cd src/bamcp/static
+npm install          # Install dependencies (first time only)
+npm run build        # Compile TypeScript + bundle with Vite → dist/viewer.html
+```
+
+**Development:**
+```bash
+npm run dev          # Start Vite dev server with hot reload
+```
+
+**CRITICAL - What NOT to do:**
+- NEVER manually edit files in `src/bamcp/static/dist/` — always edit source files and rebuild
+- NEVER copy files into `dist/` manually — Vite bundles everything automatically
+- NEVER use `cat` or `echo` to modify dist files — use `npm run build`
+
+**Source files:**
+- `viewer.html` — HTML template with UI structure
+- `client.ts` — MCP Apps SDK client wrapper (BAMCPClient)
+- `mcp-app.ts` — Main application logic (BAMCPViewer)
+- `renderer.ts` — Canvas-based read/coverage/variant rendering
+- `state.ts` — Viewport and settings state management
+- `types.ts` — TypeScript type definitions
+- `constants.ts` — Color schemes and constants
+
+**How bundling works:**
+- Vite inlines the MCP Apps SDK into the HTML
+- `get_viewer_html()` in `resources.py` serves `dist/viewer.html` if it exists
+- Falls back to source `viewer.html` (won't work in sandboxed iframe)
+
+## MCP Apps SDK Integration
+
+The viewer uses `@modelcontextprotocol/ext-apps` to communicate with the MCP host.
+
+**Key SDK methods:**
+| Method | Purpose | Return |
+|--------|---------|--------|
+| `callServerTool()` | Directly invoke MCP server tool | `Promise<CallToolResult>` — result via Promise |
+| `sendMessage()` | Send message to LLM (unreliable for tool calls) | `Promise<{isError?}>` |
+| `updateModelContext()` | Update model context with viewer state | `Promise<{}>` |
+
+**Common mistake:**
+```typescript
+// WRONG: Assumes result comes via callback
+await app.callServerTool({ name: 'tool', arguments: {} });
+// ontoolresult will NOT fire for callServerTool
+
+// CORRECT: Use the Promise return value
+const result = await app.callServerTool({ name: 'tool', arguments: {} });
+if (result.structuredContent) { handleData(result.structuredContent); }
+```
+
+**Notification callbacks (`ontoolresult`, `ontoolinput`):**
+- These fire for tool calls initiated by the HOST (LLM calling tools)
+- They do NOT fire for `callServerTool` calls initiated by the APP
+
+## Key Features & Test Cases
+
+### 1. Region Visualization (`visualize_region` tool)
+- **Feature**: Render aligned reads with coverage track, reference sequence, and variant calls
+- **Compact mode**: Regions >500bp auto-omit sequences to reduce payload size
+- **Test**: `tests/test_tools.py::test_visualize_region*`, `tests/e2e/test_viewer_e2e.py`
+
+### 2. Auto-fetch Sequences on Zoom
+- **Feature**: When zoomed to scale ≥10 (base-level), auto-fetch sequences if missing
+- **Trigger**: `checkAndRequestSequences()` in `mcp-app.ts`
+- **Uses**: `callServerTool('visualize_region')` for direct tool invocation
+- **Fallback**: "Load Detail" button after 3s timeout
+- **Test**: Manual — zoom into large region, bases should appear automatically
+
+### 3. Variant Detection & Evidence
+- **Feature**: Call SNVs/indels with VAF, depth, strand bias, MAPQ histograms
+- **Artifact risk**: Position-in-read bias, strand bias detection
+- **Test**: `tests/test_parsers.py::test_variant*`, `tests/test_tools.py::test_get_variant*`
+
+### 4. External Database Lookups
+- **ClinVar**: Clinical significance via NCBI E-utilities
+- **gnomAD**: Population allele frequency via GraphQL API
+- **Test**: `tests/test_clinvar.py`, `tests/test_gnomad.py` (uses `pytest-httpx` mocking)
+
+### 5. Genome Build Detection
+- **Feature**: Auto-detect GRCh37/GRCh38 from chr1 length
+- **Suggests**: Public UCSC reference FASTA URLs
+- **Test**: `tests/test_reference.py`
+
+### 6. Remote BAM Support
+- **Feature**: Stream BAM/CRAM from HTTP/S3 URLs with cached index files
+- **Cache**: Session-isolated, 24h TTL by default
+- **Test**: `tests/test_cache.py`
+
 ## Archived Planning Documents
 
 Located in `archived/` folder:

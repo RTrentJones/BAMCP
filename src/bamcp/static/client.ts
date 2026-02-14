@@ -201,6 +201,9 @@ export class BAMCPClient {
     /**
      * Directly invoke visualize_region tool using callServerTool.
      * More reliable than sendMessage which depends on LLM parsing.
+     *
+     * Note: callServerTool returns result via Promise, NOT via ontoolresult callback.
+     * The ontoolresult callback only fires for tool calls initiated by the HOST.
      */
     public async fetchRegionDirect(filePath: string, region: string, reference?: string): Promise<void> {
         if (!this.app) return;
@@ -212,11 +215,32 @@ export class BAMCPClient {
         this.updateDebug('lastToolCall', toolCallInfo);
 
         try {
-            await this.app.callServerTool({
+            const result = await this.app.callServerTool({
                 name: 'visualize_region',
                 arguments: args
             });
-            // Result comes via ontoolresult callback
+
+            // Handle result directly from Promise return value
+            if (result.isError) {
+                this.updateDebug('lastToolCall', `${toolCallInfo} → ERROR`);
+                console.warn('callServerTool returned error:', result.content);
+                return;
+            }
+
+            // Extract data from structuredContent or content
+            if (result.structuredContent) {
+                this.handleData(result.structuredContent as unknown as RegionData);
+            } else if (result.content) {
+                const text = result.content.find(c => c.type === 'text');
+                if (text && 'text' in text) {
+                    try {
+                        this.handleData(JSON.parse(text.text));
+                    } catch (e) {
+                        console.warn('Failed to parse content text:', e);
+                    }
+                }
+            }
+            this.updateDebug('lastToolCall', `${toolCallInfo} → OK`);
         } catch (e) {
             this.updateDebug('lastToolCall', `${toolCallInfo} → ERROR: ${e}`);
             console.warn('callServerTool failed:', e);

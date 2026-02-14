@@ -1,0 +1,77 @@
+# ============================================================================
+# Deploy BAMCP to OCI Container Instance
+#
+# Builds ARM64 Docker image, pushes to OCIR, and restarts the container.
+#
+# Triggers:
+#   - Push tag matching v* (e.g., v0.1.0)
+#   - Manual workflow_dispatch
+#
+# Required GitHub Secrets:
+#   OCI_CLI_USER           — OCI user OCID
+#   OCI_CLI_TENANCY        — OCI tenancy OCID
+#   OCI_CLI_FINGERPRINT    — API key fingerprint
+#   OCI_CLI_KEY_CONTENT    — API signing key (PEM content)
+#   OCI_CLI_REGION         — e.g., us-ashburn-1
+#   OCI_COMPARTMENT_OCID   — compartment for OCIR repo + container
+#   OCI_CONTAINER_INSTANCE_OCID — the container instance to restart
+#   OCI_AUTH_TOKEN          — OCIR auth token
+# ============================================================================
+
+name: Deploy to OCI
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
+  OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
+  OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
+  OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+  OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (ARM64 emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Get OCIR Repository
+        uses: oracle-actions/get-ocir-repository@v1.3.0
+        id: repo
+        with:
+          name: bamcp
+          compartment: ${{ secrets.OCI_COMPARTMENT_OCID }}
+
+      - name: Login to OCIR
+        uses: oracle-actions/login-ocir@v1.3.0
+        with:
+          auth_token: ${{ secrets.OCI_AUTH_TOKEN }}
+
+      - name: Build and push ARM64 image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/arm64
+          tags: |
+            ${{ steps.repo.outputs.repo_path }}:latest
+            ${{ steps.repo.outputs.repo_path }}:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Restart Container Instance
+        uses: oracle-actions/run-oci-cli-command@v1.3.2
+        with:
+          command: >-
+            container-instances container-instance restart
+            --container-instance-id ${{ secrets.OCI_CONTAINER_INSTANCE_OCID }}

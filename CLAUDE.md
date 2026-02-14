@@ -77,6 +77,8 @@ External databases: `BAMCP_NCBI_API_KEY`, `BAMCP_CLINVAR_ENABLED`, `BAMCP_GNOMAD
 
 Cache: `BAMCP_CACHE_DIR` (default: `~/.cache/bamcp`), `BAMCP_CACHE_TTL` (default: 86400 seconds / 24 hours)
 
+Security: `BAMCP_ALLOWED_DIRECTORIES`, `BAMCP_ALLOW_REMOTE_FILES`, `BAMCP_ALLOWED_REMOTE_HOSTS`, `BAMCP_TRUSTED_HOSTS`, `BAMCP_RATE_LIMIT` (default: 60 req/min/IP)
+
 ## Genome Build Detection
 
 The `list_contigs` tool auto-detects genome build (GRCh37 or GRCh38) by comparing chr1 length:
@@ -117,12 +119,62 @@ make clean        # remove build artifacts
 - Coverage threshold: 80% (fail_under in pyproject.toml)
 - E2E tests use Playwright (sync API, run separately from async tests)
 
+## Security
+
+### HTTP Middleware Stack (for SSE/streamable-http transports)
+
+When running with HTTP transports, `__main__.py` adds Starlette middleware:
+1. **`TrustedHostMiddleware`** — DNS rebinding protection (configured via `BAMCP_TRUSTED_HOSTS`)
+2. **`SecurityHeadersMiddleware`** (`security.py`) — X-Content-Type-Options, X-Frame-Options, CSP, etc.
+3. **`RateLimitMiddleware`** (`ratelimit.py`) — sliding-window IP rate limiting (default: 60 req/min/IP)
+
+### SSRF Prevention
+
+`validate_remote_url()` in `tools.py` resolves hostnames and blocks private/internal IPs:
+- `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (RFC 1918)
+- `169.254.0.0/16` (cloud metadata endpoints)
+- IPv6 private, loopback, link-local
+
+Optional domain allowlist via `BAMCP_ALLOWED_REMOTE_HOSTS`.
+
+### Input Validation
+
+- Region strings validated against `REGION_PATTERN` regex
+- File paths limited to 2048 chars, regions to 100 chars
+- Only `.bam` and `.cram` file extensions accepted for local files
+- Error messages sanitized (no config details leaked)
+
+### Container Hardening
+
+Prod docker-compose: `cap_drop: [ALL]`, `no-new-privileges`, `read_only`, `memory: 2g`, non-root user.
+
+### MCP SDK Pin
+
+`mcp>=1.23.0` required (CVE-2025-66416 DNS rebinding fix).
+
+## Deployment
+
+### OCI Container Instance (Prod)
+
+Deploy workflow: `.github/workflows/deploy.yml`
+
+- Triggers on `v*` tags or manual dispatch
+- Builds ARM64 image via `docker buildx` + QEMU
+- Pushes to OCIR via official `oracle-actions/*` GitHub Actions
+- Restarts container instance to pull new image
+
+**Required GitHub Secrets**: `OCI_CLI_USER`, `OCI_CLI_TENANCY`, `OCI_CLI_FINGERPRINT`, `OCI_CLI_KEY_CONTENT`, `OCI_CLI_REGION`, `OCI_COMPARTMENT_OCID`, `OCI_CONTAINER_INSTANCE_OCID`, `OCI_AUTH_TOKEN`
+
+### Entrypoint
+
+`docker/entrypoint.sh` respects cloud-provider `PORT` env var (falls back to `BAMCP_PORT`).
+
 ## Docker
 
-- `Dockerfile` — production image (slim, no test tooling)
+- `Dockerfile` — production image (slim, no test tooling, ARM64 compatible)
 - `Dockerfile.dev` — development image (includes pytest, playwright, ruff, mypy)
 - `docker-compose.yml` — profiles: `dev` (test+lint services), `beta`, `prod`
-- `docker/entrypoint.sh` — entrypoint script
+- `docker/entrypoint.sh` — entrypoint script with PORT override and pre-flight health check
 - `docker/healthcheck.py` — health check (imports bamcp, verifies server creation)
 
 ## Project Structure
@@ -130,18 +182,19 @@ make clean        # remove build artifacts
 ```
 src/bamcp/
   __init__.py, __main__.py, server.py, tools.py, parsers.py,
-  clinvar.py, gnomad.py, cache.py, reference.py,
+  clinvar.py, gnomad.py, cache.py, reference.py, ratelimit.py, security.py,
   resources.py, config.py, auth.py, static/viewer.html
 tests/
   conftest.py, create_fixtures.py, fixtures/,
   test_parsers.py, test_tools.py, test_server.py, test_config.py,
   test_auth.py, test_resources.py, test_integration.py, test_docker.py,
   test_clinvar.py, test_gnomad.py, test_cache.py, test_reference.py,
+  test_ratelimit.py, test_security.py, test_security_headers.py,
   e2e/conftest.py, e2e/test_viewer_e2e.py
 docker/
   entrypoint.sh, healthcheck.py
 .github/
-  workflows/ci.yml, workflows/release.yml,
+  workflows/ci.yml, workflows/release.yml, workflows/deploy.yml,
   pull_request_template.md, ISSUE_TEMPLATE/
 ```
 

@@ -118,11 +118,19 @@ services:
       - BAMCP_AUTH_ENABLED=true
       - BAMCP_ISSUER_URL=http://localhost:8000
       - BAMCP_RESOURCE_SERVER_URL=http://localhost:8000
+      - BAMCP_ALLOW_REMOTE_FILES=true
+      - BAMCP_RATE_LIMIT=60
     read_only: true
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     restart: always
 
 volumes:

@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.23.0",
     "numpy>=1.21.0",
     "pysam>=0.22.0",
     "uvicorn>=0.29",

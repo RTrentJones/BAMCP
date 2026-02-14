@@ -1,9 +1,20 @@
 """Unit tests for security validation."""
 
+from unittest.mock import patch
+
 import pytest
 
 from bamcp.config import BAMCPConfig
-from bamcp.tools import ALLELE_PATTERN, CHROM_PATTERN, validate_lookup_inputs, validate_path
+from bamcp.tools import (
+    ALLELE_PATTERN,
+    CHROM_PATTERN,
+    REGION_PATTERN,
+    _is_private_ip,
+    validate_lookup_inputs,
+    validate_path,
+    validate_region,
+    validate_remote_url,
+)
 
 
 class TestValidatePath:
@@ -18,7 +29,7 @@ class TestValidatePath:
     @pytest.mark.unit
     def test_remote_files_allowed(self):
         config = BAMCPConfig(allow_remote_files=True)
-        # Should not raise
+        # Should not raise — example.com resolves to public IPs
         validate_path("https://example.com/file.bam", config)
 
     @pytest.mark.unit
@@ -59,23 +70,204 @@ class TestValidatePath:
         f = forbidden / "test.bam"
         f.touch()
 
-        with pytest.raises(ValueError, match="Path .* is not in allowed directories"):
+        with pytest.raises(ValueError, match="Path is not in allowed directories"):
             validate_path(str(f), config)
 
     @pytest.mark.unit
     def test_path_traversal_attempt(self, tmp_path):
         allowed = tmp_path / "allowed"
         allowed.mkdir()
-        secret = tmp_path / "secret.txt"
+        secret = tmp_path / "secret.bam"
         secret.touch()
 
         config = BAMCPConfig(allowed_directories=[str(allowed)])
 
         # Try to break out of allowed directory using ..
-        traversal = allowed / "../secret.txt"
+        traversal = allowed / "../secret.bam"
 
-        with pytest.raises(ValueError, match="Path .* is not in allowed directories"):
+        with pytest.raises(ValueError, match="Path is not in allowed directories"):
             validate_path(str(traversal), config)
+
+    @pytest.mark.unit
+    def test_file_path_too_long(self):
+        config = BAMCPConfig()
+        long_path = "/a" * 2049 + ".bam"
+        with pytest.raises(ValueError, match="File path too long"):
+            validate_path(long_path, config)
+
+    @pytest.mark.unit
+    def test_unsupported_file_extension(self, tmp_path):
+        config = BAMCPConfig()
+        f = tmp_path / "test.txt"
+        f.touch()
+        with pytest.raises(ValueError, match="Unsupported file type"):
+            validate_path(str(f), config)
+
+    @pytest.mark.unit
+    def test_bam_extension_allowed(self, tmp_path):
+        config = BAMCPConfig()
+        f = tmp_path / "test.bam"
+        f.touch()
+        validate_path(str(f), config)
+
+    @pytest.mark.unit
+    def test_cram_extension_allowed(self, tmp_path):
+        config = BAMCPConfig()
+        f = tmp_path / "test.cram"
+        f.touch()
+        validate_path(str(f), config)
+
+
+class TestSSRFPrevention:
+    """Tests for SSRF prevention in remote URL validation."""
+
+    @pytest.mark.unit
+    def test_block_localhost(self):
+        config = BAMCPConfig(allow_remote_files=True)
+        with pytest.raises(ValueError, match="private/internal address"):
+            validate_remote_url("https://localhost/file.bam", config)
+
+    @pytest.mark.unit
+    def test_block_127_0_0_1(self):
+        config = BAMCPConfig(allow_remote_files=True)
+        with pytest.raises(ValueError, match="private/internal address"):
+            validate_remote_url("https://127.0.0.1/file.bam", config)
+
+    @pytest.mark.unit
+    def test_block_private_10_range(self):
+        config = BAMCPConfig(allow_remote_files=True)
+        with patch("bamcp.tools.socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [
+                (2, 1, 6, "", ("10.0.0.1", 443)),
+            ]
+            with pytest.raises(ValueError, match="private/internal address"):
+                validate_remote_url("https://internal.example.com/file.bam", config)
+
+    @pytest.mark.unit
+    def test_block_private_172_range(self):
+        config = BAMCPConfig(allow_remote_files=True)
+        with patch("bamcp.tools.socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [
+                (2, 1, 6, "", ("172.16.0.1", 443)),
+            ]
+            with pytest.raises(ValueError, match="private/internal address"):
+                validate_remote_url("https://internal.example.com/file.bam", config)
+
+    @pytest.mark.unit
+    def test_block_private_192_range(self):
+        config = BAMCPConfig(allow_remote_files=True)
+        with patch("bamcp.tools.socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [
+                (2, 1, 6, "", ("192.168.1.1", 443)),
+            ]
+            with pytest.raises(ValueError, match="private/internal address"):
+                validate_remote_url("https://internal.example.com/file.bam", config)
+
+    @pytest.mark.unit
+    def test_block_metadata_endpoint(self):
+        """Block cloud metadata endpoint (169.254.169.254)."""
+        config = BAMCPConfig(allow_remote_files=True)
+        with patch("bamcp.tools.socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [
+                (2, 1, 6, "", ("169.254.169.254", 443)),
+            ]
+            with pytest.raises(ValueError, match="private/internal address"):
+                validate_remote_url("https://metadata.example.com/file.bam", config)
+
+    @pytest.mark.unit
+    def test_allow_public_ip(self):
+        """Public IPs should be allowed."""
+        config = BAMCPConfig(allow_remote_files=True)
+        # example.com resolves to public IP
+        validate_remote_url("https://example.com/file.bam", config)
+
+    @pytest.mark.unit
+    def test_no_hostname(self):
+        config = BAMCPConfig(allow_remote_files=True)
+        with pytest.raises(ValueError, match="no hostname"):
+            validate_remote_url("https:///file.bam", config)
+
+    @pytest.mark.unit
+    def test_allowed_remote_hosts(self):
+        config = BAMCPConfig(
+            allow_remote_files=True,
+            allowed_remote_hosts=["trusted.example.com"],
+        )
+        with pytest.raises(ValueError, match="not in the allowed remote hosts"):
+            validate_remote_url("https://untrusted.example.com/file.bam", config)
+
+    @pytest.mark.unit
+    def test_allowed_remote_hosts_permits_listed(self):
+        config = BAMCPConfig(
+            allow_remote_files=True,
+            allowed_remote_hosts=["example.com"],
+        )
+        # Should not raise
+        validate_remote_url("https://example.com/file.bam", config)
+
+    @pytest.mark.unit
+    def test_is_private_ip_helper(self):
+        assert _is_private_ip("127.0.0.1") is True
+        assert _is_private_ip("10.0.0.1") is True
+        assert _is_private_ip("172.16.0.1") is True
+        assert _is_private_ip("192.168.0.1") is True
+        assert _is_private_ip("169.254.169.254") is True
+        assert _is_private_ip("93.184.216.34") is False  # example.com
+        assert _is_private_ip("not-an-ip") is True  # unparseable → blocked
+
+
+class TestValidateRegion:
+    """Tests for validate_region function."""
+
+    @pytest.mark.unit
+    def test_valid_region(self):
+        validate_region("chr1:1000-2000")
+
+    @pytest.mark.unit
+    def test_valid_region_no_chr_prefix(self):
+        validate_region("1:1000-2000")
+
+    @pytest.mark.unit
+    def test_valid_region_sex_chromosome(self):
+        validate_region("chrX:100-200")
+
+    @pytest.mark.unit
+    def test_valid_region_mitochondrial(self):
+        validate_region("chrM:1-100")
+
+    @pytest.mark.unit
+    def test_invalid_region_no_positions(self):
+        with pytest.raises(ValueError, match="Invalid region format"):
+            validate_region("chr1")
+
+    @pytest.mark.unit
+    def test_invalid_region_only_start(self):
+        with pytest.raises(ValueError, match="Invalid region format"):
+            validate_region("chr1:1000")
+
+    @pytest.mark.unit
+    def test_invalid_region_letters_in_position(self):
+        with pytest.raises(ValueError, match="Invalid region format"):
+            validate_region("chr1:abc-def")
+
+    @pytest.mark.unit
+    def test_region_too_long(self):
+        with pytest.raises(ValueError, match="Region string too long"):
+            validate_region("chr1:" + "1" * 100)
+
+    @pytest.mark.unit
+    def test_region_pattern_valid(self):
+        assert REGION_PATTERN.match("chr1:100-200")
+        assert REGION_PATTERN.match("1:100-200")
+        assert REGION_PATTERN.match("chrX:1-1000000")
+        assert REGION_PATTERN.match("MT:1-100")
+
+    @pytest.mark.unit
+    def test_region_pattern_invalid(self):
+        assert not REGION_PATTERN.match("chr1")
+        assert not REGION_PATTERN.match("chr1:abc-def")
+        assert not REGION_PATTERN.match("")
+        assert not REGION_PATTERN.match("chrABC:1-2")
 
 
 class TestChromosomePattern:

@@ -61,6 +61,9 @@ class BAMCPConfig:
     # Security settings
     allowed_directories: list[str] | None = None
     allow_remote_files: bool = False
+    allowed_remote_hosts: list[str] | None = None
+    trusted_hosts: list[str] | None = None
+    rate_limit: int = 60  # requests per minute per IP
 
     def __post_init__(self) -> None:
         """Validate config values and set defaults."""
@@ -141,4 +144,13 @@ class BAMCPConfig:
             ]
             or None,
             allow_remote_files=env.get("BAMCP_ALLOW_REMOTE_FILES", "false").lower() == "true",
+            allowed_remote_hosts=[
+                h.strip() for h in env.get("BAMCP_ALLOWED_REMOTE_HOSTS", "").split(",") if h.strip()
+            ]
+            or None,
+            trusted_hosts=[
+                h.strip() for h in env.get("BAMCP_TRUSTED_HOSTS", "").split(",") if h.strip()
+            ]
+            or None,
+            rate_limit=int(env.get("BAMCP_RATE_LIMIT", "60")),
         )

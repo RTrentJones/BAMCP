@@ -4,6 +4,11 @@
 
 set -e
 
+# If PORT is set (by cloud provider), use it as BAMCP_PORT
+if [ -n "$PORT" ] && [ -z "$BAMCP_PORT" ]; then
+    export BAMCP_PORT="$PORT"
+fi
+
 # If the first argument is a flag (starts with -), prepend the default command.
 if [ "${1#-}" != "$1" ]; then
     set -- python -m bamcp "$@"

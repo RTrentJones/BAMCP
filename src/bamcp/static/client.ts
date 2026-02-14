@@ -186,8 +186,15 @@ export class BAMCPClient {
     public async updateModelContext(context: any): Promise<void> {
         if (!this.app) return;
         try {
-            // MCP Apps SDK requires content array format
-            const contextText = `Viewer: ${context.region}, ${context.reads} reads, ${context.meanCoverage}x coverage, ${context.variantCount} variants`;
+            // YAML frontmatter format recommended by MCP Apps patterns docs
+            const contextText = `---
+region: ${context.region}
+reads: ${context.reads}
+coverage: ${context.meanCoverage}x
+variants: ${context.variantCount}
+---
+
+User is viewing ${context.region} with ${context.reads} reads at ${context.meanCoverage}x coverage and ${context.variantCount} variants visible.`;
             await this.app.updateModelContext({
                 content: [{ type: 'text', text: contextText }]
             });

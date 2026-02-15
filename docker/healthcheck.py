@@ -56,7 +56,9 @@ def _check_imports() -> bool:
 
         return True
     except Exception as exc:
-        print(f"Health check failed: {exc}", file=sys.stderr)
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
         return False
 
 

@@ -14,9 +14,8 @@ DEFAULT_PORT = 8000
 DEFAULT_ISSUER_URL = "http://localhost:8000"
 DEFAULT_RESOURCE_SERVER_URL = "http://localhost:8000"
 DEFAULT_TRANSPORT = "stdio"
-# Project root is 3 levels up from this file: src/bamcp/constants.py -> BAMCP/
-_PROJECT_ROOT = Path(__file__).parent.parent.parent
-DEFAULT_CACHE_DIR = _PROJECT_ROOT / ".cache"
+# XDG-compliant cache directory: ~/.cache/bamcp
+DEFAULT_CACHE_DIR = Path.home() / ".cache" / "bamcp"
 
 # Genomics operation defaults
 DEFAULT_MAX_READS = 10_000

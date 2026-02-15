@@ -4,7 +4,18 @@
 # ============================================================================
 
 # ---------------------------------------------------------------------------
-# Stage 1 — Build
+# Stage 1a — Frontend build (Vite bundles viewer into single HTML)
+# ---------------------------------------------------------------------------
+FROM node:22-slim AS frontend
+
+WORKDIR /frontend
+COPY src/bamcp/static/package.json src/bamcp/static/package-lock.json* ./
+RUN npm ci --ignore-scripts
+COPY src/bamcp/static/ ./
+RUN npm run build
+
+# ---------------------------------------------------------------------------
+# Stage 1b — Python build
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim AS builder
 
@@ -23,6 +34,9 @@ WORKDIR /build
 
 COPY pyproject.toml README.md ./
 COPY src/ src/
+
+# Copy bundled viewer into source tree so hatchling includes it in the wheel
+COPY --from=frontend /frontend/dist/viewer.html src/bamcp/static/dist/viewer.html
 
 # Install the package and its dependencies into a prefix we can copy later.
 RUN pip install --no-cache-dir --prefix=/install .

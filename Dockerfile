@@ -49,11 +49,13 @@ COPY src/ src/
 COPY pyproject.toml ./
 COPY docker/ docker/
 
-# Create a non-root user
-RUN groupadd -r bamcp && useradd -r -g bamcp -d /app bamcp \
+# Create a non-root user with a proper writable home directory.
+# Libraries (pysam, cffi, etc.) need $HOME/.cache for runtime caches.
+RUN groupadd -r bamcp && useradd -r -g bamcp -m -d /home/bamcp bamcp \
     && mkdir -p /data && chown bamcp:bamcp /data \
     && chmod +x /app/docker/entrypoint.sh
 
+ENV HOME=/home/bamcp
 USER bamcp
 
 # Default env vars (can be overridden)

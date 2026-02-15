@@ -13,10 +13,6 @@ Exit 0 = healthy, Exit 1 = unhealthy.
 import os
 import sys
 
-# Prevent cache writes that fail under non-root users with read-only lib dirs
-os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
-os.environ.setdefault("PYTHONPYCACHEPREFIX", "/tmp")
-
 
 def check_health() -> bool:
     # Pre-flight always does import checks.

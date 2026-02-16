@@ -61,8 +61,8 @@ class BAMCPViewer {
     private static readonly SEQUENCE_FETCH_TIMEOUT_MS = 3000;
 
     // Viewport refetch state — auto-load data when panning/zooming beyond loaded range
-    private pendingViewportFetch = false;
     private viewportRefetchTimer: ReturnType<typeof setTimeout> | null = null;
+    private variantTableTimer: ReturnType<typeof setTimeout> | null = null;
     private static readonly VIEWPORT_REFETCH_OVERLAP = 0.8;     // refetch when <80% overlap
     private static readonly VIEWPORT_REFETCH_DEBOUNCE_MS = 300;
 
@@ -81,31 +81,25 @@ class BAMCPViewer {
         this.debugContext = document.getElementById('debug-context')!;
         this.debugToolCall = document.getElementById('debug-toolcall')!;
 
-        // Setup callbacks
+        // Host-initiated data callback (ontoolresult only — NOT app-initiated fetches).
+        // App-initiated fetches (viewport refetch, sequence zoom) return data via
+        // Promise and call loadTile directly, keeping the paths cleanly separated.
         this.client.setOnDataReceived(data => {
-            // Clear sequence loading state
-            this.pendingSequenceRequest = false;
-            if (this.sequenceFallbackTimer) {
-                clearTimeout(this.sequenceFallbackTimer);
-                this.sequenceFallbackTimer = null;
-            }
-            // Cancel any pending viewport refetch timer (fresh data just arrived)
+            // Cancel any pending viewport refetch timer (fresh host data arrived)
             if (this.viewportRefetchTimer) {
                 clearTimeout(this.viewportRefetchTimer);
                 this.viewportRefetchTimer = null;
             }
             this.sequenceNotice.classList.add('hidden');
             this.sequenceNotice.classList.remove('loading');
-
-            if (this.pendingViewportFetch) {
-                // Viewport-triggered refetch: preserve viewport position
-                this.pendingViewportFetch = false;
-                this.state.loadTile(data);
-            } else {
-                // Host-initiated data (ontoolresult, gene jump): reset viewport
-                this.state.loadData(data);
+            this.pendingSequenceRequest = false;
+            if (this.sequenceFallbackTimer) {
+                clearTimeout(this.sequenceFallbackTimer);
+                this.sequenceFallbackTimer = null;
             }
 
+            // Host data always resets viewport
+            this.state.loadData(data);
             this.renderVariantTable();
             this.renderer.resize();
             this.scheduleContextUpdate();
@@ -470,6 +464,7 @@ class BAMCPViewer {
         this.state.viewport.end += bpDelta;
         this.renderer.render();
         this.scheduleContextUpdate();
+        this.scheduleVariantTableUpdate();
         this.checkAndFetchViewport();
     }
 
@@ -482,10 +477,22 @@ class BAMCPViewer {
         this.state.viewport.end = center + newSpan / 2;
         this.renderer.render();
         this.scheduleContextUpdate();
+        this.scheduleVariantTableUpdate();
 
         // Check if we need to fetch sequences for base-level view
         this.checkAndRequestSequences();
         this.checkAndFetchViewport();
+    }
+
+    /** Debounced variant table re-render for in-view highlighting during pan/zoom. */
+    private scheduleVariantTableUpdate(): void {
+        if (this.variantTableTimer) {
+            clearTimeout(this.variantTableTimer);
+        }
+        this.variantTableTimer = setTimeout(() => {
+            this.variantTableTimer = null;
+            this.renderVariantTable();
+        }, 150);
     }
 
     /**
@@ -540,21 +547,43 @@ class BAMCPViewer {
 
         // Use direct tool call if file_path available (reliable), else fallback to sendMessage
         if (filePath) {
-            this.client.fetchRegionDirect(filePath, region);
+            // Set fallback timeout - show button if fetch fails
+            if (this.sequenceFallbackTimer) {
+                clearTimeout(this.sequenceFallbackTimer);
+            }
+            this.sequenceFallbackTimer = setTimeout(() => {
+                if (this.pendingSequenceRequest) {
+                    this.sequenceNotice.classList.remove('loading');
+                }
+            }, BAMCPViewer.SEQUENCE_FETCH_TIMEOUT_MS);
+
+            this.client.fetchRegionDirect(filePath, region).then(data => {
+                this.pendingSequenceRequest = false;
+                if (this.sequenceFallbackTimer) {
+                    clearTimeout(this.sequenceFallbackTimer);
+                    this.sequenceFallbackTimer = null;
+                }
+                this.sequenceNotice.classList.add('hidden');
+                this.sequenceNotice.classList.remove('loading');
+                if (data) {
+                    this.state.loadTile(data);
+                    this.renderVariantTable();
+                    this.renderer.resize();
+                    this.scheduleContextUpdate();
+                }
+            });
         } else {
             this.client.requestRegion(region);
-        }
-
-        // Set fallback timeout - show button if fetch fails
-        if (this.sequenceFallbackTimer) {
-            clearTimeout(this.sequenceFallbackTimer);
-        }
-        this.sequenceFallbackTimer = setTimeout(() => {
-            if (this.pendingSequenceRequest) {
-                // Switch from loading to button fallback
-                this.sequenceNotice.classList.remove('loading');
+            // sendMessage path — response comes via ontoolresult → onDataReceived
+            if (this.sequenceFallbackTimer) {
+                clearTimeout(this.sequenceFallbackTimer);
             }
-        }, BAMCPViewer.SEQUENCE_FETCH_TIMEOUT_MS);
+            this.sequenceFallbackTimer = setTimeout(() => {
+                if (this.pendingSequenceRequest) {
+                    this.sequenceNotice.classList.remove('loading');
+                }
+            }, BAMCPViewer.SEQUENCE_FETCH_TIMEOUT_MS);
+        }
     }
 
     /**
@@ -572,10 +601,20 @@ class BAMCPViewer {
         this.pendingSequenceRequest = true;
         this.sequenceNotice.classList.add('loading');
 
-        // Use direct tool call if file_path available
         if (filePath) {
-            this.client.fetchRegionDirect(filePath, region);
+            this.client.fetchRegionDirect(filePath, region).then(data => {
+                this.pendingSequenceRequest = false;
+                this.sequenceNotice.classList.add('hidden');
+                this.sequenceNotice.classList.remove('loading');
+                if (data) {
+                    this.state.loadTile(data);
+                    this.renderVariantTable();
+                    this.renderer.resize();
+                    this.scheduleContextUpdate();
+                }
+            });
         } else {
+            // sendMessage path — response comes via ontoolresult → onDataReceived
             this.client.requestRegion(region);
         }
     }
@@ -616,7 +655,7 @@ class BAMCPViewer {
             clearTimeout(this.viewportRefetchTimer);
         }
 
-        this.viewportRefetchTimer = setTimeout(() => {
+        this.viewportRefetchTimer = setTimeout(async () => {
             this.viewportRefetchTimer = null;
 
             // Re-validate after delay (user may have panned back into range)
@@ -645,8 +684,13 @@ class BAMCPViewer {
             const fetchEnd = Math.ceil(ve + padding);
             const region = `${d.contig}:${fetchStart}-${fetchEnd}`;
 
-            this.pendingViewportFetch = true;
-            this.client.fetchRegionDirect(d.file_path, region);
+            const data = await this.client.fetchRegionDirect(d.file_path, region);
+            if (data) {
+                this.state.loadTile(data);
+                this.renderVariantTable();
+                this.renderer.resize();
+                this.scheduleContextUpdate();
+            }
         }, BAMCPViewer.VIEWPORT_REFETCH_DEBOUNCE_MS);
     }
 
@@ -677,20 +721,27 @@ class BAMCPViewer {
         // variantTable IS the tbody element (id="variant-table")
         this.variantTable.innerHTML = '';
 
-        // Update variant count badge — show "X of Y" when filter hides variants
+        const vpStart = this.state.viewport.start;
+        const vpEnd = this.state.viewport.end;
+
+        // Count in-view variants for badge
+        const inViewCount = variants.filter(v => v.position >= vpStart && v.position <= vpEnd).length;
         const totalCount = this.state.store.getAllVariants().length;
         const badge = document.getElementById('variant-count')!;
-        if (this.state.variantFilter === 'high' && variants.length < totalCount) {
-            badge.textContent = `${variants.length} of ${totalCount}`;
-        } else {
-            badge.textContent = totalCount.toString();
-        }
+        badge.textContent = inViewCount < variants.length
+            ? `${inViewCount} in view / ${totalCount}`
+            : totalCount.toString();
 
         variants.forEach((v, idx) => {
             const tr = document.createElement('tr');
             tr.dataset.index = idx.toString();
             tr.className = idx === this.state.selectedVariantIndex ? 'selected' : '';
             if (v.is_low_confidence) tr.classList.add('low-confidence');
+
+            // Mark variants within the current viewport
+            if (v.position >= vpStart && v.position <= vpEnd) {
+                tr.classList.add('in-view');
+            }
 
             // VAF color coding: green ≥40%, orange 20-40%, red <20%
             const vafColor = v.vaf >= 0.4 ? '#22c55e' : v.vaf >= 0.2 ? '#f97316' : '#ef4444';
@@ -699,11 +750,13 @@ class BAMCPViewer {
             const qual = v.mean_quality || 0;
             const qualColor = qual >= 30 ? '#22c55e' : qual >= 20 ? '#f97316' : '#ef4444';
 
-            // Strand counts: "5F:3R" format from evidence if available
-            const evidence = this.state.data?.variant_evidence?.[`${v.position}:${v.ref}>${v.alt}`];
+            // Strand counts: "5F:3R" format from accumulated evidence
+            const evidence = this.state.store.getEvidence(`${v.position}:${v.ref}>${v.alt}`);
             const strandDisplay = evidence
                 ? `${evidence.forward_count}F:${evidence.reverse_count}R`
-                : (v.alt_count ?? 0) > 0 ? `${v.alt_count}` : '-';
+                : (v.strand_forward != null && v.strand_reverse != null)
+                    ? `${v.strand_forward}F:${v.strand_reverse}R`
+                    : '-';
 
             tr.innerHTML = `
                 <td>${v.position.toLocaleString()}</td>
@@ -840,7 +893,7 @@ class BAMCPViewer {
 
     private showVariantEvidence(variant: Variant): void {
         this.evidencePanel.classList.add('visible');
-        const evidence = this.state.data?.variant_evidence?.[`${variant.position}:${variant.ref}>${variant.alt}`];
+        const evidence = this.state.store.getEvidence(`${variant.position}:${variant.ref}>${variant.alt}`);
 
         // Update Title
         document.getElementById('evidence-title')!.textContent =

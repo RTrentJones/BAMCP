@@ -6,7 +6,7 @@
  * Clears everything on contig change.
  */
 
-import { RegionData, Variant } from "./types";
+import { RegionData, Variant, VariantEvidence } from "./types";
 
 interface Tile {
     data: RegionData;
@@ -16,6 +16,7 @@ interface Tile {
 export class DataStore {
     private tiles = new Map<string, Tile>();
     private variants = new Map<string, Variant>();
+    private evidence = new Map<string, VariantEvidence>();
     private currentContig: string | null = null;
 
     static readonly MAX_TILES = 20;
@@ -76,6 +77,13 @@ export class DataStore {
         for (const v of data.variants) {
             this.variants.set(DataStore.variantKey(v), v);
         }
+
+        // Merge variant evidence (keyed by "position:ref>alt")
+        if (data.variant_evidence) {
+            for (const [key, ev] of Object.entries(data.variant_evidence)) {
+                this.evidence.set(key, ev);
+            }
+        }
     }
 
     /**
@@ -108,6 +116,11 @@ export class DataStore {
         return Array.from(this.variants.values());
     }
 
+    /** Look up accumulated evidence for a variant by key ("position:ref>alt"). */
+    public getEvidence(key: string): VariantEvidence | undefined {
+        return this.evidence.get(key);
+    }
+
     /** Number of cached tiles. */
     public get tileCount(): number {
         return this.tiles.size;
@@ -117,6 +130,7 @@ export class DataStore {
     public clear(): void {
         this.tiles.clear();
         this.variants.clear();
+        this.evidence.clear();
         this.currentContig = null;
     }
 

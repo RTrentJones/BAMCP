@@ -431,6 +431,10 @@
         #variant-panel tbody tr:hover { background: var(--color-bg-highlight); }
         #variant-panel tbody tr.selected { background: var(--color-bg-selected); }
 
+        /* In-view vs out-of-view variants */
+        #variant-panel tbody tr.in-view { border-left: 3px solid var(--color-primary, #3b82f6); }
+        #variant-panel tbody tr:not(.in-view) { opacity: 0.55; border-left: 3px solid transparent; }
+
         /* Low-confidence variant */
         #variant-panel tbody tr.low-confidence { opacity: 0.6; }
         #variant-panel tbody tr.low-confidence td:first-child::before {

@@ -214,13 +214,13 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
 
     /**
      * Directly invoke visualize_region tool using callServerTool.
-     * More reliable than sendMessage which depends on LLM parsing.
+     * Returns the parsed RegionData or null on error/stale.
      *
-     * Note: callServerTool returns result via Promise, NOT via ontoolresult callback.
-     * The ontoolresult callback only fires for tool calls initiated by the HOST.
+     * Callers decide how to load the data (loadTile vs loadData),
+     * keeping this path separate from host-initiated ontoolresult.
      */
-    public async fetchRegionDirect(filePath: string, region: string, reference?: string): Promise<void> {
-        if (!this.app) return;
+    public async fetchRegionDirect(filePath: string, region: string, reference?: string): Promise<RegionData | null> {
+        if (!this.app) return null;
         const args: Record<string, string> = { file_path: filePath, region: region };
         if (reference) {
             args.reference = reference;
@@ -241,33 +241,35 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
             // Discard if newer data arrived while we were waiting
             if (this.dataVersion !== version) {
                 this.updateDebug('lastToolCall', `${toolCallInfo} → STALE (discarded)`);
-                return;
+                return null;
             }
 
-            // Handle result directly from Promise return value
             if (result.isError) {
                 this.updateDebug('lastToolCall', `${toolCallInfo} → ERROR`);
                 console.warn('callServerTool returned error:', result.content);
-                return;
+                return null;
             }
 
             // Extract data from structuredContent or content
+            let data: RegionData | null = null;
             if (result.structuredContent) {
-                this.handleData(result.structuredContent as unknown as RegionData);
+                data = result.structuredContent as unknown as RegionData;
             } else if (result.content) {
                 const text = result.content.find(c => c.type === 'text');
                 if (text && 'text' in text) {
                     try {
-                        this.handleData(JSON.parse(text.text));
+                        data = JSON.parse(text.text);
                     } catch (e) {
                         console.warn('Failed to parse content text:', e);
                     }
                 }
             }
             this.updateDebug('lastToolCall', `${toolCallInfo} → OK`);
+            return data;
         } catch (e) {
             this.updateDebug('lastToolCall', `${toolCallInfo} → ERROR: ${e}`);
             console.warn('callServerTool failed:', e);
+            return null;
         }
     }
 

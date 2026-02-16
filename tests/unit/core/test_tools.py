@@ -999,9 +999,7 @@ class TestHandleScanVariants:
     @pytest.mark.asyncio
     async def test_requires_reference(self, small_bam_path, config):
         """Should return error when no reference is configured."""
-        result = await handle_scan_variants(
-            {"file_path": small_bam_path, "contig": "chr1"}, config
-        )
+        result = await handle_scan_variants({"file_path": small_bam_path, "contig": "chr1"}, config)
         payload = json.loads(result["content"][0]["text"])
         assert "error" in payload
         assert "reference" in payload["error"].lower()

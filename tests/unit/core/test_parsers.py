@@ -525,9 +525,7 @@ class TestScanVariantsChunked:
     @pytest.mark.unit
     def test_scans_contig(self, small_bam_path, ref_fasta_path):
         """Should find variants across chr1."""
-        variants = scan_variants_chunked(
-            small_bam_path, "chr1", ref_fasta_path, chunk_size=500
-        )
+        variants = scan_variants_chunked(small_bam_path, "chr1", ref_fasta_path, chunk_size=500)
         assert isinstance(variants, list)
         # All variants should be on chr1
         for v in variants:
@@ -540,9 +538,7 @@ class TestScanVariantsChunked:
     @pytest.mark.unit
     def test_sorted_by_vaf(self, small_bam_path, ref_fasta_path):
         """Results should be sorted by VAF descending."""
-        variants = scan_variants_chunked(
-            small_bam_path, "chr1", ref_fasta_path, chunk_size=500
-        )
+        variants = scan_variants_chunked(small_bam_path, "chr1", ref_fasta_path, chunk_size=500)
         if len(variants) >= 2:
             for i in range(len(variants) - 1):
                 assert variants[i]["vaf"] >= variants[i + 1]["vaf"]
@@ -550,28 +546,20 @@ class TestScanVariantsChunked:
     @pytest.mark.unit
     def test_nonexistent_contig(self, small_bam_path, ref_fasta_path):
         """Should return empty list for nonexistent contig."""
-        variants = scan_variants_chunked(
-            small_bam_path, "chrZ", ref_fasta_path
-        )
+        variants = scan_variants_chunked(small_bam_path, "chrZ", ref_fasta_path)
         assert variants == []
 
     @pytest.mark.unit
     def test_respects_min_vaf(self, small_bam_path, ref_fasta_path):
         """Higher min_vaf should return fewer or equal variants."""
-        all_variants = scan_variants_chunked(
-            small_bam_path, "chr1", ref_fasta_path, min_vaf=0.05
-        )
-        strict_variants = scan_variants_chunked(
-            small_bam_path, "chr1", ref_fasta_path, min_vaf=0.5
-        )
+        all_variants = scan_variants_chunked(small_bam_path, "chr1", ref_fasta_path, min_vaf=0.05)
+        strict_variants = scan_variants_chunked(small_bam_path, "chr1", ref_fasta_path, min_vaf=0.5)
         assert len(strict_variants) <= len(all_variants)
 
     @pytest.mark.unit
     def test_respects_min_depth(self, small_bam_path, ref_fasta_path):
         """Higher min_depth should return fewer or equal variants."""
-        all_variants = scan_variants_chunked(
-            small_bam_path, "chr1", ref_fasta_path, min_depth=1
-        )
+        all_variants = scan_variants_chunked(small_bam_path, "chr1", ref_fasta_path, min_depth=1)
         strict_variants = scan_variants_chunked(
             small_bam_path, "chr1", ref_fasta_path, min_depth=10
         )

@@ -443,9 +443,7 @@ def scan_variants_chunked(
                     chunk_end,
                     quality_threshold=0,
                     read_callback=lambda r: (
-                        not r.is_unmapped
-                        and not r.is_secondary
-                        and not r.is_supplementary
+                        not r.is_unmapped and not r.is_secondary and not r.is_supplementary
                     ),
                 )
 

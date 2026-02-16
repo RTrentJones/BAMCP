@@ -560,8 +560,10 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
                 {
                     "type": "text",
                     "text": json.dumps(
-                        {"error": "Reference genome required for variant scanning. "
-                         "Use list_contigs to detect genome build and get a reference URL."}
+                        {
+                            "error": "Reference genome required for variant scanning. "
+                            "Use list_contigs to detect genome build and get a reference URL."
+                        }
                     ),
                 }
             ]
@@ -589,7 +591,9 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps({"error": f"Scan timed out after {SCAN_VARIANTS_TIMEOUT_SECONDS}s"}),
+                    "text": json.dumps(
+                        {"error": f"Scan timed out after {SCAN_VARIANTS_TIMEOUT_SECONDS}s"}
+                    ),
                 }
             ]
         }

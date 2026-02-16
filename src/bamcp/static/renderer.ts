@@ -334,22 +334,27 @@ export class Renderer {
     ): void {
         const pixelWidth = 1 / scale;
         const data = this.state.data!;
-        const viewStart = Math.max(0, this.state.viewport.start - data.start);
+        // No clamping — allow negative values so pixels before data.start
+        // are correctly skipped rather than filled with shifted reference data
+        const viewStart = this.state.viewport.start - data.start;
 
         for (let px = 0; px < width; px++) {
             const baseStart = Math.floor(viewStart + px * pixelWidth);
             const baseEnd = Math.min(refSeq.length, Math.ceil(viewStart + (px + 1) * pixelWidth));
 
             if (baseStart >= refSeq.length) break;
+            if (baseEnd <= 0) continue;  // Skip pixels before data range
+
+            const safeStart = Math.max(0, baseStart);
 
             const counts: Record<string, number> = { A: 0, T: 0, G: 0, C: 0 };
-            for (let i = baseStart; i < baseEnd; i++) {
+            for (let i = safeStart; i < baseEnd; i++) {
                 const base = refSeq[i].toUpperCase();
                 if (counts[base] !== undefined) counts[base]++;
             }
 
             let y = 2;
-            const total = baseEnd - baseStart;
+            const total = baseEnd - safeStart;
             for (const [base, count] of Object.entries(counts)) {
                 if (count === 0) continue;
                 const h = (count / total) * (height - 4);

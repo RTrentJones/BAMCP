@@ -60,6 +60,12 @@ class BAMCPViewer {
     private static readonly SEQUENCE_REGION_THRESHOLD = 500;
     private static readonly SEQUENCE_FETCH_TIMEOUT_MS = 3000;
 
+    // Viewport refetch state — auto-load data when panning/zooming beyond loaded range
+    private pendingViewportFetch = false;
+    private viewportRefetchTimer: ReturnType<typeof setTimeout> | null = null;
+    private static readonly VIEWPORT_REFETCH_OVERLAP = 0.5;     // refetch when <50% overlap
+    private static readonly VIEWPORT_REFETCH_DEBOUNCE_MS = 400;
+
     constructor() {
         this.client = new BAMCPClient();
         this.state = new StateManager();
@@ -77,16 +83,33 @@ class BAMCPViewer {
 
         // Setup callbacks
         this.client.setOnDataReceived(data => {
-            // Clear pending state and timers
+            // Clear sequence loading state
             this.pendingSequenceRequest = false;
             if (this.sequenceFallbackTimer) {
                 clearTimeout(this.sequenceFallbackTimer);
                 this.sequenceFallbackTimer = null;
             }
+            // Cancel any pending viewport refetch timer (fresh data just arrived)
+            if (this.viewportRefetchTimer) {
+                clearTimeout(this.viewportRefetchTimer);
+                this.viewportRefetchTimer = null;
+            }
             this.sequenceNotice.classList.add('hidden');
             this.sequenceNotice.classList.remove('loading');
 
+            // Preserve viewport if this was a viewport-triggered refetch
+            const savedViewport = this.pendingViewportFetch
+                ? { ...this.state.viewport }
+                : null;
+            this.pendingViewportFetch = false;
+
             this.state.loadData(data);
+
+            if (savedViewport) {
+                this.state.viewport.start = savedViewport.start;
+                this.state.viewport.end = savedViewport.end;
+            }
+
             this.renderVariantTable();
             this.renderer.resize();
             this.scheduleContextUpdate();
@@ -451,6 +474,7 @@ class BAMCPViewer {
         this.state.viewport.end += bpDelta;
         this.renderer.render();
         this.scheduleContextUpdate();
+        this.checkAndFetchViewport();
     }
 
     private zoom(factor: number): void {
@@ -465,6 +489,7 @@ class BAMCPViewer {
 
         // Check if we need to fetch sequences for base-level view
         this.checkAndRequestSequences();
+        this.checkAndFetchViewport();
     }
 
     /**
@@ -559,6 +584,59 @@ class BAMCPViewer {
         }
     }
 
+    /**
+     * Check if viewport has moved beyond the loaded data range and trigger
+     * a debounced refetch if needed. Uses trailing-edge debounce so the
+     * fetch fires after the user stops panning/zooming.
+     */
+    private checkAndFetchViewport(): void {
+        const data = this.state.data;
+        if (!data || !data.file_path) return;
+
+        // Calculate overlap between current viewport and loaded data range
+        const vpStart = this.state.viewport.start;
+        const vpEnd = this.state.viewport.end;
+        const vpSpan = vpEnd - vpStart;
+
+        const overlapStart = Math.max(vpStart, data.start);
+        const overlapEnd = Math.min(vpEnd, data.end);
+        const overlap = Math.max(0, overlapEnd - overlapStart);
+        const overlapRatio = vpSpan > 0 ? overlap / vpSpan : 1;
+
+        // If viewport is mostly within loaded data, no refetch needed
+        if (overlapRatio >= BAMCPViewer.VIEWPORT_REFETCH_OVERLAP) return;
+
+        // Trailing-edge debounce: clear previous timer, set new one
+        if (this.viewportRefetchTimer) {
+            clearTimeout(this.viewportRefetchTimer);
+        }
+
+        this.viewportRefetchTimer = setTimeout(() => {
+            this.viewportRefetchTimer = null;
+
+            // Re-validate after delay (user may have panned back into range)
+            const d = this.state.data;
+            if (!d || !d.file_path) return;
+            const vs = this.state.viewport.start;
+            const ve = this.state.viewport.end;
+            const sp = ve - vs;
+            const os = Math.max(vs, d.start);
+            const oe = Math.min(ve, d.end);
+            const ol = sp > 0 ? Math.max(0, oe - os) / sp : 1;
+            if (ol >= BAMCPViewer.VIEWPORT_REFETCH_OVERLAP) return;
+            if (this.pendingViewportFetch) return;
+
+            // Pad fetch region by 50% each side to reduce subsequent refetches
+            const padding = sp * 0.5;
+            const fetchStart = Math.max(0, Math.floor(vs - padding));
+            const fetchEnd = Math.ceil(ve + padding);
+            const region = `${d.contig}:${fetchStart}-${fetchEnd}`;
+
+            this.pendingViewportFetch = true;
+            this.client.fetchRegionDirect(d.file_path, region);
+        }, BAMCPViewer.VIEWPORT_REFETCH_DEBOUNCE_MS);
+    }
+
     private scheduleContextUpdate(): void {
         if (this._contextUpdateTimer) {
             clearTimeout(this._contextUpdateTimer);
@@ -586,8 +664,14 @@ class BAMCPViewer {
         // variantTable IS the tbody element (id="variant-table")
         this.variantTable.innerHTML = '';
 
-        // Update variant count badge
-        document.getElementById('variant-count')!.textContent = variants.length.toString();
+        // Update variant count badge — show "X of Y" when filter hides variants
+        const totalCount = this.state.data?.variants.length ?? 0;
+        const badge = document.getElementById('variant-count')!;
+        if (this.state.variantFilter === 'high' && variants.length < totalCount) {
+            badge.textContent = `${variants.length} of ${totalCount}`;
+        } else {
+            badge.textContent = totalCount.toString();
+        }
 
         variants.forEach((v, idx) => {
             const tr = document.createElement('tr');

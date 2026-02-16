@@ -18,6 +18,11 @@ export class BAMCPClient {
     private debugInfo: DebugInfo = { lastContext: null, lastToolCall: null };
     private onDebugCallback: ((info: DebugInfo) => void) | null = null;
 
+    // Monotonic version counter to discard stale fetchRegionDirect responses.
+    // Bumped by ontoolresult (host-initiated data) so in-flight app-initiated
+    // fetches don't overwrite newer data.
+    private dataVersion = 0;
+
     constructor() {
         // Initialize callback
     }
@@ -58,8 +63,10 @@ export class BAMCPClient {
                 { availableDisplayModes: ['inline', 'fullscreen', 'pip'] },
             );
 
-            // Set ontoolresult BEFORE connect() to receive the initial tool result
+            // Set ontoolresult BEFORE connect() to receive the initial tool result.
+            // Bump dataVersion to invalidate any in-flight fetchRegionDirect calls.
             this.app.ontoolresult = (params: any) => {
+                this.dataVersion++;
                 const typedParams = params as ToolResultParams;
                 if (typedParams.structuredContent) {
                     this.handleData(typedParams.structuredContent);
@@ -221,11 +228,21 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         const toolCallInfo = `visualize_region(${JSON.stringify(args)})`;
         this.updateDebug('lastToolCall', toolCallInfo);
 
+        // Capture version before await — if ontoolresult fires while we wait,
+        // dataVersion increments and we discard this stale response.
+        const version = this.dataVersion;
+
         try {
             const result = await this.app.callServerTool({
                 name: 'visualize_region',
                 arguments: args
             });
+
+            // Discard if newer data arrived while we were waiting
+            if (this.dataVersion !== version) {
+                this.updateDebug('lastToolCall', `${toolCallInfo} → STALE (discarded)`);
+                return;
+            }
 
             // Handle result directly from Promise return value
             if (result.isError) {

@@ -413,8 +413,10 @@ export class Renderer {
             else ctx.lineTo(x, height - h);
         }
 
-        ctx.lineTo((data.end - this.state.viewport.start) * scale, height);
-        ctx.lineTo(0, height);
+        const xEnd = (data.end - this.state.viewport.start) * scale;
+        const xStart = (data.start - this.state.viewport.start) * scale;
+        ctx.lineTo(xEnd, height);
+        ctx.lineTo(xStart, height);
         ctx.closePath();
         ctx.fill();
         ctx.stroke();

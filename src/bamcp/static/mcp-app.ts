@@ -97,17 +97,13 @@ class BAMCPViewer {
             this.sequenceNotice.classList.add('hidden');
             this.sequenceNotice.classList.remove('loading');
 
-            // Preserve viewport if this was a viewport-triggered refetch
-            const savedViewport = this.pendingViewportFetch
-                ? { ...this.state.viewport }
-                : null;
-            this.pendingViewportFetch = false;
-
-            this.state.loadData(data);
-
-            if (savedViewport) {
-                this.state.viewport.start = savedViewport.start;
-                this.state.viewport.end = savedViewport.end;
+            if (this.pendingViewportFetch) {
+                // Viewport-triggered refetch: preserve viewport position
+                this.pendingViewportFetch = false;
+                this.state.loadTile(data);
+            } else {
+                // Host-initiated data (ontoolresult, gene jump): reset viewport
+                this.state.loadData(data);
             }
 
             this.renderVariantTable();
@@ -606,6 +602,15 @@ class BAMCPViewer {
         // If viewport is mostly within loaded data, no refetch needed
         if (overlapRatio >= BAMCPViewer.VIEWPORT_REFETCH_OVERLAP) return;
 
+        // Check tile cache before fetching — activate instantly if found
+        const cached = this.state.store.bestTile(data.contig, vpStart, vpEnd);
+        if (cached) {
+            this.state.activateTile(cached);
+            this.renderer.render();
+            this.renderVariantTable();
+            return;
+        }
+
         // Trailing-edge debounce: clear previous timer, set new one
         if (this.viewportRefetchTimer) {
             clearTimeout(this.viewportRefetchTimer);
@@ -624,6 +629,15 @@ class BAMCPViewer {
             const oe = Math.min(ve, d.end);
             const ol = sp > 0 ? Math.max(0, oe - os) / sp : 1;
             if (ol >= BAMCPViewer.VIEWPORT_REFETCH_OVERLAP) return;
+
+            // Re-check tile cache (may have been populated while debouncing)
+            const cachedTile = this.state.store.bestTile(d.contig, vs, ve);
+            if (cachedTile) {
+                this.state.activateTile(cachedTile);
+                this.renderer.render();
+                this.renderVariantTable();
+                return;
+            }
 
             // Pad fetch region by 50% each side to reduce subsequent refetches
             const padding = sp * 0.5;
@@ -664,7 +678,7 @@ class BAMCPViewer {
         this.variantTable.innerHTML = '';
 
         // Update variant count badge — show "X of Y" when filter hides variants
-        const totalCount = this.state.data?.variants.length ?? 0;
+        const totalCount = this.state.store.getAllVariants().length;
         const badge = document.getElementById('variant-count')!;
         if (this.state.variantFilter === 'high' && variants.length < totalCount) {
             badge.textContent = `${variants.length} of ${totalCount}`;

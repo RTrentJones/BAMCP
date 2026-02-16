@@ -382,3 +382,83 @@ def detect_variants(
                 )
 
     return variants
+
+
+def scan_variants_chunked(
+    bam_path: str,
+    contig: str,
+    reference_path: str,
+    chunk_size: int = 50_000,
+    min_vaf: float = 0.1,
+    min_depth: int = 3,
+    max_region: int = 250_000_000,
+    index_filename: str | None = None,
+) -> list[dict]:
+    """Scan an entire contig for variants using fast coverage-based detection.
+
+    Uses pysam's count_coverage (C implementation) in chunks — no read
+    extraction — so scanning a full human chromosome is feasible.
+
+    Args:
+        bam_path: Path to BAM/CRAM file.
+        contig: Contig to scan (e.g. "chr13").
+        reference_path: Path to reference FASTA (required).
+        chunk_size: Window size per iteration.
+        min_vaf: Minimum variant allele frequency.
+        min_depth: Minimum read depth.
+        max_region: Maximum bases to scan (safety limit).
+        index_filename: Path to cached index file for remote BAMs.
+
+    Returns:
+        List of variant dicts sorted by VAF descending, capped at 500.
+    """
+    from ..constants import SCAN_VARIANTS_MAX_RESULTS
+
+    mode = "rc" if bam_path.endswith(".cram") else "rb"
+    all_variants: list[dict] = []
+
+    with pysam.AlignmentFile(
+        bam_path,
+        mode,  # type: ignore[arg-type]
+        reference_filename=reference_path,
+        index_filename=index_filename,
+    ) as samfile:
+        # Get contig length from header
+        contig_lengths = dict(zip(samfile.references, samfile.lengths, strict=False))
+        contig_length = contig_lengths.get(contig)
+        if contig_length is None:
+            return []
+
+        scan_end = min(contig_length, max_region)
+
+        with pysam.FastaFile(reference_path) as fasta:
+            for chunk_start in range(0, scan_end, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, scan_end)
+
+                ref_seq = fasta.fetch(contig, chunk_start, chunk_end)
+
+                cov_A, cov_C, cov_G, cov_T = samfile.count_coverage(
+                    contig,
+                    chunk_start,
+                    chunk_end,
+                    quality_threshold=0,
+                    read_callback=lambda r: (
+                        not r.is_unmapped
+                        and not r.is_secondary
+                        and not r.is_supplementary
+                    ),
+                )
+
+                chunk_variants = detect_variants(
+                    (cov_A, cov_C, cov_G, cov_T),
+                    ref_seq,
+                    contig,
+                    chunk_start,
+                    min_vaf,
+                    min_depth,
+                )
+                all_variants.extend(chunk_variants)
+
+    # Sort by VAF descending and cap results
+    all_variants.sort(key=lambda v: v["vaf"], reverse=True)
+    return all_variants[:SCAN_VARIANTS_MAX_RESULTS]

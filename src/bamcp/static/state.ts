@@ -1,3 +1,4 @@
+import { DataStore } from "./data-store";
 import { Read, RegionData, Variant, ViewerSettings } from "./types";
 
 // Default viewer settings
@@ -13,6 +14,7 @@ export class StateManager {
     public data: RegionData | null = null;
     public viewport = { start: 0, end: 1000 };
     public packedRows: Read[][] = [];
+    public store = new DataStore();
 
     // Maps
     public mateIndex: Map<string, Read> = new Map();
@@ -34,10 +36,28 @@ export class StateManager {
 
     constructor() { }
 
+    /** Load new data from host (ontoolresult) — resets viewport. */
     public loadData(data: RegionData): void {
+        this.store.ingest(data);
         this.data = data;
         this.viewport = { start: data.start, end: data.end };
 
+        this.buildMateIndex();
+        this.packReads();
+    }
+
+    /** Load a tile from viewport refetch — preserves current viewport. */
+    public loadTile(data: RegionData): void {
+        this.store.ingest(data);
+        this.data = data;
+
+        this.buildMateIndex();
+        this.packReads();
+    }
+
+    /** Activate an already-cached tile without fetching. */
+    public activateTile(data: RegionData): void {
+        this.data = data;
         this.buildMateIndex();
         this.packReads();
     }
@@ -158,7 +178,8 @@ export class StateManager {
     public getFilteredAndSortedVariants(): Variant[] {
         if (!this.data) return [];
 
-        let variants = [...this.data.variants];
+        // Use accumulated variants from DataStore (persists across tile fetches)
+        let variants = this.store.getAllVariants();
 
         // Filter: use backend-computed confidence field (high/medium/low)
         if (this.variantFilter === 'high') {

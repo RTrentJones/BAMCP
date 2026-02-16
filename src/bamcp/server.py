@@ -17,6 +17,7 @@ from .core.tools import (
     handle_list_contigs,
     handle_lookup_clinvar,
     handle_lookup_gnomad,
+    handle_scan_variants,
     handle_visualize_region,
 )
 from .resources import get_viewer_html
@@ -252,6 +253,32 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
                 "strand": result.strand,
             }
         )
+
+    # -- Scanning Tools -------------------------------------------------------
+
+    @mcp.tool(
+        description=(
+            "Scan an entire contig for variants using fast coverage-based detection. "
+            "Requires a reference genome. Returns up to 500 variants ranked by VAF. "
+            "Use list_contigs first to detect genome build and get a reference URL."
+        ),
+    )
+    async def scan_variants(
+        file_path: str,
+        contig: str = "chr1",
+        reference: str | None = None,
+        min_vaf: float | None = None,
+        min_depth: int | None = None,
+    ) -> str:
+        args: dict = {"file_path": file_path, "contig": contig}
+        if reference is not None:
+            args["reference"] = reference
+        if min_vaf is not None:
+            args["min_vaf"] = min_vaf
+        if min_depth is not None:
+            args["min_depth"] = min_depth
+        result = await handle_scan_variants(args, config)
+        return str(result["content"][0]["text"])
 
     # -- Cache Management Tool -----------------------------------------------
 

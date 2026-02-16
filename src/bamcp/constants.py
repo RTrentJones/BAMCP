@@ -38,6 +38,12 @@ REMOTE_FILE_SCHEMES = ("http://", "https://")
 # Timeout for BAM/CRAM parsing operations (seconds)
 BAM_PARSE_TIMEOUT_SECONDS = 30.0
 
+# Whole-contig variant scanning
+SCAN_VARIANTS_TIMEOUT_SECONDS = 120.0
+SCAN_VARIANTS_CHUNK_SIZE = 50_000
+SCAN_VARIANTS_MAX_REGION = 250_000_000
+SCAN_VARIANTS_MAX_RESULTS = 500
+
 # UI constants
 VIEWER_RESOURCE_URI = "ui://bamcp/viewer"
 

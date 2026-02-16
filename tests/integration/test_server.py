@@ -45,6 +45,7 @@ class TestCreateServer:
             "lookup_gnomad",
             "get_variant_curation_summary",
             "search_gene",
+            "scan_variants",
             "cleanup_cache",
         }
         assert expected == tool_names

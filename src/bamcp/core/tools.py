@@ -19,10 +19,13 @@ from ..config import BAMCPConfig
 from ..constants import (
     BAM_PARSE_TIMEOUT_SECONDS,
     DEFAULT_CONTIG,
+    SCAN_VARIANTS_CHUNK_SIZE,
+    SCAN_VARIANTS_MAX_REGION,
+    SCAN_VARIANTS_TIMEOUT_SECONDS,
     VIEWER_RESOURCE_URI,
 )
 from .cache import BAMIndexCache
-from .parsers import RegionData, fetch_region
+from .parsers import RegionData, fetch_region, scan_variants_chunked
 from .serialization import serialize_region_data
 from .validation import validate_path, validate_region, validate_variant_input
 
@@ -540,3 +543,68 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
     payload["disclaimer"] = _GNOMAD_DISCLAIMER
 
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+
+
+async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dict:
+    """Scan an entire contig for variants using fast coverage-based detection."""
+    file_path = args["file_path"]
+    validate_path(file_path, config)
+    contig = args.get("contig", DEFAULT_CONTIG)
+    reference = args.get("reference", config.reference)
+    min_vaf = args.get("min_vaf", config.min_vaf)
+    min_depth = args.get("min_depth", config.min_depth)
+
+    if not reference:
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {"error": "Reference genome required for variant scanning. "
+                         "Use list_contigs to detect genome build and get a reference URL."}
+                    ),
+                }
+            ]
+        }
+
+    index_path = await _ensure_cached_index(file_path, config)
+
+    try:
+        variants = await asyncio.wait_for(
+            asyncio.to_thread(
+                scan_variants_chunked,
+                file_path,
+                contig,
+                reference,
+                chunk_size=SCAN_VARIANTS_CHUNK_SIZE,
+                min_vaf=min_vaf,
+                min_depth=min_depth,
+                max_region=SCAN_VARIANTS_MAX_REGION,
+                index_filename=index_path,
+            ),
+            timeout=SCAN_VARIANTS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps({"error": f"Scan timed out after {SCAN_VARIANTS_TIMEOUT_SECONDS}s"}),
+                }
+            ]
+        }
+
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "contig": contig,
+                        "variants": variants,
+                        "count": len(variants),
+                    }
+                ),
+            }
+        ]
+    }

@@ -23,6 +23,7 @@ from bamcp.core.tools import (
     handle_list_contigs,
     handle_lookup_clinvar,
     handle_lookup_gnomad,
+    handle_scan_variants,
     handle_visualize_region,
 )
 
@@ -989,3 +990,55 @@ class TestHandleGetVariantCurationSummary:
         )
         text = result["content"][0]["text"]
         assert "Invalid" in text
+
+
+class TestHandleScanVariants:
+    """Tests for handle_scan_variants tool handler."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_requires_reference(self, small_bam_path, config):
+        """Should return error when no reference is configured."""
+        result = await handle_scan_variants(
+            {"file_path": small_bam_path, "contig": "chr1"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert "error" in payload
+        assert "reference" in payload["error"].lower()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_returns_variants(self, small_bam_path, config_with_ref):
+        """Should return ranked variants for chr1."""
+        result = await handle_scan_variants(
+            {"file_path": small_bam_path, "contig": "chr1"}, config_with_ref
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert "variants" in payload
+        assert "contig" in payload
+        assert payload["contig"] == "chr1"
+        assert isinstance(payload["variants"], list)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_variants_sorted_by_vaf(self, small_bam_path, config_with_ref):
+        """Returned variants should be sorted by VAF descending."""
+        result = await handle_scan_variants(
+            {"file_path": small_bam_path, "contig": "chr1"}, config_with_ref
+        )
+        payload = json.loads(result["content"][0]["text"])
+        variants = payload["variants"]
+        if len(variants) >= 2:
+            for i in range(len(variants) - 1):
+                assert variants[i]["vaf"] >= variants[i + 1]["vaf"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_nonexistent_contig_empty(self, small_bam_path, config_with_ref):
+        """Should return empty list for nonexistent contig."""
+        result = await handle_scan_variants(
+            {"file_path": small_bam_path, "contig": "chrZ"}, config_with_ref
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["variants"] == []
+        assert payload["count"] == 0

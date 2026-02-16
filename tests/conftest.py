@@ -4,7 +4,19 @@ import os
 
 import pytest
 
+from bamcp.core import tools as _tools_module
+
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
+
+
+@pytest.fixture(autouse=True)
+def _reset_client_singletons():
+    """Reset module-level client singletons between tests."""
+    yield
+    _tools_module._clinvar_client = None
+    _tools_module._gnomad_client = None
+    _tools_module._gene_client = None
+    _tools_module._cache_instance = None
 
 
 @pytest.fixture

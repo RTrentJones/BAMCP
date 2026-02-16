@@ -88,12 +88,14 @@ class GnomadClient:
     timeout: float = 30.0
     _cache: BoundedTTLCache[GnomadResult | None] = field(default=None, repr=False)  # type: ignore[arg-type]
     _semaphore: asyncio.Semaphore = field(default=None, repr=False)  # type: ignore[assignment]
+    _http_client: httpx.AsyncClient = field(default=None, repr=False)  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         self._semaphore = asyncio.Semaphore(5)
         self._cache = BoundedTTLCache[GnomadResult | None](
             maxsize=API_CACHE_MAX_SIZE, ttl=API_CACHE_TTL_SECONDS
         )
+        self._http_client = httpx.AsyncClient(timeout=self.timeout)
 
     async def lookup(self, chrom: str, pos: int, ref: str, alt: str) -> GnomadResult | None:
         """
@@ -137,12 +139,15 @@ class GnomadClient:
             },
         }
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.post(GNOMAD_API_URL, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
+        resp = await self._http_client.post(GNOMAD_API_URL, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
 
         return _parse_response(data, variant_id)
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        await self._http_client.aclose()
 
 
 def _build_variant_id(chrom: str, pos: int, ref: str, alt: str) -> str:

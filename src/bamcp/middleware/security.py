@@ -27,8 +27,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
         )
         csp = (
-            "default-src 'self'; script-src 'self' 'unsafe-inline';"
-            " style-src 'self' 'unsafe-inline'"
+            "default-src 'self';"
+            " script-src 'self';"
+            " style-src 'self';"
+            " connect-src 'self';"
+            " img-src 'self' data:;"
+            " frame-ancestors 'none'"
         )
         response.headers.setdefault("Content-Security-Policy", csp)
 

@@ -13,6 +13,7 @@ import httpx
 import pysam
 
 from ..clients.clinvar import ClinVarClient
+from ..clients.genes import GeneClient
 from ..clients.gnomad import GnomadClient
 from ..config import BAMCPConfig
 from ..constants import (
@@ -27,8 +28,11 @@ from .validation import validate_path, validate_region, validate_variant_input
 
 logger = logging.getLogger(__name__)
 
-# Module-level cache instance for session consistency
+# Module-level singleton instances for session consistency and connection reuse
 _cache_instance: BAMIndexCache | None = None
+_clinvar_client: ClinVarClient | None = None
+_gnomad_client: GnomadClient | None = None
+_gene_client: GeneClient | None = None
 
 _CLINVAR_DISCLAIMER = (
     "Note: This is research-grade information from ClinVar and is not intended "
@@ -51,6 +55,33 @@ def get_cache(config: BAMCPConfig) -> BAMIndexCache:
     if _cache_instance is None:
         _cache_instance = BAMIndexCache(config.cache_dir, config.cache_ttl)
     return _cache_instance
+
+
+def get_clinvar_client(config: BAMCPConfig) -> ClinVarClient:
+    """Get or create the singleton ClinVar client."""
+    global _clinvar_client
+    if _clinvar_client is None:
+        _clinvar_client = ClinVarClient(api_key=config.ncbi_api_key)
+    return _clinvar_client
+
+
+def get_gnomad_client(config: BAMCPConfig) -> GnomadClient:
+    """Get or create the singleton gnomAD client."""
+    global _gnomad_client
+    if _gnomad_client is None:
+        _gnomad_client = GnomadClient(dataset=config.gnomad_dataset)
+    return _gnomad_client
+
+
+def get_gene_client(config: BAMCPConfig) -> GeneClient:
+    """Get or create the singleton gene client."""
+    global _gene_client
+    if _gene_client is None:
+        _gene_client = GeneClient(
+            api_key=config.ncbi_api_key,
+            genome_build=config.genome_build,
+        )
+    return _gene_client
 
 
 async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | None:
@@ -383,7 +414,7 @@ async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> di
             ]
         }
 
-    client = ClinVarClient(api_key=config.ncbi_api_key)
+    client = get_clinvar_client(config)
 
     try:
         result = await client.lookup(chrom, pos, ref, alt)
@@ -459,7 +490,7 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
             ]
         }
 
-    client = GnomadClient(dataset=config.gnomad_dataset)
+    client = get_gnomad_client(config)
 
     try:
         result = await client.lookup(chrom, pos, ref, alt)

@@ -55,6 +55,8 @@ class TestSecurityHeadersMiddleware:
         resp = client.get("/")
         csp = resp.headers["Content-Security-Policy"]
         assert "default-src 'self'" in csp
+        assert "unsafe-inline" not in csp
+        assert "frame-ancestors 'none'" in csp
 
     @pytest.mark.unit
     def test_does_not_override_existing_headers(self):

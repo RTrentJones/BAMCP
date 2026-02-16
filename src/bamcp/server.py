@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 
@@ -11,6 +9,7 @@ from .analysis.curation import handle_get_variant_curation_summary
 from .config import BAMCPConfig
 from .core.tools import (
     get_cache,
+    get_gene_client,
     handle_get_coverage,
     handle_get_region_summary,
     handle_get_variants,
@@ -24,9 +23,6 @@ from .resources import get_viewer_html
 
 _VIEWER_URI = "ui://bamcp/viewer"
 _VIEWER_META: dict = {"ui": {"resourceUri": _VIEWER_URI}}
-
-# MCP Apps extension capability (SEP-1865)
-_MCP_APPS_EXPERIMENTAL: dict[str, dict[str, Any]] = {"io.modelcontextprotocol/ui": {}}
 
 
 def create_server(config: BAMCPConfig | None = None) -> FastMCP:
@@ -49,21 +45,6 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         kwargs["auth"] = build_auth_settings(config)
 
     mcp = FastMCP(**kwargs)
-
-    # Advertise MCP Apps extension capability (SEP-1865)
-    # Patch create_initialization_options to include experimental capabilities
-    _original_create_init_opts = mcp._mcp_server.create_initialization_options
-
-    def _patched_create_init_opts(
-        notification_options: Any = None,
-        experimental_capabilities: dict[str, dict[str, Any]] | None = None,
-    ) -> Any:
-        merged = {**_MCP_APPS_EXPERIMENTAL}
-        if experimental_capabilities:
-            merged.update(experimental_capabilities)
-        return _original_create_init_opts(notification_options, merged)
-
-    mcp._mcp_server.create_initialization_options = _patched_create_init_opts  # type: ignore[method-assign]
 
     # -- Tools ---------------------------------------------------------------
     # Thin wrappers delegate to the existing handlers in tools.py.
@@ -257,17 +238,8 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     async def search_gene(symbol: str) -> str:
         import json
 
-        from .clients.genes import GeneClient
-
-        client = GeneClient(
-            api_key=config.ncbi_api_key,
-            genome_build=config.genome_build,
-        )
-
-        try:
-            result = await client.search(symbol)
-        finally:
-            await client.close()
+        client = get_gene_client(config)
+        result = await client.search(symbol)
 
         if result is None:
             return json.dumps({"error": f"Gene '{symbol}' not found"})

@@ -95,6 +95,7 @@ class ClinVarClient:
     _cache: BoundedTTLCache[ClinVarResult | None] = field(default=None, repr=False)  # type: ignore[arg-type]
     _semaphore: asyncio.Semaphore = field(default=None, repr=False)  # type: ignore[assignment]
     _rate_limiter: TokenBucketRateLimiter = field(default=None, repr=False)  # type: ignore[assignment]
+    _http_client: httpx.AsyncClient = field(default=None, repr=False)  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         max_concurrent = 10 if self.api_key else 3
@@ -105,6 +106,7 @@ class ClinVarClient:
         self._cache = BoundedTTLCache[ClinVarResult | None](
             maxsize=API_CACHE_MAX_SIZE, ttl=API_CACHE_TTL_SECONDS
         )
+        self._http_client = httpx.AsyncClient(timeout=self.timeout)
 
     async def lookup(self, chrom: str, pos: int, ref: str, alt: str) -> ClinVarResult | None:
         """
@@ -151,34 +153,39 @@ class ClinVarClient:
         if self.api_key:
             params["api_key"] = self.api_key
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            # Step 1: esearch to find variation IDs
-            search_resp = await client.get(f"{EUTILS_BASE}esearch.fcgi", params=params)
-            search_resp.raise_for_status()
-            search_data = search_resp.json()
+        # Step 1: esearch to find variation IDs
+        search_resp = await self._http_client.get(f"{EUTILS_BASE}esearch.fcgi", params=params)
+        search_resp.raise_for_status()
+        search_data = search_resp.json()
 
-            id_list = search_data.get("esearchresult", {}).get("idlist", [])
-            if not id_list:
-                logger.debug("ClinVar: no results for %s", term)
-                return None
+        id_list = search_data.get("esearchresult", {}).get("idlist", [])
+        if not id_list:
+            logger.debug("ClinVar: no results for %s", term)
+            return None
 
-            # Rate limit before second request
-            await self._rate_limiter.acquire()
+        # Rate limit before second request
+        await self._rate_limiter.acquire()
 
-            # Step 2: esummary to get annotation details
-            summary_params: dict[str, str | int] = {
-                "db": "clinvar",
-                "id": ",".join(id_list[:5]),
-                "retmode": "json",
-            }
-            if self.api_key:
-                summary_params["api_key"] = self.api_key
+        # Step 2: esummary to get annotation details
+        summary_params: dict[str, str | int] = {
+            "db": "clinvar",
+            "id": ",".join(id_list[:5]),
+            "retmode": "json",
+        }
+        if self.api_key:
+            summary_params["api_key"] = self.api_key
 
-            summary_resp = await client.get(f"{EUTILS_BASE}esummary.fcgi", params=summary_params)
-            summary_resp.raise_for_status()
-            summary_data = summary_resp.json()
+        summary_resp = await self._http_client.get(
+            f"{EUTILS_BASE}esummary.fcgi", params=summary_params
+        )
+        summary_resp.raise_for_status()
+        summary_data = summary_resp.json()
 
-            return _parse_summary(summary_data)
+        return _parse_summary(summary_data)
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        await self._http_client.aclose()
 
 
 def _build_search_term(chrom: str, pos: int, ref: str, alt: str) -> str:

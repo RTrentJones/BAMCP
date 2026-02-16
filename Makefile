@@ -11,7 +11,7 @@ test:
 
 test-e2e:
 	playwright install chromium
-	python -m pytest tests/e2e/ -v
+	python -m pytest tests/e2e/ -v --no-cov
 
 test-all: test test-e2e
 

@@ -63,7 +63,7 @@ jobs:
           node-version: "20"
       - run: make install
       - run: playwright install --with-deps chromium
-      - run: python -m pytest tests/e2e/ -v
+      - run: python -m pytest tests/e2e/ -v --no-cov
       - uses: actions/upload-artifact@v6
         if: failure()
         with:

@@ -439,19 +439,23 @@ class BAMCPViewer {
     }
 
     private loadSettings(): void {
-        const saved = localStorage.getItem('bamcp-viewer-settings');
-        if (saved) {
-            try {
+        try {
+            const saved = localStorage.getItem('bamcp-viewer-settings');
+            if (saved) {
                 const parsed = JSON.parse(saved) as Partial<ViewerSettings>;
                 this.state.settings = { ...DEFAULT_SETTINGS, ...parsed };
-            } catch {
-                // Ignore parse errors, use defaults
             }
+        } catch {
+            // localStorage may be unavailable (e.g. sandboxed iframe, about:blank)
         }
     }
 
     private saveSettings(): void {
-        localStorage.setItem('bamcp-viewer-settings', JSON.stringify(this.state.settings));
+        try {
+            localStorage.setItem('bamcp-viewer-settings', JSON.stringify(this.state.settings));
+        } catch {
+            // localStorage may be unavailable
+        }
     }
 
     private pan(dxPixels: number): void {

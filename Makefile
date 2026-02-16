@@ -1,4 +1,4 @@
-.PHONY: install test test-e2e lint format typecheck docker-build docker-test clean coverage build-viewer
+.PHONY: install test test-e2e test-all lint format typecheck docker-build docker-test clean coverage build-viewer
 
 build-viewer:
 	cd src/bamcp/static && npm install && npm run build
@@ -12,6 +12,8 @@ test:
 test-e2e:
 	playwright install chromium
 	python -m pytest tests/e2e/ -v
+
+test-all: test test-e2e
 
 lint:
 	ruff format --check src tests

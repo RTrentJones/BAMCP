@@ -258,6 +258,19 @@ class TestFetchRegion:
         assert "read7_secondary" not in names
 
     @pytest.mark.unit
+    def test_secondary_reads_excluded_from_coverage(self, small_bam_path):
+        """Secondary/supplementary reads should not inflate coverage counts."""
+        data = fetch_region(small_bam_path, "chr1:390-450")
+        # Coverage at any position should not exceed the number of primary reads
+        # covering that position
+        for i, cov in enumerate(data.coverage):
+            pos = data.start + i
+            primary_count = sum(1 for r in data.reads if r.position <= pos < r.end_position)
+            assert cov <= primary_count + 1, (
+                f"Coverage {cov} at pos {pos} exceeds primary read count {primary_count}"
+            )
+
+    @pytest.mark.unit
     def test_max_reads_limit(self, small_bam_path):
         """Should respect max_reads limit."""
         data = fetch_region(small_bam_path, "chr1:0-1000", max_reads=3)

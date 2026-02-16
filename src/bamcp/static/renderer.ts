@@ -408,9 +408,21 @@ export class Renderer {
         for (let i = 0; i < coverage.length; i++) {
             const x = (data.start + i - this.state.viewport.start) * scale;
             const h = (coverage[i] / maxCov) * (height - 20);
+            const y = height - h;
 
-            if (i === 0) ctx.moveTo(x, height - h);
-            else ctx.lineTo(x, height - h);
+            if (scale >= 1) {
+                // Step function: horizontal bar per base, vertical transitions
+                if (i === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+                ctx.lineTo(x + scale, y);
+            } else {
+                // Smooth polygon for sub-pixel zoom (many bases per pixel)
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
         }
 
         const xEnd = (data.end - this.state.viewport.start) * scale;
@@ -462,6 +474,14 @@ export class Renderer {
         ctx.clearRect(0, 0, width, height);
 
         if (!data) return;
+
+        // Clip reads to data range so they don't extend beyond coverage fill
+        const clipX = (data.start - this.state.viewport.start) * scale;
+        const clipW = (data.end - data.start) * scale;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(clipX, 0, clipW, height);
+        ctx.clip();
 
         // Draw reads
         for (let rowIndex = 0; rowIndex < this.state.packedRows.length; rowIndex++) {
@@ -679,6 +699,8 @@ export class Renderer {
 
         // Draw variant circles on top of reads
         this.renderVariantMarkers(ctx, scale, width);
+
+        ctx.restore(); // Remove data-range clip
     }
 
     /**

@@ -196,7 +196,12 @@ def fetch_region(
             start,
             end,
             quality_threshold=0,
-            read_callback=lambda r: r.mapping_quality >= min_mapq,
+            read_callback=lambda r: (
+                r.mapping_quality >= min_mapq
+                and not r.is_unmapped
+                and not r.is_secondary
+                and not r.is_supplementary
+            ),
         )
 
         # Vectorized sum using numpy for O(n) instead of Python loop

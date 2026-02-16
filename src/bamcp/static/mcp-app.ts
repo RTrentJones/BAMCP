@@ -63,8 +63,8 @@ class BAMCPViewer {
     // Viewport refetch state — auto-load data when panning/zooming beyond loaded range
     private pendingViewportFetch = false;
     private viewportRefetchTimer: ReturnType<typeof setTimeout> | null = null;
-    private static readonly VIEWPORT_REFETCH_OVERLAP = 0.5;     // refetch when <50% overlap
-    private static readonly VIEWPORT_REFETCH_DEBOUNCE_MS = 400;
+    private static readonly VIEWPORT_REFETCH_OVERLAP = 0.8;     // refetch when <80% overlap
+    private static readonly VIEWPORT_REFETCH_DEBOUNCE_MS = 300;
 
     constructor() {
         this.client = new BAMCPClient();
@@ -624,7 +624,6 @@ class BAMCPViewer {
             const oe = Math.min(ve, d.end);
             const ol = sp > 0 ? Math.max(0, oe - os) / sp : 1;
             if (ol >= BAMCPViewer.VIEWPORT_REFETCH_OVERLAP) return;
-            if (this.pendingViewportFetch) return;
 
             // Pad fetch region by 50% each side to reduce subsequent refetches
             const padding = sp * 0.5;

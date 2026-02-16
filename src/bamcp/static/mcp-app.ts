@@ -92,11 +92,10 @@ class BAMCPViewer {
             this.scheduleContextUpdate();
         });
 
-        // Debug overlay callback
+        // Debug overlay callback — update content but don't auto-show
         this.client.setOnDebugUpdate((info: DebugInfo) => {
             this.debugContext.textContent = info.lastContext || '—';
             this.debugToolCall.textContent = info.lastToolCall || '—';
-            this.debugOverlay.classList.remove('hidden');
         });
 
         // Debug close button

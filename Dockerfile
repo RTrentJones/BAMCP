@@ -39,7 +39,10 @@ COPY src/ src/
 COPY --from=frontend /frontend/dist/viewer.html src/bamcp/static/dist/viewer.html
 
 # Install the package and its dependencies into a prefix we can copy later.
-RUN pip install --no-cache-dir --prefix=/install .
+# Include [telemetry] so the OTel SDK ships with the image — JSONL is built-in,
+# but the OpenTelemetry exporter requires the extras. [eval] is intentionally
+# excluded: it pulls in anthropic/openai/playwright which are dev-only.
+RUN pip install --no-cache-dir --prefix=/install ".[telemetry]"
 
 # ---------------------------------------------------------------------------
 # Stage 2 — Runtime
@@ -83,6 +86,13 @@ ENV BAMCP_TRANSPORT="sse"
 ENV BAMCP_HOST="0.0.0.0"
 ENV BAMCP_PORT="8000"
 ENV BAMCP_AUTH_ENABLED=""
+
+# Telemetry — opt-in at deploy time by setting these on the container instance.
+# JSONL works with the base install; OTel uses the bundled opentelemetry SDK
+# and also requires OTEL_EXPORTER_OTLP_ENDPOINT to be set.
+ENV BAMCP_TELEMETRY_ENABLED=""
+ENV BAMCP_TELEMETRY_PATH=""
+ENV BAMCP_TELEMETRY_OTEL=""
 
 # Volume for BAM/CRAM data
 VOLUME ["/data"]

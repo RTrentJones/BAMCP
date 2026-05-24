@@ -22,11 +22,55 @@ from typing import Any
 
 from ..middleware import telemetry
 from .grader import collect_rubric_payloads, grade_case, judge_with_llm
-from .providers import LLMProvider, ToolCall, ToolDescriptor
+from .providers import LLMProvider, ToolCall, ToolDescriptor, build_tool_result_content
 from .router import ToolRouter, tool_descriptors
 from .schema import EvalCase, EvalResult, GraderVerdict
 
 MAX_TURNS = 8
+# Bound per-case image-token spend by capping how many screenshots we attach.
+MAX_CAPTURES_PER_CASE = 4
+
+
+class _VisionContext:
+    """Wraps a live ``ViewerRenderer`` plus a screenshot persistence policy.
+
+    Constructed inside :func:`run_case` once per case (when vision is active).
+    Each ``capture()`` invocation renders the supplied payload, writes the PNG
+    to disk so the report can link to it, and returns the bytes for inclusion
+    in the LLM's next tool_result content block.
+    """
+
+    def __init__(
+        self,
+        renderer: Any,
+        screenshot_dir: Path,
+        case_slug: str,
+        mode: str,
+    ) -> None:
+        self._renderer = renderer
+        self._dir = screenshot_dir
+        self._case_slug = case_slug
+        self._mode = mode
+        self.last_path: str = ""
+
+    async def capture(self, ui_payload: dict, step: int) -> bytes | None:
+        try:
+            png: bytes = await self._renderer.capture(ui_payload, self._mode)
+        except Exception as e:  # noqa: BLE001 — degrade rather than crash the case
+            logger_warn(f"vision capture failed: {type(e).__name__}: {e}")
+            return None
+        self._dir.mkdir(parents=True, exist_ok=True)
+        path = self._dir / f"{self._case_slug}__{self._mode}__step{step}.png"
+        path.write_bytes(png)
+        self.last_path = str(path)
+        return png
+
+
+def logger_warn(message: str) -> None:
+    """Tiny stand-in for a logger so tests can monkeypatch verbosity."""
+    import logging
+
+    logging.getLogger(__name__).warning(message)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -57,14 +101,18 @@ async def _run_tool_loop(
     router: ToolRouter,
     tools: list[ToolDescriptor],
     initial_user: str,
-) -> tuple[str, list[tuple[str, str]]]:
+    *,
+    vision_ctx: _VisionContext | None = None,
+) -> tuple[str, list[tuple[str, str]], list[str]]:
     """Drive a single conversation through up to MAX_TURNS rounds.
 
-    Returns ``(final_text, tool_results)`` where ``tool_results`` is the list
-    of ``(tool_name, response_text)`` tuples in call order.
+    Returns ``(final_text, tool_results, screenshots)`` where ``tool_results``
+    is the list of ``(tool_name, response_text)`` tuples in call order and
+    ``screenshots`` is the list of paths written when vision was active.
     """
     messages: list[dict[str, Any]] = [{"role": "user", "content": initial_user}]
     tool_results: list[tuple[str, str]] = []
+    screenshots: list[str] = []
     final_text = ""
 
     for _ in range(MAX_TURNS):
@@ -84,17 +132,30 @@ async def _run_tool_loop(
         for call in resp.tool_calls:
             outcome = await router.call(call.name, call.arguments)
             tool_results.append((call.name, outcome.text))
+
+            image_bytes: bytes | None = None
+            if (
+                vision_ctx is not None
+                and outcome.ui_payload is not None
+                and len(screenshots) < MAX_CAPTURES_PER_CASE
+            ):
+                image_bytes = await vision_ctx.capture(outcome.ui_payload, len(screenshots))
+                if image_bytes is not None:
+                    screenshots.append(vision_ctx.last_path)
+
+            payload_text = outcome.text or (outcome.error or "")
+            content = build_tool_result_content(payload_text, image_bytes, provider.kind)
             user_content.append(
                 {
                     "type": "tool_result",
                     "tool_use_id": call.id,
-                    "content": outcome.text or (outcome.error or ""),
+                    "content": content,
                     "is_error": not outcome.ok,
                 }
             )
         messages.append({"role": "user", "content": user_content})
 
-    return final_text, tool_results
+    return final_text, tool_results, screenshots
 
 
 def _assistant_content_blocks(text: str, tool_calls: list[ToolCall]) -> list[dict[str, Any]]:
@@ -109,6 +170,20 @@ def _assistant_content_blocks(text: str, tool_calls: list[ToolCall]) -> list[dic
     return blocks
 
 
+def _vision_available(provider: LLMProvider, no_vision: bool) -> bool:
+    """Whether visual capture is on for this run."""
+    if no_vision:
+        return False
+    return bool(getattr(provider, "vision_capable", False))
+
+
+def _make_renderer():  # noqa: ANN201 — type depends on availability of playwright
+    """Construct a ViewerRenderer. Pulled out so tests can monkeypatch the class."""
+    from .renderer import ViewerRenderer
+
+    return ViewerRenderer()
+
+
 async def run_case(
     case: EvalCase,
     provider: LLMProvider,
@@ -116,10 +191,41 @@ async def run_case(
     judge: LLMProvider | None,
     output_dir: Path,
     rendering_mode: str | None = None,
+    *,
+    no_vision: bool = False,
+    screenshot_dir: Path | None = None,
 ) -> EvalResult:
     """Run one case to completion and grade it."""
     case_slug = case.name.replace(" ", "_").replace("/", "_").replace(":", "_").replace(">", "_")
     suffix = f"__{rendering_mode}" if rendering_mode else ""
+
+    # Skip cases that require vision when vision is unavailable.
+    vision_on = _vision_available(provider, no_vision) and rendering_mode is not None
+    if case.vision_required and not vision_on:
+        reason = (
+            "vision disabled (--no-vision)"
+            if no_vision
+            else "provider not vision-capable"
+            if not getattr(provider, "vision_capable", False)
+            else "no rendering mode active"
+        )
+        return EvalResult(
+            case_name=case.name,
+            category=case.category,
+            rendering_mode=rendering_mode,
+            response_text="",
+            tool_calls=[],
+            duration_ms=0.0,
+            verdict=GraderVerdict(
+                passed=False,
+                rationale=f"Skipped: {reason}",
+                deterministic=True,
+                score=0.0,
+            ),
+            skipped=True,
+            skip_reason=reason,
+        )
+
     telemetry_path = output_dir / "telemetry" / f"{case_slug}{suffix}.jsonl"
     telemetry_path.parent.mkdir(parents=True, exist_ok=True)
     if telemetry_path.exists():
@@ -134,10 +240,22 @@ async def run_case(
     error: str | None = None
     final_text = ""
     tool_results: list[tuple[str, str]] = []
+    screenshots: list[str] = []
     try:
         tools = tool_descriptors(router)
         user_message = _format_user_message(case, rendering_mode)
-        final_text, tool_results = await _run_tool_loop(provider, router, tools, user_message)
+        if vision_on:
+            renderer = _make_renderer()
+            shot_dir = (screenshot_dir or output_dir / "screenshots").resolve()
+            async with renderer:
+                vision_ctx = _VisionContext(renderer, shot_dir, case_slug, rendering_mode or "")
+                final_text, tool_results, screenshots = await _run_tool_loop(
+                    provider, router, tools, user_message, vision_ctx=vision_ctx
+                )
+        else:
+            final_text, tool_results, screenshots = await _run_tool_loop(
+                provider, router, tools, user_message
+            )
     except Exception as e:  # noqa: BLE001 — capture and surface to caller
         error = f"{type(e).__name__}: {e}"
 
@@ -171,6 +289,8 @@ async def run_case(
         verdict=verdict,
         error=error,
         telemetry_path=str(telemetry_path),
+        screenshots=screenshots,
+        vision_used=bool(screenshots),
     )
 
 
@@ -181,6 +301,9 @@ async def run_cases(
     judge: LLMProvider | None,
     output_dir: Path,
     with_rendering_comparison: bool = False,
+    *,
+    no_vision: bool = False,
+    screenshot_dir: Path | None = None,
 ) -> list[EvalResult]:
     """Run a sequence of cases. Returns one result per (case, rendering_mode)."""
     results: list[EvalResult] = []
@@ -191,5 +314,16 @@ async def run_cases(
             else [None]
         )
         for mode in modes:
-            results.append(await run_case(case, provider, router, judge, output_dir, mode))
+            results.append(
+                await run_case(
+                    case,
+                    provider,
+                    router,
+                    judge,
+                    output_dir,
+                    mode,
+                    no_vision=no_vision,
+                    screenshot_dir=screenshot_dir,
+                )
+            )
     return results

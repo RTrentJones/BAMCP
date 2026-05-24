@@ -26,6 +26,14 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# Local dev/eval artifacts
+.render-dev/
+.eval-results/
+test-results/
+
+# Claude Code per-user settings (skills are committed, settings are not)
+.claude/settings.local.json
+
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.

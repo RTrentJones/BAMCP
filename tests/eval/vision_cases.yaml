@@ -1,0 +1,112 @@
+# BAMCP vision benchmark cases. These cases are designed so the answer is
+# only obtainable by inspecting the rendered viewer image — text summaries
+# alone aren't enough. Every case sets `vision_required: true` so non-vision
+# runs skip them cleanly (with a "skipped: vision unavailable" verdict).
+#
+# Each case runs once per `rendering_modes` entry when `--with-rendering-
+# comparison` is set, producing a per-mode pass/fail in the report.
+
+- case:
+    name: "Count alt-supporting reads at active variant"
+    category: "Vision: count"
+    input: |
+      Visualize chr1:1000-1100 in tests/fixtures/comprehensive.bam using
+      reference tests/fixtures/comprehensive_ref.fa. The viewer marks the
+      variant at chr1:1050 (A>T) with a colored circle on each supporting
+      read. Look at the rendered image and answer: roughly how many reads
+      carry the alt allele (T) at that position? Report a count.
+    expected: |
+      The LLM correctly identifies that several reads carry the alt allele
+      at position 1050 and reports a plausible count consistent with the
+      visual evidence (the comprehensive fixture has ~8 alt reads here).
+    tools_expected: ["visualize_region"]
+    bam_fixture: "tests/fixtures/comprehensive.bam"
+    rendering_modes: ["expanded", "dv-strips", "dv-composite"]
+    vision_required: true
+
+- case:
+    name: "Identify variant marker color"
+    category: "Vision: identify"
+    input: |
+      Visualize chr1:1100-1200 in tests/fixtures/comprehensive.bam (reference
+      tests/fixtures/comprehensive_ref.fa). One variant in this region is
+      marked with a colored dot on supporting reads. What is the alt allele
+      base for that variant? Report A/C/G/T based on the marker color.
+    expected: |
+      The model reads the correct alt allele from the variant marker color
+      (orange=G in the comprehensive fixture's chr1:1150 A>G variant). It
+      identifies a specific base, not a vague 'I see a variant'.
+    tools_expected: ["visualize_region"]
+    bam_fixture: "tests/fixtures/comprehensive.bam"
+    rendering_modes: ["expanded", "dv-strips"]
+    vision_required: true
+
+- case:
+    name: "Strand balance at variant"
+    category: "Vision: strand"
+    input: |
+      Visualize chr1:1000-1100 in tests/fixtures/comprehensive.bam (reference
+      tests/fixtures/comprehensive_ref.fa). Looking at the rendered reads,
+      do reads carrying the variant at chr1:1050 appear evenly distributed
+      between forward (blue) and reverse (red) strands, or do they cluster
+      on one strand?
+    expected: |
+      The model correctly characterizes strand balance for the chr1:1050
+      variant — whether the alt-supporting reads cluster or are balanced.
+      A correct answer cites the visible colors of supporting reads.
+    tools_expected: ["visualize_region"]
+    bam_fixture: "tests/fixtures/comprehensive.bam"
+    rendering_modes: ["expanded", "dv-strips"]
+    vision_required: true
+
+- case:
+    name: "Coverage uniformity"
+    category: "Vision: coverage"
+    input: |
+      Visualize chr1:1000-2000 in tests/fixtures/comprehensive.bam (reference
+      tests/fixtures/comprehensive_ref.fa). Looking at the coverage track at
+      the top of the viewer, is coverage uniform across the region, or are
+      there obvious dropouts? Describe the pattern in one sentence.
+    expected: |
+      The model describes the coverage histogram qualitatively: uniformity,
+      peaks, or dropouts. The comprehensive fixture has visible variation
+      across this span, so a correct answer notes that variation rather than
+      asserting flat uniformity.
+    tools_expected: ["visualize_region"]
+    bam_fixture: "tests/fixtures/comprehensive.bam"
+    rendering_modes: ["expanded", "dv-composite"]
+    vision_required: true
+
+- case:
+    name: "Compare base qualities across reads (dv-strips)"
+    category: "Vision: quality"
+    input: |
+      Visualize chr1:1000-1100 in tests/fixtures/comprehensive.bam (reference
+      tests/fixtures/comprehensive_ref.fa). The dv-strips rendering shows a
+      grayscale base-quality channel as the second strip on each read.
+      Looking at this channel, are base qualities roughly uniform across
+      reads, or do some reads stand out with markedly lower qualities?
+    expected: |
+      The model interprets the grayscale intensity of the base-quality strip
+      and offers a correct characterization (uniform vs heterogeneous).
+      Bonus: the model notes that lighter gray means higher quality.
+    tools_expected: ["visualize_region"]
+    bam_fixture: "tests/fixtures/comprehensive.bam"
+    rendering_modes: ["dv-strips"]
+    vision_required: true
+
+- case:
+    name: "Identify highest-VAF variant in panel"
+    category: "Vision: panel"
+    input: |
+      Visualize chr1:1000-2000 in tests/fixtures/comprehensive.bam (reference
+      tests/fixtures/comprehensive_ref.fa). The variants panel at the bottom
+      of the viewer lists detected variants with their VAFs. Which variant
+      has the highest VAF? Report 'chrom:pos ref>alt' and the VAF.
+    expected: |
+      The model reads off the highest-VAF row from the variant panel and
+      reports the position, ref/alt alleles, and the numeric VAF correctly.
+    tools_expected: ["visualize_region"]
+    bam_fixture: "tests/fixtures/comprehensive.bam"
+    rendering_modes: ["expanded"]
+    vision_required: true

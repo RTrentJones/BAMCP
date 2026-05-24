@@ -39,6 +39,10 @@ class RouterResult:
     ok: bool
     text: str  # Tool's content[0].text — what the LLM sees
     error: str | None = None
+    # Surfaced when a tool's response carried ``_meta.ui/init`` (the MCP Apps
+    # viewer payload). The visual-eval runner uses this to drive screenshot
+    # capture; text-only runs ignore it.
+    ui_payload: dict | None = None
 
 
 class ToolRouter(Protocol):
@@ -100,7 +104,14 @@ class InProcessRouter:
             text = content[0].get("text", "") if isinstance(content[0], dict) else ""
         else:
             text = json.dumps(result, default=str)
-        return RouterResult(ok=True, text=str(text))
+        ui_payload = None
+        if isinstance(result, dict):
+            meta = result.get("_meta")
+            if isinstance(meta, dict):
+                candidate = meta.get("ui/init")
+                if isinstance(candidate, dict):
+                    ui_payload = candidate
+        return RouterResult(ok=True, text=str(text), ui_payload=ui_payload)
 
     async def _call_search_gene(self, arguments: dict[str, Any]) -> RouterResult:
         symbol = arguments.get("symbol", "")

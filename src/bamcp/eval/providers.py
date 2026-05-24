@@ -51,6 +51,13 @@ class ProviderResponse:
 class LLMProvider(Protocol):
     """Common provider interface."""
 
+    # Whether this provider can accept image content blocks (vision).
+    vision_capable: bool
+    # Short tag identifying the provider's content-block shape:
+    # ``"anthropic"``, ``"openai"``, or ``"mock"``. Used by
+    # :func:`build_tool_result_content`.
+    kind: str
+
     async def chat_with_tools(
         self,
         messages: list[dict[str, Any]],
@@ -68,15 +75,22 @@ class MockProvider:
 
     Construct with a ``script`` callable that, given (messages, tools), returns
     the next ProviderResponse. The callback receives the full conversation so
-    far so it can implement multi-turn behavior.
+    far so it can implement multi-turn behavior. Set ``vision_capable=True`` to
+    exercise the image-in-tool-result code path from tests.
     """
+
+    kind: str = "mock"
+    vision_capable: bool = False
 
     def __init__(
         self,
         script: Callable[[list[dict[str, Any]], list[ToolDescriptor]], ProviderResponse]
         | Callable[[list[dict[str, Any]], list[ToolDescriptor]], Awaitable[ProviderResponse]],
+        *,
+        vision_capable: bool = False,
     ) -> None:
         self._script = script
+        self.vision_capable = vision_capable
 
     async def chat_with_tools(
         self,
@@ -118,6 +132,10 @@ def make_one_shot_mock(
 
 class AnthropicProvider:
     """Anthropic Claude provider using the tool-use API."""
+
+    kind: str = "anthropic"
+    # All current claude-opus-4-* and claude-sonnet-4-* models accept vision.
+    vision_capable: bool = True
 
     def __init__(self, model: str = "claude-opus-4-7", max_tokens: int = 4096) -> None:
         try:
@@ -166,6 +184,10 @@ class AnthropicProvider:
 
 class OpenAIProvider:
     """OpenAI Responses API tool-calling provider."""
+
+    kind: str = "openai"
+    # gpt-4o family accepts image content blocks.
+    vision_capable: bool = True
 
     def __init__(self, model: str = "gpt-4o-mini", max_tokens: int = 4096) -> None:
         try:
@@ -230,3 +252,56 @@ def get_provider(name: str, model: str) -> LLMProvider:
     if name == "openai":
         return OpenAIProvider(model=model)
     raise ValueError(f"Unknown provider {name!r}. Supported: anthropic, openai, mock.")
+
+
+# -----------------------------------------------------------------------------
+# Tool-result content construction (with optional images)
+# -----------------------------------------------------------------------------
+
+
+def build_tool_result_content(
+    text: str,
+    image_bytes: bytes | None,
+    provider_kind: str,
+) -> Any:
+    """Build the right content-block shape for a tool_result, per provider.
+
+    - Anthropic accepts a list of ``image`` and ``text`` blocks in tool_result.
+    - OpenAI's chat-completions tool_result is a plain string; image content
+      must be attached on a subsequent user turn. The eval runner handles that
+      split — this helper produces an OpenAI-shaped image+text bundle that the
+      runner can serialize appropriately.
+    - Mock providers just receive plain text (images are ignored).
+
+    When ``image_bytes`` is None or the provider doesn't support vision, the
+    return value is the original ``text`` string.
+    """
+    if image_bytes is None:
+        return text
+
+    import base64
+
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+
+    if provider_kind == "anthropic":
+        return [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": encoded,
+                },
+            },
+            {"type": "text", "text": text},
+        ]
+    if provider_kind == "openai":
+        return [
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{encoded}"},
+            },
+            {"type": "text", "text": text},
+        ]
+    # Mock / unknown: fall back to plain text.
+    return text

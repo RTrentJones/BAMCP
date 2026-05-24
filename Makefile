@@ -1,4 +1,4 @@
-.PHONY: install test test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval eval-cached eval-compare eval-dry
+.PHONY: install test test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval eval-cached eval-compare eval-dry eval-vision-setup render-viewer render-viewer-all-modes
 
 build-viewer:
 	cd src/bamcp/static && npm install && npm run build
@@ -58,3 +58,28 @@ eval-compare:
 
 eval-dry:
 	python scripts/run_eval.py --dry-run --output-dir .eval-results
+
+eval-vision-setup:
+	python -m playwright install chromium
+
+# Developer feedback loop — render the viewer to a PNG without a browser.
+# Defaults render the comprehensive fixture; override BAM/REF/REGION/MODE/OUT
+# to point at your own data. Pair with `Read` on the output path to verify.
+BAM ?= tests/fixtures/comprehensive.bam
+REF ?= tests/fixtures/comprehensive_ref.fa
+REGION ?= chr1:1000-1300
+MODE ?= expanded
+OUT ?= .render-dev/last.png
+
+render-viewer: build-viewer
+	python scripts/render_viewer.py \
+		--bam $(BAM) --reference $(REF) --region $(REGION) \
+		--mode $(MODE) --out $(OUT)
+
+render-viewer-all-modes: build-viewer
+	@mkdir -p .render-dev
+	@for mode in expanded dv-strips dv-composite; do \
+		python scripts/render_viewer.py \
+			--bam $(BAM) --reference $(REF) --region $(REGION) \
+			--mode $$mode --out .render-dev/$$mode.png ; \
+	done

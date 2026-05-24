@@ -84,6 +84,19 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
         action="store_true",
         help="Parse cases and exit without running. Validates schema.",
     )
+    p.add_argument(
+        "--no-vision",
+        action="store_true",
+        help=(
+            "Disable visual capture even when cases declare rendering_modes. "
+            "Cases with vision_required=true are skipped."
+        ),
+    )
+    p.add_argument(
+        "--vision-screenshot-dir",
+        default=None,
+        help="Where to write captured screenshots (default: <output-dir>/screenshots).",
+    )
     args = p.parse_args(argv)
 
     subset: tuple[int, int] | None = None
@@ -106,6 +119,10 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
         with_rendering_comparison=args.with_rendering_comparison,
         router=args.router,
         dry_run=args.dry_run,
+        no_vision=args.no_vision,
+        vision_screenshot_dir=(
+            Path(args.vision_screenshot_dir) if args.vision_screenshot_dir else None
+        ),
     )
 
 
@@ -158,6 +175,19 @@ async def _run(config: RunConfig) -> int:
     judge = _build_judge(config)
     router = _build_router(config)
 
+    # Warn (once) when the user asked for rendering modes but the provider
+    # can't actually see images. The runner will skip vision_required cases.
+    if (
+        not config.no_vision
+        and config.with_rendering_comparison
+        and not getattr(provider, "vision_capable", False)
+    ):
+        print(
+            f"warning: provider '{config.provider}' does not support vision; "
+            "rendering-mode comparison will run text-only.",
+            file=sys.stderr,
+        )
+
     results = await run_cases(
         cases=cases,
         provider=provider,
@@ -165,6 +195,8 @@ async def _run(config: RunConfig) -> int:
         judge=judge,
         output_dir=config.output_dir,
         with_rendering_comparison=config.with_rendering_comparison,
+        no_vision=config.no_vision,
+        screenshot_dir=config.vision_screenshot_dir,
     )
 
     write_reports(results, config, config.output_dir)

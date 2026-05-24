@@ -30,6 +30,9 @@ class EvalCase:
     tools_expected: list[str] = field(default_factory=list)
     bam_fixture: str | None = None
     rendering_modes: list[str] = field(default_factory=list)
+    # When True, the case can only be answered with vision. Non-vision runs
+    # skip it (and the report marks it as "skipped: vision unavailable").
+    vision_required: bool = False
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> EvalCase:
@@ -45,6 +48,7 @@ class EvalCase:
             tools_expected=list(d.get("tools_expected", []) or []),
             bam_fixture=d.get("bam_fixture"),
             rendering_modes=list(d.get("rendering_modes", []) or []),
+            vision_required=bool(d.get("vision_required", False)),
         )
 
 
@@ -71,6 +75,14 @@ class EvalResult:
     verdict: GraderVerdict
     error: str | None = None
     telemetry_path: str | None = None  # path to the JSONL trace for this case
+    # Paths to screenshots captured during this case (when vision was active).
+    screenshots: list[str] = field(default_factory=list)
+    # True when at least one image was passed to the LLM for this case.
+    vision_used: bool = False
+    # True when the case was skipped because vision was unavailable but
+    # ``vision_required`` was set on the case.
+    skipped: bool = False
+    skip_reason: str | None = None
 
 
 @dataclass
@@ -88,6 +100,10 @@ class RunConfig:
     with_rendering_comparison: bool = False
     router: str = "in-process"  # "in-process" or "mcp-stdio"
     dry_run: bool = False
+    # Force text-only runs even when cases declare rendering_modes / provider
+    # supports vision. Useful for cost control.
+    no_vision: bool = False
+    vision_screenshot_dir: Path | None = None
 
 
 def load_cases(path: str | Path) -> list[EvalCase]:

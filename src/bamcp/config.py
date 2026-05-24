@@ -65,6 +65,11 @@ class BAMCPConfig:
     trusted_hosts: list[str] | None = None
     rate_limit: int = 60  # requests per minute per IP
 
+    # Telemetry settings
+    telemetry_enabled: bool = False
+    telemetry_path: str = ""  # JSONL file path; empty disables file output
+    telemetry_otel_enabled: bool = False
+
     def __post_init__(self) -> None:
         """Validate config values and set defaults."""
         # Set default cache_dir if not provided
@@ -153,4 +158,7 @@ class BAMCPConfig:
             ]
             or None,
             rate_limit=int(env.get("BAMCP_RATE_LIMIT", "60")),
+            telemetry_enabled=env.get("BAMCP_TELEMETRY_ENABLED", "").lower() == "true",
+            telemetry_path=env.get("BAMCP_TELEMETRY_PATH", ""),
+            telemetry_otel_enabled=env.get("BAMCP_TELEMETRY_OTEL", "").lower() == "true",
         )

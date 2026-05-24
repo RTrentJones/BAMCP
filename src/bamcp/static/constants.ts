@@ -47,6 +47,27 @@ export const DISPLAY_MODE_CONFIGS = {
     squished: { readHeight: 6, readGap: 1, showLabels: false },
     compact: { readHeight: 12, readGap: 2, showLabels: false },
     expanded: { readHeight: 24, readGap: 4, showLabels: true },
+    // DeepVariant-inspired pileup modes. Strip mode allocates 6 channels
+    // vertically inside each read row; composite mode false-colors a single row.
+    'dv-strips': { readHeight: 36, readGap: 4, showLabels: false },
+    'dv-composite': { readHeight: 8, readGap: 1, showLabels: false },
+};
+
+// Number of channels in DeepVariant-style rendering (base, base_qual, mapq,
+// strand, supports_variant, ref_differs).
+export const DV_CHANNEL_COUNT = 6;
+
+// Per-channel colors used by the dv-strips rendering for the boolean/categorical
+// channels. Quantitative channels (base quality, MAPQ) reuse the threshold
+// palettes above.
+export const DV_PALETTE = {
+    strandForward: '#3b82f6',
+    strandReverse: '#ef4444',
+    variantSupport: '#22c55e',   // green — read base matches alt allele
+    variantReference: '#9ca3af', // gray — read base matches ref allele
+    variantNoCall: '#1f2937',    // dark — position outside active variant
+    refMatch: '#0f172a',         // near-black where read matches reference
+    refDiffers: '#06b6d4',       // cyan where read mismatches reference
 };
 
 // Insert size thresholds for color coding

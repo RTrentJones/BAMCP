@@ -40,7 +40,14 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - run: make install
+      - name: Install telemetry + eval extras
+        # The 85% strict coverage gate needs the OTel SDK (telemetry tests)
+        # and the eval extras (pyyaml, anthropic, openai construction).
+        run: pip install -e ".[telemetry,eval]"
       - run: make test
+      - name: Strict coverage on new code paths
+        if: matrix.python-version == '3.12'
+        run: make coverage-strict
       - name: Upload coverage
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v6

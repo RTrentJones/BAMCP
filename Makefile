@@ -1,4 +1,4 @@
-.PHONY: install test test-e2e test-all lint format typecheck docker-build docker-test clean coverage build-viewer
+.PHONY: install test test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval eval-cached eval-compare eval-dry
 
 build-viewer:
 	cd src/bamcp/static && npm install && npm run build
@@ -42,3 +42,19 @@ clean:
 coverage:
 	python -m pytest tests/ --ignore=tests/e2e -v --cov=bamcp --cov-report=html
 	@echo "Coverage report: htmlcov/index.html"
+
+coverage-strict:
+	python -m pytest tests/ --ignore=tests/e2e -v --cov=bamcp --cov-fail-under=85 --cov-report=term-missing
+
+# Eval harness — MARRVEL-MCP-compatible runner against the BAMCP server.
+eval:
+	python scripts/run_eval.py --output-dir .eval-results
+
+eval-cached:
+	python scripts/run_eval.py --cache --output-dir .eval-results
+
+eval-compare:
+	python scripts/run_eval.py --with-vanilla --with-rendering-comparison --output-dir .eval-results
+
+eval-dry:
+	python scripts/run_eval.py --dry-run --output-dir .eval-results

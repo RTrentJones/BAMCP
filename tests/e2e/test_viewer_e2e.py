@@ -2588,3 +2588,171 @@ class TestDebugOverlay:
                 "el => el.classList.contains('hidden')"
             )
             assert is_hidden_again, "Overlay should be hidden after second click"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# DeepVariant-style pileup rendering modes
+# ══════════════════════════════════════════════════════════════════════
+
+
+DV_DATA = {
+    "contig": "chr1",
+    "start": 100,
+    "end": 150,
+    "reads": [
+        {
+            "name": "fwd_with_alt",
+            "sequence": "ACGTACGTAC" * 5,
+            "qualities": [40] * 50,
+            "cigar": "50M",
+            "position": 100,
+            "end_position": 150,
+            "mapping_quality": 60,
+            "is_reverse": False,
+            "mismatches": [{"pos": 125, "ref": "A", "alt": "T"}],
+        },
+        {
+            "name": "rev_no_alt",
+            "sequence": "ACGTACGTAC" * 5,
+            "qualities": [20] * 50,
+            "cigar": "50M",
+            "position": 100,
+            "end_position": 150,
+            "mapping_quality": 30,
+            "is_reverse": True,
+            "mismatches": [],
+        },
+    ],
+    "coverage": [2] * 50,
+    "variants": [
+        {
+            "contig": "chr1",
+            "position": 125,
+            "ref": "A",
+            "alt": "T",
+            "vaf": 0.5,
+            "depth": 2,
+            "alt_count": 1,
+            "confidence": "medium",
+        }
+    ],
+    "reference_sequence": "ACGTACGTAC" * 5,
+}
+
+
+def _switch_to_mode(page: Page, mode: str) -> None:
+    """Switch the viewer to a display mode and force a re-render."""
+    page.evaluate(
+        f"""() => {{
+            viewer.state.settings.displayMode = '{mode}';
+            viewer.state.resortAndRepack();
+            viewer.renderer.resize();
+        }}"""
+    )
+    page.wait_for_timeout(150)
+
+
+class TestDeepVariantModes:
+    """E2E tests for the DeepVariant-style pileup modes."""
+
+    @pytest.mark.e2e
+    def test_dropdown_has_dv_options(self, viewer_page: Page):
+        """The display-mode dropdown should expose the two DV modes."""
+        send_init_data(viewer_page, DV_DATA)
+        options = viewer_page.evaluate(
+            """() => Array.from(document.querySelectorAll(
+                '#display-mode-select option'
+            )).map(o => o.value)"""
+        )
+        assert "dv-strips" in options
+        assert "dv-composite" in options
+
+    @pytest.mark.e2e
+    def test_dv_strips_renders_pixels(self, viewer_page: Page):
+        """dv-strips mode should fill the reads canvas with channel pixels."""
+        send_init_data(viewer_page, DV_DATA)
+        _switch_to_mode(viewer_page, "dv-strips")
+        # Read row spans 36 + 4 px; sample the first read in the middle of each
+        # channel strip.
+        pixel_count = count_opaque_pixels(viewer_page, "reads-canvas", 50, 0, 400, 36)
+        assert pixel_count > 1000, f"dv-strips should paint many pixels, got {pixel_count}"
+
+    @pytest.mark.e2e
+    def test_dv_composite_renders_pixels(self, viewer_page: Page):
+        """dv-composite mode should paint at least one row of false-color pixels."""
+        send_init_data(viewer_page, DV_DATA)
+        _switch_to_mode(viewer_page, "dv-composite")
+        pixel_count = count_opaque_pixels(viewer_page, "reads-canvas", 50, 0, 400, 16)
+        assert pixel_count > 200, f"dv-composite should paint pixels, got {pixel_count}"
+
+    @pytest.mark.e2e
+    def test_dv_strips_mapq_differs_between_reads(self, viewer_page: Page):
+        """The MAPQ strip should differ in intensity between high- and low-MAPQ reads."""
+        send_init_data(viewer_page, DV_DATA)
+        _switch_to_mode(viewer_page, "dv-strips")
+        # 36px tall read; MAPQ strip is the 3rd channel (index 2) starting at
+        # y = 2 * (36/6) = 12.
+        high_mapq = sample_pixel_at_genomic(viewer_page, "reads-canvas", 110, 14)
+        # Row 2 (rev_no_alt at MAPQ=30) starts at y = 36 + 4 = 40; MAPQ strip
+        # at y = 40 + 12 = 52.
+        low_mapq = sample_pixel_at_genomic(viewer_page, "reads-canvas", 110, 54)
+        # Grayscale: higher MAPQ -> lighter pixel.
+        assert high_mapq["r"] != low_mapq["r"], (
+            f"MAPQ strip should differ between reads: high={high_mapq} low={low_mapq}"
+        )
+
+    @pytest.mark.e2e
+    def test_dv_strips_variant_support_responds_to_active_variant(self, viewer_page: Page):
+        """Setting the active variant should change the supports-variant strip
+        at the variant position."""
+        send_init_data(viewer_page, DV_DATA)
+        _switch_to_mode(viewer_page, "dv-strips")
+        # Strip 4 starts at y = 4 * 6 = 24 in the first read row.
+        # No active variant set yet — strip should be the no-call dark color.
+        before = sample_pixel_at_genomic(viewer_page, "reads-canvas", 125, 26)
+
+        # Now set the active variant and re-render.
+        viewer_page.evaluate(
+            """() => {
+                viewer.state.settings.activeVariantPosition = 125;
+                viewer.state.settings.activeVariantAlt = 'T';
+                viewer.renderer.render();
+            }"""
+        )
+        viewer_page.wait_for_timeout(100)
+        after = sample_pixel_at_genomic(viewer_page, "reads-canvas", 125, 26)
+
+        # The variant-support strip color must change once the variant is active.
+        assert (before["r"], before["g"], before["b"]) != (
+            after["r"],
+            after["g"],
+            after["b"],
+        ), (
+            "Variant-support strip should change after activating variant: "
+            f"before={before} after={after}"
+        )
+
+    @pytest.mark.e2e
+    def test_dv_strips_does_not_throw_with_missing_qualities(self, viewer_page: Page):
+        """Reads without qualities should still render (channels just go dark)."""
+        data = {**DV_DATA, "reads": [{**DV_DATA["reads"][0], "qualities": None}]}
+        # Strip qualities to None to verify graceful handling.
+        send_init_data(viewer_page, data)
+        # Should not raise on switch.
+        _switch_to_mode(viewer_page, "dv-strips")
+        # And it should still draw something (other channels remain).
+        pixels = count_opaque_pixels(viewer_page, "reads-canvas", 50, 0, 400, 36)
+        assert pixels > 100, f"dv-strips should still render without qualities, got {pixels}"
+
+    @pytest.mark.e2e
+    def test_dv_composite_marks_mismatch_with_cyan_stripe(self, viewer_page: Page):
+        """Composite mode adds a cyan top stripe at mismatch positions."""
+        send_init_data(viewer_page, DV_DATA)
+        _switch_to_mode(viewer_page, "dv-composite")
+        # The first read's mismatch is at position 125. The top stripe takes
+        # the upper quarter of the row.
+        px = sample_pixel_at_genomic(viewer_page, "reads-canvas", 125, 1)
+        # Cyan #06b6d4 -> (6, 182, 212). Allow some tolerance.
+        assert px["g"] > 100 and px["b"] > 100 and px["r"] < 80, (
+            f"Expected cyan-ish pixel at mismatch position, got {px}"
+        )

@@ -30,6 +30,10 @@ def _serialize_read(r: AlignedRead, include_sequence: bool) -> dict:
     }
     if include_sequence:
         d["sequence"] = r.sequence
+        # Base qualities ride along with the sequence — they're only useful
+        # at base-level zoom and they enable the DeepVariant-style channels.
+        if r.qualities:
+            d["qualities"] = list(r.qualities)
     # Only include paired-end fields if the read is actually paired
     if r.is_paired:
         d["mate_position"] = r.mate_position

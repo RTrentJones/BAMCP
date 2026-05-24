@@ -61,9 +61,12 @@ class TestBrowseRegionIntegration:
             "is_reverse",
             "mismatches",
         }
-        # In compact mode, sequence and qualities are omitted
+        # Region is 110bp (below 500bp), so non-compact mode: sequence and
+        # qualities both present for the DeepVariant-style rendering channels.
         assert required_fields.issubset(set(read.keys()))
-        assert "qualities" not in read  # Qualities are never serialized (unused by frontend)
+        assert "sequence" in read
+        assert "qualities" in read
+        assert len(read["qualities"]) == len(read["sequence"])
 
         # Verify coverage length
         assert len(payload["coverage"]) == 110

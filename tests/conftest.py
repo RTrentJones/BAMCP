@@ -41,3 +41,15 @@ def empty_bam_path():
 def ref_fasta_path():
     """Path to the reference FASTA file."""
     return os.path.join(FIXTURES_DIR, "ref.fa")
+
+
+@pytest.fixture
+def comprehensive_bam_path():
+    """Path to the comprehensive test BAM (multi-variant fixture)."""
+    return os.path.join(FIXTURES_DIR, "comprehensive.bam")
+
+
+@pytest.fixture
+def comprehensive_ref_fasta_path():
+    """Path to the comprehensive test reference FASTA."""
+    return os.path.join(FIXTURES_DIR, "comprehensive_ref.fa")

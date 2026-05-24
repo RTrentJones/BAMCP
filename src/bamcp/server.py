@@ -216,6 +216,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         alt: str,
         window: int = 50,
         reference: str | None = None,
+        format: str = "text",
     ) -> str:
         args: dict = {
             "file_path": file_path,
@@ -224,6 +225,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             "ref": ref,
             "alt": alt,
             "window": window,
+            "format": format,
         }
         if reference is not None:
             args["reference"] = reference

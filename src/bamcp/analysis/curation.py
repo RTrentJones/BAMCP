@@ -7,11 +7,13 @@ quality metrics, and actionable recommendations for variant curators.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
 from ..config import BAMCPConfig
 from ..core.validation import validate_path, validate_variant_input
+from ..middleware.telemetry import telemetry_wrapper
 from .evidence import (
     build_mismatch_index,
     compute_artifact_risk,
@@ -20,6 +22,9 @@ from .evidence import (
 )
 
 logger = logging.getLogger(__name__)
+
+RUBRIC_VERSION = "1.0"
+_VALID_FORMATS = ("text", "rubric")
 
 
 def compute_near_end_fraction(position_histogram: list[int] | None) -> float:
@@ -87,6 +92,46 @@ def generate_curator_recommendations(
     return recommendations
 
 
+def compute_rubric_scores(variant: dict, evidence: dict, artifact_risk: dict) -> dict[str, float]:
+    """Normalized 0-1 quality scores derived from existing evidence.
+
+    Each score is computed from quantities already present in the evidence
+    pipeline; no new BAM passes are required. Higher is better in all cases.
+    """
+    vaf = float(variant.get("vaf", 0.0))
+    depth = int(variant.get("depth", 0))
+    strand_bias = float(evidence.get("strand_bias", 0.0))
+
+    mapq_hist = evidence.get("mapq_histogram") or []
+    mapq_total = sum(mapq_hist)
+    high_mapq = sum(mapq_hist[3:]) if len(mapq_hist) >= 4 else 0
+    mapq_quality = (high_mapq / mapq_total) if mapq_total > 0 else 0.0
+
+    pos_hist = evidence.get("position_histogram") or []
+    near_end = compute_near_end_fraction(pos_hist)
+
+    risk_score = float(artifact_risk.get("risk_score", 0.0))
+
+    scores = {
+        "vaf_quality": _clamp01(vaf * 2.5),  # 1.0 once VAF >= 0.4
+        "depth_quality": _clamp01(depth / 30.0),  # 1.0 at 30x
+        "strand_balance": _clamp01(1.0 - strand_bias),
+        "mapq_quality": _clamp01(mapq_quality),
+        "position_quality": _clamp01(1.0 - near_end),
+        "artifact_risk_inverse": _clamp01(1.0 - risk_score),
+    }
+    return {k: round(v, 4) for k, v in scores.items()}
+
+
+def _clamp01(x: float) -> float:
+    """Clamp a float into the closed interval [0, 1]."""
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
+
+
 def format_curation_summary(summary: dict) -> str:
     """Format curation summary as readable text for LLM context."""
     v = summary["variant"]
@@ -147,12 +192,27 @@ def format_curation_summary(summary: dict) -> str:
     return "\n".join(lines)
 
 
+def _error_response(message: str, output_format: str) -> dict:
+    """Wrap an error message in the same envelope shape both formats produce."""
+    if output_format == "rubric":
+        payload = json.dumps({"error": message, "rubric_version": RUBRIC_VERSION})
+        return {"content": [{"type": "text", "text": payload}]}
+    return {"content": [{"type": "text", "text": message}]}
+
+
+@telemetry_wrapper("get_variant_curation_summary")
 async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Generate a curation-focused summary for a specific variant.
 
-    Returns structured data optimized for clinical interpretation,
-    including artifact risk assessment, quality metrics, and
-    recommendations for further review.
+    Returns structured data optimized for clinical interpretation, including
+    artifact risk assessment, quality metrics, and recommendations for further
+    review.
+
+    ``args["format"]`` selects the output shape:
+    - ``"text"`` (default): a human-readable text summary for LLM context.
+    - ``"rubric"``: a JSON document with the structured summary plus a
+      ``scores`` sub-dict (0-1 floats) and ``rubric_version``, suitable for
+      deterministic grading.
     """
     # Import here to avoid circular dependency (tools imports from this module's siblings)
     from ..core.tools import _fetch_region_with_timeout
@@ -165,18 +225,21 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     alt = args["alt"]
     window = args.get("window", 50)
     reference = args.get("reference", config.reference)
+    output_format = args.get("format", "text")
+    if output_format not in _VALID_FORMATS:
+        output_format = "text"
 
     # Validate inputs
     validation_error = validate_variant_input(chrom, pos, ref, alt)
     if validation_error:
-        return {"content": [{"type": "text", "text": validation_error}]}
+        return _error_response(validation_error, output_format)
 
     region = f"{chrom}:{pos - window}-{pos + window}"
 
     try:
         data = await _fetch_region_with_timeout(file_path, region, reference, config)
     except asyncio.TimeoutError:
-        return {"content": [{"type": "text", "text": "Timeout fetching region data"}]}
+        return _error_response("Timeout fetching region data", output_format)
 
     # Find the specific variant
     target_variant = None
@@ -186,15 +249,11 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
             break
 
     if not target_variant:
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Variant {chrom}:{pos} {ref}>{alt} not found in region. "
-                    f"Variants found: {len(data.variants)}",
-                }
-            ]
-        }
+        return _error_response(
+            f"Variant {chrom}:{pos} {ref}>{alt} not found in region. "
+            f"Variants found: {len(data.variants)}",
+            output_format,
+        )
 
     # Build mismatch index and compute evidence
     mismatch_index = build_mismatch_index(data.reads)
@@ -235,6 +294,11 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
             target_variant, evidence, artifact_risk
         ),
     }
+
+    if output_format == "rubric":
+        curation_summary["rubric_version"] = RUBRIC_VERSION
+        curation_summary["scores"] = compute_rubric_scores(target_variant, evidence, artifact_risk)
+        return {"content": [{"type": "text", "text": json.dumps(curation_summary)}]}
 
     # Format as readable text for LLM
     text_summary = format_curation_summary(curation_summary)

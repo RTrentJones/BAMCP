@@ -24,6 +24,7 @@ from ..constants import (
     SCAN_VARIANTS_TIMEOUT_SECONDS,
     VIEWER_RESOURCE_URI,
 )
+from ..middleware.telemetry import telemetry_wrapper
 from .cache import BAMIndexCache
 from .parsers import RegionData, fetch_region, scan_variants_chunked
 from .serialization import serialize_region_data
@@ -194,6 +195,7 @@ async def _fetch_region_with_timeout(
 # -- Tool Handlers -----------------------------------------------------------
 
 
+@telemetry_wrapper("get_variants")
 async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Return variants without UI."""
     file_path = args["file_path"]
@@ -217,6 +219,7 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     }
 
 
+@telemetry_wrapper("get_coverage")
 async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Return coverage statistics."""
     file_path = args["file_path"]
@@ -241,6 +244,7 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
     return {"content": [{"type": "text", "text": json.dumps(stats)}]}
 
 
+@telemetry_wrapper("list_contigs")
 async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """List contigs in a BAM/CRAM file and detect genome build."""
     from .reference import detect_genome_build, get_public_reference_url
@@ -296,6 +300,7 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
     }
 
 
+@telemetry_wrapper("jump_to")
 async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Handle jump_to tool call.
 
@@ -329,6 +334,7 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     }
 
 
+@telemetry_wrapper("visualize_region")
 async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Handle visualize_region tool call.
 
@@ -360,6 +366,7 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     }
 
 
+@telemetry_wrapper("get_region_summary")
 async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Handle get_region_summary tool call.
 
@@ -393,6 +400,7 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     return {"content": [{"type": "text", "text": "\n".join(summary_lines)}]}
 
 
+@telemetry_wrapper("lookup_clinvar")
 async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Look up a variant in ClinVar via NCBI E-utilities.
 
@@ -469,6 +477,7 @@ async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> di
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 
 
+@telemetry_wrapper("lookup_gnomad")
 async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Look up a variant in gnomAD for population allele frequency data.
 
@@ -545,6 +554,7 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 
 
+@telemetry_wrapper("scan_variants")
 async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Scan an entire contig for variants using fast coverage-based detection."""
     file_path = args["file_path"]

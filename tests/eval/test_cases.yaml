@@ -1,0 +1,53 @@
+# BAMCP eval cases — MARRVEL-MCP-compatible schema.
+#
+# Required fields: name, input, expected.
+# Optional fields: category, tools_expected, bam_fixture, rendering_modes.
+#
+# Deterministic grading:
+#   - `tools_expected` is satisfied if every named tool appears in telemetry.
+#   - `expected` may contain inline thresholds for rubric scores using the
+#     literal "score_at_least: <key>=<float>" — the grader pulls the value
+#     from the JSON rubric payload the variant curation tool emits.
+
+- case:
+    name: "Coverage stats for chr1:90-200"
+    category: "Region Analysis"
+    input: |
+      Compute coverage statistics for chr1:90-200 in tests/fixtures/small.bam.
+      Call get_coverage and report the mean depth.
+    expected: "Mean coverage statistic returned by get_coverage."
+    tools_expected: ["get_coverage"]
+    bam_fixture: "tests/fixtures/small.bam"
+
+- case:
+    name: "Variant detection in chr1:1000-2000"
+    category: "Variant Detection"
+    input: |
+      Find variants in chr1:1000-2000 of tests/fixtures/comprehensive.bam
+      using reference tests/fixtures/comprehensive_ref.fa. Call get_variants.
+    expected: "At least one variant is reported by get_variants."
+    tools_expected: ["get_variants"]
+    bam_fixture: "tests/fixtures/comprehensive.bam"
+
+- case:
+    name: "List contigs and detect genome build"
+    category: "Region Analysis"
+    input: |
+      List contigs in tests/fixtures/small.bam. Use list_contigs.
+    expected: "Tool list_contigs returns chr1 with its length."
+    tools_expected: ["list_contigs"]
+    bam_fixture: "tests/fixtures/small.bam"
+
+- case:
+    name: "TP53-like curation rubric scores"
+    category: "Variant Curation"
+    input: |
+      For variant chr1:1050 A>T in tests/fixtures/comprehensive.bam, call
+      get_variant_curation_summary with format="rubric". Verify the rubric
+      reports adequate depth quality.
+    expected: |
+      The curation rubric reports score_at_least: depth_quality=0.5
+      and the rubric scores cover all six quality channels.
+    tools_expected: ["get_variant_curation_summary"]
+    bam_fixture: "tests/fixtures/comprehensive.bam"
+    rendering_modes: ["expanded", "dv-strips", "dv-composite"]

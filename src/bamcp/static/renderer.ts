@@ -4,6 +4,8 @@ import {
     BASE_COLORS,
     COLOR_PALETTES,
     DISPLAY_MODE_CONFIGS,
+    DV_CHANNEL_COUNT,
+    DV_PALETTE,
     INSERT_SIZE_THRESHOLDS,
     SOFT_CLIP_STYLE,
 } from "./constants";
@@ -480,6 +482,13 @@ export class Renderer {
 
         if (!data) return;
 
+        // DeepVariant-style pileup modes use a dedicated channel renderer.
+        const mode = this.state.settings.displayMode;
+        if (mode === 'dv-strips' || mode === 'dv-composite') {
+            this.renderDeepVariantReads(mode, width, height, scale);
+            return;
+        }
+
         // Clip reads to data range so they don't extend beyond coverage fill
         const clipX = (data.start - this.state.viewport.start) * scale;
         const clipW = (data.end - data.start) * scale;
@@ -818,6 +827,212 @@ export class Renderer {
 
         ctx.setLineDash([]);
         ctx.restore();
+    }
+
+    // ==================== DEEPVARIANT-STYLE PILEUP ====================
+    //
+    // Each base of each read is rendered as a per-position pixel column.
+    // Two sub-modes:
+    //   - dv-strips:    six stacked horizontal channels per read
+    //   - dv-composite: a single false-color row per read, packing all 6 channels
+    //
+    // Channel meanings follow DeepVariant's tensor encoding:
+    //   0: read base (A/C/G/T/N)
+    //   1: base quality (0..60 -> intensity)
+    //   2: mapping quality (0..60 -> intensity)
+    //   3: strand (forward / reverse)
+    //   4: supports active variant (alt / ref / not-at-variant)
+    //   5: read base differs from reference (mismatch -> 1)
+
+    private renderDeepVariantReads(
+        mode: 'dv-strips' | 'dv-composite',
+        width: number,
+        height: number,
+        scale: number,
+    ): void {
+        const ctx = this.readsCtx;
+        const data = this.state.data;
+        const { height: READ_HEIGHT, gap: READ_GAP } = this.getReadDimensions();
+        if (!data) return;
+
+        const clipX = (data.start - this.state.viewport.start) * scale;
+        const clipW = (data.end - data.start) * scale;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(clipX, 0, clipW, height);
+        ctx.clip();
+
+        const activePos = this.state.settings.activeVariantPosition;
+        const activeAlt = this.state.settings.activeVariantAlt;
+
+        // Per-pixel width — falls back to 1 when zoomed all the way out so
+        // each read still produces visible per-position coverage.
+        const baseW = Math.max(scale, 1);
+
+        for (let rowIndex = 0; rowIndex < this.state.packedRows.length; rowIndex++) {
+            const row = this.state.packedRows[rowIndex];
+            const y = rowIndex * (READ_HEIGHT + READ_GAP);
+            if (y > height) break;
+
+            for (const read of row) {
+                const x1 = (read.position - this.state.viewport.start) * scale;
+                const x2 = (read.end_position - this.state.viewport.start) * scale;
+                if (x2 < 0 || x1 > width) continue;
+
+                if (mode === 'dv-strips') {
+                    this.renderReadStrips(read, x1, y, scale, baseW, READ_HEIGHT, activePos, activeAlt);
+                } else {
+                    this.renderReadComposite(read, x1, y, scale, baseW, READ_HEIGHT, activePos, activeAlt);
+                }
+            }
+        }
+
+        ctx.restore();
+    }
+
+    /**
+     * Render a single read as 6 stacked horizontal strips.
+     */
+    private renderReadStrips(
+        read: Read,
+        x1: number,
+        y: number,
+        scale: number,
+        baseW: number,
+        readHeight: number,
+        activePos: number | null,
+        activeAlt: string | null,
+    ): void {
+        const ctx = this.readsCtx;
+        const stripH = Math.floor(readHeight / DV_CHANNEL_COUNT);
+
+        const len = this.readPositionLength(read);
+        const mismatchSet = this.buildMismatchSet(read);
+
+        // Iterate every reference position the read covers.
+        for (let i = 0; i < len; i++) {
+            const xi = x1 + i * scale;
+            const refPos = read.position + i;
+            if (xi + baseW < 0) continue;
+            if (xi > this.readsCanvas.width) break;
+
+            const base = (read.sequence && i < read.sequence.length) ? read.sequence[i].toUpperCase() : 'N';
+            const qual = (read.qualities && i < read.qualities.length) ? read.qualities[i] : 0;
+            const mapq = read.mapping_quality;
+            const supportsVariant = this.classifyVariantSupport(refPos, base, activePos, activeAlt);
+            const isMismatch = mismatchSet.has(refPos);
+
+            // Strip 0: base color
+            ctx.fillStyle = BASE_COLORS[base] || '#374151';
+            ctx.fillRect(xi, y, baseW, stripH);
+
+            // Strip 1: base quality (grayscale intensity)
+            ctx.fillStyle = this.qualGrayscale(qual);
+            ctx.fillRect(xi, y + stripH, baseW, stripH);
+
+            // Strip 2: MAPQ (grayscale intensity)
+            ctx.fillStyle = this.qualGrayscale(mapq);
+            ctx.fillRect(xi, y + 2 * stripH, baseW, stripH);
+
+            // Strip 3: strand
+            ctx.fillStyle = read.is_reverse ? DV_PALETTE.strandReverse : DV_PALETTE.strandForward;
+            ctx.fillRect(xi, y + 3 * stripH, baseW, stripH);
+
+            // Strip 4: supports active variant
+            ctx.fillStyle =
+                supportsVariant === 'alt' ? DV_PALETTE.variantSupport :
+                supportsVariant === 'ref' ? DV_PALETTE.variantReference :
+                DV_PALETTE.variantNoCall;
+            ctx.fillRect(xi, y + 4 * stripH, baseW, stripH);
+
+            // Strip 5: ref-differs
+            ctx.fillStyle = isMismatch ? DV_PALETTE.refDiffers : DV_PALETTE.refMatch;
+            ctx.fillRect(xi, y + 5 * stripH, baseW, stripH);
+        }
+    }
+
+    /**
+     * Render a single read as a one-row false-color composite.
+     * RGB encoding:
+     *   R = 80 + supports_variant * 170   (80 = ref, 165 = alt, 0 = no-call)
+     *   G = base_quality * 4               (0..240 over 0..60 PHRED)
+     *   B = mapq * 4                       (0..240 over 0..60)
+     * Mismatch positions get a thin top border so they remain visible at small scale.
+     */
+    private renderReadComposite(
+        read: Read,
+        x1: number,
+        y: number,
+        scale: number,
+        baseW: number,
+        readHeight: number,
+        activePos: number | null,
+        activeAlt: string | null,
+    ): void {
+        const ctx = this.readsCtx;
+        const len = this.readPositionLength(read);
+        const mismatchSet = this.buildMismatchSet(read);
+
+        for (let i = 0; i < len; i++) {
+            const xi = x1 + i * scale;
+            const refPos = read.position + i;
+            if (xi + baseW < 0) continue;
+            if (xi > this.readsCanvas.width) break;
+
+            const base = (read.sequence && i < read.sequence.length) ? read.sequence[i].toUpperCase() : 'N';
+            const qual = (read.qualities && i < read.qualities.length) ? read.qualities[i] : 0;
+            const support = this.classifyVariantSupport(refPos, base, activePos, activeAlt);
+            const supportTone = support === 'alt' ? 1.0 : support === 'ref' ? 0.45 : 0.0;
+
+            const r = Math.min(255, Math.round(80 + supportTone * 170));
+            const g = Math.min(255, Math.round(qual * 4));
+            const b = Math.min(255, Math.round(read.mapping_quality * 4));
+
+            ctx.fillStyle = `rgb(${r},${g},${b})`;
+            ctx.fillRect(xi, y, baseW, readHeight);
+
+            if (mismatchSet.has(refPos)) {
+                // Cyan stripe on top edge to mark a mismatch.
+                ctx.fillStyle = DV_PALETTE.refDiffers;
+                ctx.fillRect(xi, y, baseW, Math.max(1, Math.floor(readHeight / 4)));
+            }
+        }
+    }
+
+    private readPositionLength(read: Read): number {
+        // Use sequence length when available; otherwise fall back to the
+        // end-position span so the read still draws (no per-base channels).
+        if (read.sequence) return read.sequence.length;
+        return Math.max(1, read.end_position - read.position);
+    }
+
+    private buildMismatchSet(read: Read): Set<number> {
+        const out = new Set<number>();
+        for (const m of read.mismatches) out.add(m.pos);
+        return out;
+    }
+
+    /**
+     * Return how this base relates to the currently-active variant.
+     *  - 'alt'  : at the active variant position AND base matches the alt allele
+     *  - 'ref'  : at the active variant position AND base matches the ref allele
+     *  - 'none' : either no active variant set, or position doesn't match
+     */
+    private classifyVariantSupport(
+        refPos: number,
+        base: string,
+        activePos: number | null,
+        activeAlt: string | null,
+    ): 'alt' | 'ref' | 'none' {
+        if (activePos === null || activeAlt === null) return 'none';
+        if (refPos !== activePos) return 'none';
+        return base === activeAlt.toUpperCase() ? 'alt' : 'ref';
+    }
+
+    /** Convert a 0..60 PHRED score to a grayscale CSS color. */
+    private qualGrayscale(q: number): string {
+        const v = Math.min(255, Math.max(0, Math.round((q / 60) * 255)));
+        return `rgb(${v},${v},${v})`;
     }
 
     public getReadAtPosition(event: MouseEvent): Read | null {

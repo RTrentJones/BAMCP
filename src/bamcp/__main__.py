@@ -43,6 +43,14 @@ def main() -> None:
         )
         sys.exit(1)
 
+    from .middleware.telemetry import configure_telemetry
+
+    configure_telemetry(
+        enabled=config.telemetry_enabled,
+        jsonl_path=config.telemetry_path,
+        otel_enabled=config.telemetry_otel_enabled,
+    )
+
     # Register cleanup on exit to remove this session's cache files
     def cleanup_on_exit() -> None:
         cache = get_cache(config)

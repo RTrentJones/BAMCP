@@ -8,6 +8,8 @@ export const DEFAULT_SETTINGS: ViewerSettings = {
     sortBy: 'position',
     showSoftClips: false,
     showMismatches: true,
+    activeVariantPosition: null,
+    activeVariantAlt: null,
 };
 
 export class StateManager {

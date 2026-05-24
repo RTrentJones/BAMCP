@@ -88,13 +88,13 @@ class TestSerializeRegionData:
         assert r["position"] == 100
         assert r["end_position"] == 104
         assert r["mapping_quality"] == 60
-        assert "qualities" not in r  # Qualities are never serialized
+        assert r["qualities"] == [30, 30, 30, 30]  # Qualities ride with sequence
         assert r["is_reverse"] is False
         assert len(r["mismatches"]) == 1
 
     @pytest.mark.unit
-    def test_compact_mode_omits_sequence(self):
-        """Compact mode omits sequence but never qualities."""
+    def test_compact_mode_omits_sequence_and_qualities(self):
+        """Compact mode omits both sequence and qualities to keep payloads small."""
         read = AlignedRead(
             name="r1",
             sequence="ACGT",
@@ -117,7 +117,7 @@ class TestSerializeRegionData:
         result = serialize_region_data(data, compact=True)
         r = result["reads"][0]
         assert "sequence" not in r  # Compact omits sequence
-        assert "qualities" not in r  # Qualities never serialized
+        assert "qualities" not in r  # And the matching qualities
 
     @pytest.mark.unit
     def test_serialization_is_json_compatible(self):

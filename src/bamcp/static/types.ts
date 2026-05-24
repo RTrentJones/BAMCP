@@ -1,5 +1,7 @@
-// IGV-style display mode types
-export type ReadDisplayMode = 'squished' | 'compact' | 'expanded';
+// IGV-style display modes plus DeepVariant-style pileup modes.
+// 'dv-strips' renders each read as 6 stacked horizontal channels.
+// 'dv-composite' renders each read as a single false-color row encoding all 6 channels.
+export type ReadDisplayMode = 'squished' | 'compact' | 'expanded' | 'dv-strips' | 'dv-composite';
 export type ColorBy = 'strand' | 'mapq' | 'insertSize' | 'baseQuality';
 export type SortBy = 'position' | 'mapq' | 'insertSize' | 'strand';
 
@@ -9,6 +11,10 @@ export interface ViewerSettings {
     sortBy: SortBy;
     showSoftClips: boolean;
     showMismatches: boolean;
+    // Active variant for the "supports-variant" DV channel. Set when the user
+    // clicks a variant row; null when no variant is selected.
+    activeVariantPosition: number | null;
+    activeVariantAlt: string | null;
 }
 
 export interface SoftClip {
@@ -21,6 +27,7 @@ export interface SoftClip {
 export interface Read {
     name: string;
     sequence?: string;  // Only in non-compact mode (high zoom)
+    qualities?: number[];  // Per-base PHRED qualities; only present with sequence
     cigar: string;
     position: number;
     end_position: number;

@@ -793,6 +793,10 @@ class BAMCPViewer {
                 }
 
                 this.state.selectedVariantIndex = idx;
+                // Mark this variant as the active one for the DeepVariant
+                // "supports-variant" channel.
+                this.state.settings.activeVariantPosition = v.position;
+                this.state.settings.activeVariantAlt = v.alt;
                 this.renderVariantTable();
 
                 // Show evidence

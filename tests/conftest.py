@@ -43,13 +43,27 @@ def ref_fasta_path():
     return os.path.join(FIXTURES_DIR, "ref.fa")
 
 
-@pytest.fixture
-def comprehensive_bam_path():
-    """Path to the comprehensive test BAM (multi-variant fixture)."""
-    return os.path.join(FIXTURES_DIR, "comprehensive.bam")
-
-
-@pytest.fixture
+@pytest.fixture(scope="session")
 def comprehensive_ref_fasta_path():
-    """Path to the comprehensive test reference FASTA."""
-    return os.path.join(FIXTURES_DIR, "comprehensive_ref.fa")
+    """Path to the comprehensive reference FASTA. Generated on first use if absent.
+
+    CI (and fresh checkouts) won't have the file until something asks for it,
+    so we lazily create it here instead of relying on the e2e session fixture.
+    """
+    path = os.path.join(FIXTURES_DIR, "comprehensive_ref.fa")
+    if not os.path.exists(path):
+        from tests.create_fixtures import create_comprehensive_reference
+
+        create_comprehensive_reference()
+    return path
+
+
+@pytest.fixture(scope="session")
+def comprehensive_bam_path(comprehensive_ref_fasta_path):
+    """Path to the comprehensive test BAM. Generated on first use if absent."""
+    path = os.path.join(FIXTURES_DIR, "comprehensive.bam")
+    if not os.path.exists(path):
+        from tests.create_fixtures import create_comprehensive_bam
+
+        create_comprehensive_bam(comprehensive_ref_fasta_path)
+    return path

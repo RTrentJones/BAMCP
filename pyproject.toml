@@ -92,6 +92,20 @@ python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 
+# Optional-extras packages aren't always installed (CI lint job uses [dev] only).
+# Skip missing-imports errors for them so mypy stays useful without forcing the
+# CI lint job to install [eval] + [telemetry].
+[[tool.mypy.overrides]]
+module = [
+    "anthropic",
+    "anthropic.*",
+    "openai",
+    "openai.*",
+    "opentelemetry",
+    "opentelemetry.*",
+]
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["bamcp"]
 omit = [

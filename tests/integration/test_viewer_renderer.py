@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -16,8 +17,6 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 def _is_dist_built() -> bool:
     """Skip these tests when dist/viewer.html hasn't been built yet."""
-    from pathlib import Path
-
     return (
         Path(__file__).resolve().parent.parent.parent
         / "src"
@@ -28,10 +27,35 @@ def _is_dist_built() -> bool:
     ).exists()
 
 
-pytestmark = pytest.mark.skipif(
-    not _is_dist_built(),
-    reason="viewer dist not built — run `cd src/bamcp/static && npm run build`",
-)
+def _is_chromium_installed() -> bool:
+    """Skip when Playwright's Chromium hasn't been downloaded.
+
+    The `make test` job on CI installs the Playwright Python package but does
+    not run `playwright install chromium`; only the e2e job does. Skip rather
+    than fail so the matrix stays green.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return False
+    try:
+        with sync_playwright() as p:
+            # executable_path raises if the browser isn't installed.
+            return Path(p.chromium.executable_path).exists()
+    except Exception:
+        return False
+
+
+pytestmark = [
+    pytest.mark.skipif(
+        not _is_dist_built(),
+        reason="viewer dist not built — run `cd src/bamcp/static && npm run build`",
+    ),
+    pytest.mark.skipif(
+        not _is_chromium_installed(),
+        reason="Playwright Chromium not installed — run `python -m playwright install chromium`",
+    ),
+]
 
 
 @pytest.fixture

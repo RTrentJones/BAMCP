@@ -13,9 +13,15 @@
 #   OCI_CLI_FINGERPRINT    — API key fingerprint
 #   OCI_CLI_KEY_CONTENT    — API signing key (PEM content)
 #   OCI_CLI_REGION         — e.g., us-ashburn-1
-#   OCI_COMPARTMENT_OCID   — compartment for OCIR repo + container
 #   OCI_CONTAINER_INSTANCE_OCID — the container instance to restart
-#   OCI_AUTH_TOKEN          — OCIR auth token
+#   OCI_AUTH_TOKEN         — OCIR auth token
+#   OCIR_REPO_PATH         — full OCIR repo path, e.g. iad.ocir.io/<namespace>/bamcp
+#                            (Find in OCI Console → Container Registry → repo
+#                             URL, or via `oci os ns get` for the namespace.)
+#
+# Note: `oracle-actions/get-ocir-repository` is intentionally NOT used here.
+# It refuses to operate against Free Tier tenancies as of mid-2026, so we
+# pass the repo path explicitly via OCIR_REPO_PATH instead.
 # ============================================================================
 
 name: Deploy to OCI
@@ -45,13 +51,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Get OCIR Repository
-        uses: oracle-actions/get-ocir-repository@v1.3.0
-        id: repo
-        with:
-          name: bamcp
-          compartment: ${{ secrets.OCI_COMPARTMENT_OCID }}
-
       - name: Login to OCIR
         uses: oracle-actions/login-ocir@v1.3.0
         with:
@@ -64,8 +63,8 @@ jobs:
           push: true
           platforms: linux/arm64
           tags: |
-            ${{ steps.repo.outputs.repo_path }}:latest
-            ${{ steps.repo.outputs.repo_path }}:${{ github.ref_name }}
+            ${{ secrets.OCIR_REPO_PATH }}:latest
+            ${{ secrets.OCIR_REPO_PATH }}:${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

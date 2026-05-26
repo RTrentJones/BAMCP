@@ -3,14 +3,14 @@
 # Setup Cloudflare Tunnel sidecar for BAMCP OCI Container Instance.
 #
 # Recreates the container instance with two containers:
-#   1. BAMCP (from OCIR)
+#   1. BAMCP (from GHCR — see deploy.yml)
 #   2. cloudflared (Cloudflare Tunnel connector)
 #
 # Prerequisites:
 #   - OCI CLI configured (`oci setup config`)
 #   - GitHub CLI authenticated (`gh auth login`)
 #   - Cloudflare Tunnel created (Zero Trust -> Networks -> Tunnels)
-#   - BAMCP image pushed to OCIR
+#   - BAMCP image pushed to GHCR (run the Deploy to OCI workflow once)
 #
 # Usage:
 #   ./scripts/setup-cloudflared.sh [--profile PROFILE] [--dry-run]
@@ -230,36 +230,43 @@ SUBNET_OCID="${SUBNET_IDS[$SUB_IDX]}"
 echo "  Selected: ${SUBNET_NAMES[$SUB_IDX]}"
 echo
 
-# ---------- detect OCIR image URL ----------
+# ---------- detect GHCR image URL ----------
 
-NAMESPACE=$(run_oci os ns get --query 'data' --raw-output 2>/dev/null)
-DEFAULT_IMAGE="${REGION}.ocir.io/${NAMESPACE}/bamcp:latest"
-echo "OCIR image URL:"
+GH_OWNER=$(gh repo view --json owner --jq '.owner.login' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+if [[ -z "$GH_OWNER" ]]; then
+    GH_OWNER="rtrentjones"  # fallback
+fi
+DEFAULT_IMAGE="ghcr.io/${GH_OWNER}/bamcp:latest"
+echo "GHCR image URL:"
 echo "  Default: $DEFAULT_IMAGE"
 read -rp "  Use this? [Y/n] or paste custom URL: " IMAGE_INPUT
 
 if [[ -z "$IMAGE_INPUT" || "$IMAGE_INPUT" == [yY] ]]; then
-    OCIR_IMAGE="$DEFAULT_IMAGE"
+    BAMCP_IMAGE="$DEFAULT_IMAGE"
 else
-    OCIR_IMAGE="$IMAGE_INPUT"
+    BAMCP_IMAGE="$IMAGE_INPUT"
 fi
-echo "  Using: $OCIR_IMAGE"
+echo "  Using: $BAMCP_IMAGE"
 echo
 
-# ---------- OCIR registry credentials ----------
+# ---------- GHCR pull credentials (optional) ----------
 
-OCIR_USER=$(read_config "user")
-OCIR_SERVER="${REGION}.ocir.io"
-OCIR_USERNAME="${NAMESPACE}/$(run_oci iam user get \
-    --user-id "$OCIR_USER" \
-    --query 'data.name' \
-    --raw-output 2>/dev/null)"
+# GHCR packages can be public (no auth needed) or private (PAT with read:packages).
+# Make the registry secret here is constructed only when the package is private.
+USE_REGISTRY_CREDS=false
+GHCR_SERVER="ghcr.io"
+GHCR_USERNAME=""
+GHCR_PAT=""
 
-echo "OCIR pull credentials:"
-echo "  Registry: $OCIR_SERVER"
-echo "  Username: $OCIR_USERNAME"
-read -rsp "  Auth token (same one used for Docker login): " OCIR_AUTH_TOKEN
-echo
+echo "Is the GHCR package public?"
+echo "  (GitHub -> Packages -> bamcp -> Settings -> visibility)"
+read -rp "  Public? [Y/n] " IS_PUBLIC
+if [[ -n "$IS_PUBLIC" && "$IS_PUBLIC" != [yY] ]]; then
+    USE_REGISTRY_CREDS=true
+    GHCR_USERNAME="$GH_OWNER"
+    read -rsp "  GitHub PAT with read:packages: " GHCR_PAT
+    echo
+fi
 echo
 
 # ---------- check for existing instance ----------
@@ -314,7 +321,7 @@ cat > "$CONTAINER_JSON_FILE" <<JSONEOF
 [
   {
     "displayName": "bamcp",
-    "imageUrl": "$OCIR_IMAGE",
+    "imageUrl": "$BAMCP_IMAGE",
     "environmentVariables": {
       "BAMCP_TRANSPORT": "streamable-http",
       "BAMCP_HOST": "0.0.0.0",
@@ -341,21 +348,23 @@ JSONEOF
 
 VNICS_JSON="[{\"subnetId\": \"$SUBNET_OCID\", \"isPublicIpAssigned\": false}]"
 
-OCIR_USERNAME_B64=$(printf '%s' "$OCIR_USERNAME" | base64 -w0)
-OCIR_AUTH_TOKEN_B64=$(printf '%s' "$OCIR_AUTH_TOKEN" | base64 -w0)
-
-REGISTRY_CREDS_FILE=$(mktemp)
-chmod 600 "$REGISTRY_CREDS_FILE"
-cat > "$REGISTRY_CREDS_FILE" <<REGEOF
+REGISTRY_CREDS_FILE=""
+if $USE_REGISTRY_CREDS; then
+    GHCR_USERNAME_B64=$(printf '%s' "$GHCR_USERNAME" | base64 -w0)
+    GHCR_PAT_B64=$(printf '%s' "$GHCR_PAT" | base64 -w0)
+    REGISTRY_CREDS_FILE=$(mktemp)
+    chmod 600 "$REGISTRY_CREDS_FILE"
+    cat > "$REGISTRY_CREDS_FILE" <<REGEOF
 [
   {
     "secretType": "BASIC",
-    "registryEndpoint": "$OCIR_SERVER",
-    "username": "$OCIR_USERNAME_B64",
-    "password": "$OCIR_AUTH_TOKEN_B64"
+    "registryEndpoint": "$GHCR_SERVER",
+    "username": "$GHCR_USERNAME_B64",
+    "password": "$GHCR_PAT_B64"
   }
 ]
 REGEOF
+fi
 
 # ---------- summary ----------
 
@@ -369,8 +378,13 @@ echo "  Subnet:          ${SUBNET_NAMES[$SUB_IDX]}"
 echo "  Public IP:       no"
 echo "  Restart policy:  ALWAYS"
 echo "  Containers:"
-echo "    [1] bamcp         — $OCIR_IMAGE"
+echo "    [1] bamcp         — $BAMCP_IMAGE"
 echo "    [2] cloudflared   — docker.io/cloudflare/cloudflared:latest"
+if $USE_REGISTRY_CREDS; then
+    echo "  Pull secret:     ghcr.io ($GHCR_USERNAME / PAT)"
+else
+    echo "  Pull secret:     none (public GHCR image)"
+fi
 echo "  Tunnel token:    ${TUNNEL_TOKEN:0:20}..."
 echo "============================================"
 echo
@@ -390,17 +404,21 @@ fi
 
 echo
 echo "Creating container instance..."
-CREATE_OUTPUT=$(run_oci container-instances container-instance create \
-    --compartment-id "$COMPARTMENT_OCID" \
-    --availability-domain "$AD_NAME" \
-    --shape "CI.Standard.A1.Flex" \
-    --shape-config '{"ocpus": 1, "memoryInGBs": 2}' \
-    --display-name "bamcp" \
-    --container-restart-policy "ALWAYS" \
-    --containers "file://$CONTAINER_JSON_FILE" \
-    --vnics "$VNICS_JSON" \
-    --image-pull-secrets "file://$REGISTRY_CREDS_FILE" \
-    2>&1) || true
+CREATE_ARGS=(
+    container-instances container-instance create
+    --compartment-id "$COMPARTMENT_OCID"
+    --availability-domain "$AD_NAME"
+    --shape "CI.Standard.A1.Flex"
+    --shape-config '{"ocpus": 1, "memoryInGBs": 2}'
+    --display-name "bamcp"
+    --container-restart-policy "ALWAYS"
+    --containers "file://$CONTAINER_JSON_FILE"
+    --vnics "$VNICS_JSON"
+)
+if $USE_REGISTRY_CREDS; then
+    CREATE_ARGS+=(--image-pull-secrets "file://$REGISTRY_CREDS_FILE")
+fi
+CREATE_OUTPUT=$(run_oci "${CREATE_ARGS[@]}" 2>&1) || true
 
 echo "$CREATE_OUTPUT"
 

@@ -1,4 +1,4 @@
-.PHONY: install test test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval eval-cached eval-compare eval-dry eval-vision-setup render-viewer render-viewer-all-modes
+.PHONY: install test test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval-smoke eval eval-cached eval-compare eval-dry eval-vision-setup render-viewer render-viewer-all-modes
 
 build-viewer:
 	cd src/bamcp/static && npm install && npm run build
@@ -45,6 +45,12 @@ coverage:
 
 coverage-strict:
 	python -m pytest tests/ --ignore=tests/e2e -v --cov=bamcp --cov-fail-under=85 --cov-report=term-missing
+
+# Deterministic ground-truth gate — no LLM, no network. This is the CI
+# regression gate: scores BAMCP tools against the synthetic_v1 truth set and
+# fails if variant detection or artifact scoring regresses.
+eval-smoke:
+	python -m bamcp.eval.truthset --manifest tests/eval/datasets/synthetic_v1/manifest.yaml
 
 # Eval harness — MARRVEL-MCP-compatible runner against the BAMCP server.
 eval:

@@ -475,7 +475,7 @@ docker compose --profile prod up
 - [x] **v0.4** — Docker infrastructure (prod/dev/beta), CI/CD
 - [x] **v0.5** — MCP Apps SDK integration (`updateModelContext`, display modes, auto-fetch)
 - [x] **v0.6** — ClinVar + gnomAD API clients, gene search, variant curation tools
-- [ ] **v0.7** — Evaluation harness (ACMG scaffolds, failure mode detection, ground truth benchmarks)
+- [x] **v0.7** — Evaluation harness: deterministic ground-truth gate (variant P/R/F1, artifact-type recall) wired into CI, plus LLM + vision harness ([EVALS.md](EVALS.md)). GIAB real-data set scaffolded.
 - [ ] **v0.8** — Gene annotation track (RefSeq)
 - [ ] **v0.9** — VCF overlay, multi-sample comparison
 - [ ] **v1.0** — Stable release

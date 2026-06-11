@@ -29,12 +29,14 @@ jobs:
           cache-dependency-path: pyproject.toml
       - run: make install
       - name: Audit installed dependencies for known CVEs
-        # Audits the resolved environment (incl. transitive deps). To accept a
-        # specific advisory with no available fix, add `--ignore-vuln <GHSA-id>`
-        # here with a comment justifying it — keep the list short and reviewed.
+        # Audits the resolved environment (incl. transitive deps). --skip-editable
+        # drops the local editable `bamcp` install, which isn't on PyPI and would
+        # otherwise trip --strict ("could not audit"). To accept a specific
+        # advisory with no available fix, add `--ignore-vuln <GHSA-id>` here with
+        # a comment justifying it — keep the list short and reviewed.
         run: |
           pip install pip-audit
-          pip-audit --strict --desc
+          pip-audit --strict --desc --skip-editable
 
   codeql:
     runs-on: ubuntu-latest

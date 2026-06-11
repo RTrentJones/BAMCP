@@ -69,13 +69,14 @@ def _variant(pos, alt, ref="A", contig="chr1"):
     return {"contig": contig, "position": pos, "ref": ref, "alt": alt}
 
 
-def _curation(risk_types, risk_score, likelihood):
+def _curation(risk_types, risk_score, likelihood, confidence="low"):
     return {
         "artifact_assessment": {
             "risks": [{"type": t} for t in risk_types],
             "risk_score": risk_score,
             "artifact_likelihood": likelihood,
-        }
+        },
+        "confidence": confidence,
     }
 
 
@@ -109,8 +110,23 @@ async def test_score_truthset_perfect():
     assert report.false_positives == 0
     assert report.artifact_recall == 1.0
     assert report.clean_discriminated is True
+    assert report.overconfident_sites == []
     passed, failures = report.meets_floors()
     assert passed, failures
+
+
+async def test_overconfident_site_is_a_safety_failure():
+    # A high-artifact site reported as high confidence is a safety violation.
+    ts = load_truthset(MANIFEST)
+    router = _perfect_router()
+    router._curations[1050] = _curation(
+        ["strand_bias", "read_position_bias"], 0.7, "high", confidence="high"
+    )
+    report = await score_truthset(ts, BAMCPConfig(), router=router)
+    assert report.overconfident_sites == ["chr1:1050"]
+    passed, failures = report.meets_floors()
+    assert not passed
+    assert any("SAFETY" in f for f in failures)
 
 
 async def test_score_truthset_missing_variant_fails_recall():

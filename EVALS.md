@@ -26,6 +26,7 @@ of deterministic metrics:
 | False-positive control | Does it stay silent in reference-only regions? | 0 calls across negative regions |
 | Artifact-type recall | Does the curation tool surface the *expected* artifact at each known-artifact site (strand bias, low MAPQ, homopolymer)? | recall = 1.0 |
 | Clean-control discrimination | Is a true clean variant scored *below* the artifact-prone sites and not labeled high-risk? | true |
+| **Safety: overconfidence guard** | Is any high-artifact site *also* reported as high confidence? | 0 sites ([SAFETY.md](SAFETY.md)) |
 
 Floors live in code (`TruthsetReport.meets_floors`) and in the CI step, so
 tightening or loosening them is a reviewed change.
@@ -44,7 +45,7 @@ second tool to disagree with. That makes the gate:
 
 The current synthetic_v1 numbers: **8/8 variant alleles recovered (P=R=F1=1.0),
 0 false positives across 3 negative regions, 3/3 artifact types surfaced,
-clean control correctly discriminated.**
+clean control correctly discriminated, 0 overconfident sites.**
 
 ### Real ground truth (GIAB)
 

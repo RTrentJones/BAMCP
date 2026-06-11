@@ -80,6 +80,12 @@ def test_clean_control_discriminated(report):
 
 
 @pytest.mark.integration
+def test_no_overconfident_artifact_sites(report):
+    # Safety invariant: no high-artifact site is reported as high confidence.
+    assert report.overconfident_sites == []
+
+
+@pytest.mark.integration
 def test_truthset_cli_exits_zero(_ensure_fixtures, capsys):
     # Exercises the full CLI path against real fixtures.
     from bamcp.eval.truthset import main

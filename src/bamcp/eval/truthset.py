@@ -131,6 +131,9 @@ class TruthsetReport:
     clean_discriminated: bool = True  # clean control scored below artifact sites
     missing_calls: list[str] = field(default_factory=list)
     spurious_calls: list[str] = field(default_factory=list)
+    # Safety guard: sites the curation tool flagged as high artifact risk yet
+    # still reported as high confidence — a clinically dangerous contradiction.
+    overconfident_sites: list[str] = field(default_factory=list)
 
     @property
     def artifact_recall(self) -> float:
@@ -143,6 +146,7 @@ class TruthsetReport:
         min_precision: float = 0.95,
         min_artifact_recall: float = 1.0,
         max_false_positives: int = 0,
+        max_overconfident: int = 0,
     ) -> tuple[bool, list[str]]:
         """Return (passed, reasons-for-failure) against the given floors."""
         failures: list[str] = []
@@ -167,6 +171,11 @@ class TruthsetReport:
             )
         if not self.clean_discriminated:
             failures.append("clean control not discriminated below artifact sites")
+        if len(self.overconfident_sites) > max_overconfident:
+            failures.append(
+                "SAFETY: high-artifact sites reported as high confidence: "
+                f"{self.overconfident_sites}"
+            )
         return (not failures, failures)
 
     def as_dict(self) -> dict[str, Any]:
@@ -180,6 +189,7 @@ class TruthsetReport:
             "clean_discriminated": self.clean_discriminated,
             "missing_calls": self.missing_calls,
             "spurious_calls": self.spurious_calls,
+            "overconfident_sites": self.overconfident_sites,
         }
 
 
@@ -242,14 +252,17 @@ async def score_truthset(
             false_positives += len(_parse_variants(neg_res.text))
 
     # ── Artifact-type recall + clean-control discrimination ──────────────
+    # ── plus the safety guard: a known-artifact site must never be high ──
+    # ── confidence (overconfidence on likely-spurious evidence). ─────────
     artifact_checks: list[ArtifactCheck] = []
     clean_scores: list[float] = []
     flagged_scores: list[float] = []
+    overconfident_sites: list[str] = []
     clean_not_high = True
     for site in truthset.variant_sites:
         if site.expected_artifact is None and not site.is_clean_control:
             continue
-        assessment, likelihood = await _curate(router, bam, reference, site)
+        assessment, likelihood, confidence = await _curate(router, bam, reference, site)
         risk_score = _risk_score(assessment)
         if site.is_clean_control:
             clean_scores.append(risk_score)
@@ -258,6 +271,8 @@ async def score_truthset(
             continue
         present = risk_types_present(assessment)
         flagged_scores.append(risk_score)
+        if likelihood == "high" and confidence == "high":
+            overconfident_sites.append(f"{site.chrom}:{site.pos}")
         artifact_checks.append(
             ArtifactCheck(
                 site=f"{site.chrom}:{site.pos}",
@@ -281,6 +296,7 @@ async def score_truthset(
         clean_discriminated=clean_discriminated,
         missing_calls=missing,
         spurious_calls=spurious,
+        overconfident_sites=overconfident_sites,
     )
 
 
@@ -289,8 +305,8 @@ async def _curate(
     bam: str,
     reference: str,
     site: TruthSite,
-) -> tuple[dict[str, Any], str]:
-    """Call get_variant_curation_summary and return (artifact_assessment, likelihood)."""
+) -> tuple[dict[str, Any], str, str]:
+    """Call the curation tool; return (artifact_assessment, likelihood, confidence)."""
     res = await router.call(
         "get_variant_curation_summary",
         {
@@ -304,16 +320,21 @@ async def _curate(
         },
     )
     if not res.ok:
-        return {}, "unknown"
+        return {}, "unknown", "unknown"
     try:
         data = json.loads(res.text)
     except (ValueError, TypeError):
-        return {}, "unknown"
+        return {}, "unknown", "unknown"
     assessment = data.get("artifact_assessment") if isinstance(data, dict) else None
     likelihood = ""
     if isinstance(assessment, dict):
         likelihood = str(assessment.get("artifact_likelihood", ""))
-    return (assessment if isinstance(assessment, dict) else {}), likelihood or "unknown"
+    confidence = str(data.get("confidence", "")) if isinstance(data, dict) else ""
+    return (
+        assessment if isinstance(assessment, dict) else {},
+        likelihood or "unknown",
+        confidence or "unknown",
+    )
 
 
 def _risk_score(assessment: dict[str, Any]) -> float:
@@ -340,6 +361,8 @@ def _format_report(report: TruthsetReport, passed: bool, failures: list[str]) ->
             f"likelihood={c.likelihood} risk={c.risk_score}"
         )
     lines.append(f"  clean discriminated {report.clean_discriminated}")
+    safety = report.overconfident_sites or "none"
+    lines.append(f"  overconfident sites {safety} (safety guard)")
     lines.append("")
     lines.append("PASS" if passed else "FAIL")
     for f in failures:

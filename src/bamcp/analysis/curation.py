@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 RUBRIC_VERSION = "1.0"
 _VALID_FORMATS = ("text", "rubric")
 
+# Intended-use boundary. BAMCP surfaces evidence to support human curation; it
+# is not a diagnostic device and its output must not be treated as a clinical
+# determination on its own. Carried in every curation response so the boundary
+# travels with the data, not just the docs. See SAFETY.md.
+INTENDED_USE = (
+    "Research and visualization use only. Not a diagnostic device and not a "
+    "substitute for a validated clinical pipeline or expert review. All calls "
+    "require confirmation by a qualified human curator."
+)
+
 
 def compute_near_end_fraction(position_histogram: list[int] | None) -> float:
     """Compute fraction of variant bases near read ends."""
@@ -85,8 +95,8 @@ def generate_curator_recommendations(
 
     if not recommendations:
         recommendations.append(
-            "No significant quality concerns identified. "
-            "Variant appears suitable for clinical interpretation."
+            "No automated quality flags raised. Manual curation is still "
+            "required; absence of flags is not a clinical determination."
         )
 
     return recommendations
@@ -188,6 +198,8 @@ def format_curation_summary(summary: dict) -> str:
     )
     for rec in summary["recommendations"]:
         lines.append(f"  * {rec}")
+
+    lines.extend(["", "INTENDED USE", f"  {summary.get('intended_use', INTENDED_USE)}"])
 
     return "\n".join(lines)
 
@@ -293,6 +305,7 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
         "recommendations": generate_curator_recommendations(
             target_variant, evidence, artifact_risk
         ),
+        "intended_use": INTENDED_USE,
     }
 
     if output_format == "rubric":

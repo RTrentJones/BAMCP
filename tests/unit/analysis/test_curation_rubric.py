@@ -186,6 +186,9 @@ class TestHandlerFormatParam:
         if "error" in payload:
             pytest.skip(f"Variant lookup failed: {payload['error']}")
         assert "scores" in payload
+        # Safety: the intended-use disclaimer travels with every curation payload.
+        assert "intended_use" in payload
+        assert "not a diagnostic device" in payload["intended_use"].lower()
         scores = payload["scores"]
         assert set(scores.keys()) == {
             "vaf_quality",

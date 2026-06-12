@@ -1,0 +1,58 @@
+name: Security
+
+# Dependency-CVE auditing + static analysis. Complements the `ruff` security
+# lints (the `S` ruleset) already enforced in ci.yml: ruff catches insecure
+# *code patterns*; this catches *vulnerable dependencies* and deeper data-flow
+# issues that linting can't see.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so newly-disclosed CVEs in pinned deps surface even with no commits.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: make install
+      - name: Audit installed dependencies for known CVEs
+        # Audit the resolved third-party deps via a frozen requirements file.
+        # We can't audit the live environment with --strict because it contains
+        # the local editable `bamcp` install (not on PyPI), which --strict treats
+        # as an un-auditable failure. `pip freeze --exclude-editable` drops it
+        # while keeping every pinned transitive dependency, so --strict stays
+        # meaningful for the deps that actually have CVE feeds. To accept a
+        # specific advisory with no available fix, add `--ignore-vuln <GHSA-id>`
+        # here with a justifying comment — keep the list short and reviewed.
+        run: |
+          pip install pip-audit
+          pip freeze --exclude-editable > /tmp/audit-requirements.txt
+          pip-audit --strict --desc -r /tmp/audit-requirements.txt
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          queries: security-extended
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"

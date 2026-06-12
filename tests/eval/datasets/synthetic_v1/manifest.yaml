@@ -1,0 +1,119 @@
+# BAMCP ground-truth eval dataset — synthetic_v1
+#
+# A small, fully deterministic truth set built from the comprehensive test
+# fixture. Every variant and every artifact below is *planted* by
+# tests/create_fixtures.py, so the expected labels are known by construction
+# rather than asserted by another caller. This lets the smoke gate measure
+# biological correctness (precision/recall, artifact-type recall) without an
+# LLM or network access.
+#
+# The same manifest schema is used by tests/eval/datasets/giab/ for the real
+# Genome-in-a-Bottle truth set (see that directory's README); only the
+# provenance and the data files differ.
+
+dataset: synthetic_v1
+version: 1
+description: >-
+  Deterministic synthetic ground truth: 8 planted variant alleles across 7
+  sites (SNVs, a multi-allelic site, a low-depth site) plus three reference-only
+  regions used as negatives, and four artifact-context sites for the curation
+  rubric.
+
+provenance:
+  generator: tests/create_fixtures.py::create_comprehensive_bam
+  bam: tests/fixtures/comprehensive.bam
+  reference: tests/fixtures/comprehensive_ref.fa
+  note: >-
+    Fixtures are generated (not committed; *.bam is gitignored). The conftest
+    fixtures comprehensive_bam_path / comprehensive_ref_fasta_path create them
+    on first use, so a fresh checkout reproduces this dataset bit-for-bit.
+
+# Region scanned for the variant-detection precision/recall metric. Every
+# planted variant allele falls inside it; nothing else should be called here.
+detection_region: chr1:1000-2600
+
+# Positive truth: (chrom, pos, ref, alt) the detector must recover. Optional
+# expected_artifact names a risk `type` the curation tool must surface at that
+# site; null means the site is the clean control.
+variant_sites:
+  - chrom: chr1
+    pos: 1050
+    ref: A
+    alt: T
+    category: strand_bias
+    expected_vaf: 0.40
+    expected_artifact: strand_bias
+    expected_likelihood: high
+
+  - chrom: chr1
+    pos: 1100
+    ref: A
+    alt: C
+    category: position_bias
+    expected_vaf: 0.35
+    expected_artifact: null
+    expected_likelihood: high
+
+  - chrom: chr1
+    pos: 1150
+    ref: A
+    alt: G
+    category: clean
+    expected_vaf: 0.44
+    expected_artifact: null
+    expected_likelihood: medium
+    is_clean_control: true
+
+  - chrom: chr1
+    pos: 1200
+    ref: A
+    alt: T
+    category: low_mapq
+    expected_vaf: 0.28
+    expected_artifact: low_mapq
+    expected_likelihood: high
+
+  - chrom: chr1
+    pos: 1802
+    ref: T
+    alt: A
+    category: homopolymer
+    expected_vaf: 0.27
+    expected_artifact: homopolymer
+    expected_likelihood: high
+
+  - chrom: chr1
+    pos: 2075
+    ref: C
+    alt: G
+    category: low_depth
+    expected_vaf: 1.0
+    expected_artifact: null
+    expected_likelihood: low
+
+  - chrom: chr1
+    pos: 2500
+    ref: A
+    alt: G
+    category: multi_allelic
+    expected_vaf: 0.15
+    expected_artifact: null
+    expected_likelihood: low
+
+  - chrom: chr1
+    pos: 2500
+    ref: A
+    alt: T
+    category: multi_allelic
+    expected_vaf: 0.15
+    expected_artifact: null
+    expected_likelihood: low
+
+# Reference-only regions: a correct detector reports zero variants here.
+negative_regions:
+  - region: chr1:2100-2150
+    note: 50x reference-only depth (high-coverage true negative)
+  - region: chr1:300-600
+    note: paired-end reference reads, no planted variants
+  - region: chr2:100-400
+    note: separate contig, reference-only

@@ -29,14 +29,18 @@ jobs:
           cache-dependency-path: pyproject.toml
       - run: make install
       - name: Audit installed dependencies for known CVEs
-        # Audits the resolved environment (incl. transitive deps). --skip-editable
-        # drops the local editable `bamcp` install, which isn't on PyPI and would
-        # otherwise trip --strict ("could not audit"). To accept a specific
-        # advisory with no available fix, add `--ignore-vuln <GHSA-id>` here with
-        # a comment justifying it — keep the list short and reviewed.
+        # Audit the resolved third-party deps via a frozen requirements file.
+        # We can't audit the live environment with --strict because it contains
+        # the local editable `bamcp` install (not on PyPI), which --strict treats
+        # as an un-auditable failure. `pip freeze --exclude-editable` drops it
+        # while keeping every pinned transitive dependency, so --strict stays
+        # meaningful for the deps that actually have CVE feeds. To accept a
+        # specific advisory with no available fix, add `--ignore-vuln <GHSA-id>`
+        # here with a justifying comment — keep the list short and reviewed.
         run: |
           pip install pip-audit
-          pip-audit --strict --desc --skip-editable
+          pip freeze --exclude-editable > /tmp/audit-requirements.txt
+          pip-audit --strict --desc -r /tmp/audit-requirements.txt
 
   codeql:
     runs-on: ubuntu-latest

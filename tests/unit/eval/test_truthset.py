@@ -30,16 +30,17 @@ def test_load_truthset_parses_manifest():
     ts = load_truthset(MANIFEST)
     assert ts.dataset == "synthetic_v1"
     assert ts.version == 1
-    assert ts.detection_region == "chr1:1000-2600"
+    assert ts.detection_region == "chr1:1000-2900"
     assert ts.bam.endswith("comprehensive.bam")
-    assert len(ts.variant_sites) == 8
+    assert len(ts.variant_sites) == 9
     # The multi-allelic site appears twice with different alts.
     keys = {s.key for s in ts.variant_sites}
     assert ("chr1", 2500, "A", "G") in keys
     assert ("chr1", 2500, "A", "T") in keys
-    # Exactly one clean control, three artifact sites.
+    # Exactly one clean control, three artifact sites, one confidence control.
     assert sum(s.is_clean_control for s in ts.variant_sites) == 1
     assert sum(s.expected_artifact is not None for s in ts.variant_sites) == 3
+    assert sum(s.expected_confidence is not None for s in ts.variant_sites) == 1
     assert len(ts.negative_regions) == 3
 
 
@@ -90,12 +91,14 @@ def _perfect_router():
         _variant(2075, "G", ref="C"),
         _variant(2500, "G"),
         _variant(2500, "T"),
+        _variant(2800, "T"),  # high-confidence positive control
     ]
     curations = {
         1050: _curation(["strand_bias", "read_position_bias"], 0.7, "high"),
         1200: _curation(["low_mapq", "strand_bias"], 0.95, "high"),
         1802: _curation(["homopolymer"], 0.6, "high"),
         1150: _curation(["read_position_bias"], 0.3, "medium"),
+        2800: _curation([], 0.0, "low", confidence="high"),  # earns high confidence
     }
     negatives = {"chr1:2100-2150": [], "chr1:300-600": [], "chr2:100-400": []}
     return FakeRouter(detected=detected, negatives=negatives, curations=curations)
@@ -106,13 +109,27 @@ async def test_score_truthset_perfect():
     report = await score_truthset(ts, BAMCPConfig(), router=_perfect_router())
     assert report.detection.recall == 1.0
     assert report.detection.precision == 1.0
-    assert report.detection.tp == 8
+    assert report.detection.tp == 9
     assert report.false_positives == 0
     assert report.artifact_recall == 1.0
     assert report.clean_discriminated is True
     assert report.overconfident_sites == []
+    assert report.confidence_mismatches == []
     passed, failures = report.meets_floors()
     assert passed, failures
+
+
+async def test_positive_control_must_reach_high_confidence():
+    # If the high-confidence positive control stops being high-confidence, the
+    # overconfidence guard would pass vacuously — so this must fail loudly.
+    ts = load_truthset(MANIFEST)
+    router = _perfect_router()
+    router._curations[2800] = _curation([], 0.0, "low", confidence="medium")
+    report = await score_truthset(ts, BAMCPConfig(), router=router)
+    assert report.confidence_mismatches
+    passed, failures = report.meets_floors()
+    assert not passed
+    assert any("confidence calibration" in f for f in failures)
 
 
 async def test_overconfident_site_is_a_safety_failure():

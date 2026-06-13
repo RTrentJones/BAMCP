@@ -702,6 +702,33 @@ def create_comprehensive_bam(ref_path: str):
             )
         )
 
+    # ── Group H: Clean high-confidence positive control (2740-2860) ──
+    # Unlike every other group, these reads are 120bp and place the variant
+    # dead-center, so its distance-from-read-end lands outside the "near end"
+    # bins. Combined with balanced strands, high MAPQ, ample depth, and no
+    # homopolymer context, this is the ONE site in the fixture that should
+    # earn HIGH confidence. It exists to make the eval's overconfidence guard
+    # discriminating: a guard that "no high-artifact site is high-confidence"
+    # is only meaningful if some site can actually reach high confidence.
+    ref_base_2800 = chr1_ref[2800]
+    alt_base_2800 = "T" if ref_base_2800 != "T" else "G"
+    for i in range(24):
+        seq = list(_ref_seq_at(chr1_ref, 2740, 120))
+        qpos = 2800 - 2740  # = 60; dist-from-end = min(60, 59) = 59 (mid-read)
+        if i < 10:  # 10 alt / 14 ref => VAF ~0.42, depth 24
+            seq[qpos] = alt_base_2800
+        reads.append(
+            _make_read(
+                f"hc_pos_ctrl_{i}",
+                "".join(seq),
+                0,
+                2740,
+                [(0, 120)],
+                mapq=60,
+                flag=0 if i % 2 == 0 else 16,
+            )
+        )
+
     # ── Write BAM ────────────────────────────────────────────────────
     # Sort reads by (reference_id, reference_start) before writing
     reads.sort(key=lambda r: (r.reference_id, r.reference_start))

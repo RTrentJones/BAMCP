@@ -48,6 +48,7 @@ places:
 | Invariant | Enforced by |
 | --------- | ----------- |
 | No high-artifact site is high-confidence | `truthset` `overconfident_sites` floor (PR gate) |
+| A clean positive control *does* reach high confidence (so the guard above isn't vacuous) | `truthset` `confidence_mismatches` floor (PR gate) |
 | Low-coverage variants are flagged, not silently passed | `tests/unit/analysis/test_curation_safety.py` |
 | "No concerns" output never claims clinical suitability | `tests/unit/analysis/test_curation_safety.py` |
 | The intended-use disclaimer is present in every curation payload | `tests/unit/analysis/test_curation_rubric.py`, `test_curation_safety.py` |

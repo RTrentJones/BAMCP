@@ -30,7 +30,7 @@ provenance:
 
 # Region scanned for the variant-detection precision/recall metric. Every
 # planted variant allele falls inside it; nothing else should be called here.
-detection_region: chr1:1000-2600
+detection_region: chr1:1000-2900
 
 # Positive truth: (chrom, pos, ref, alt) the detector must recover. Optional
 # expected_artifact names a risk `type` the curation tool must surface at that
@@ -108,6 +108,20 @@ variant_sites:
     expected_vaf: 0.15
     expected_artifact: null
     expected_likelihood: low
+
+  # Positive control: the one site engineered to earn HIGH confidence (120bp
+  # reads, centered variant, balanced strands, high MAPQ, no artifact context).
+  # It makes the overconfidence guard discriminating — a guard against high
+  # confidence on artifacts only means something if some site can reach it.
+  - chrom: chr1
+    pos: 2800
+    ref: A
+    alt: T
+    category: clean_high_confidence
+    expected_vaf: 0.42
+    expected_artifact: null
+    expected_likelihood: low
+    expected_confidence: high
 
 # Reference-only regions: a correct detector reports zero variants here.
 negative_regions:

@@ -52,7 +52,7 @@ def test_variant_detection_perfect_on_synthetic(report):
     # The synthetic fixture is fully controlled — detection should be exact.
     assert report.detection.recall == 1.0
     assert report.detection.precision == 1.0
-    assert report.detection.tp == 8
+    assert report.detection.tp == 9
     assert not report.missing_calls
     assert not report.spurious_calls
 
@@ -83,6 +83,13 @@ def test_clean_control_discriminated(report):
 def test_no_overconfident_artifact_sites(report):
     # Safety invariant: no high-artifact site is reported as high confidence.
     assert report.overconfident_sites == []
+
+
+@pytest.mark.integration
+def test_positive_control_reaches_high_confidence(report):
+    # The overconfidence guard is only meaningful if some site can actually
+    # reach high confidence. The chr1:2800 positive control proves it does.
+    assert report.confidence_mismatches == []
 
 
 @pytest.mark.integration

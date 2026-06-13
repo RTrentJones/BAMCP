@@ -27,6 +27,7 @@ of deterministic metrics:
 | Artifact-type recall | Does the curation tool surface the *expected* artifact at each known-artifact site (strand bias, low MAPQ, homopolymer)? | recall = 1.0 |
 | Clean-control discrimination | Is a true clean variant scored *below* the artifact-prone sites and not labeled high-risk? | true |
 | **Safety: overconfidence guard** | Is any high-artifact site *also* reported as high confidence? | 0 sites ([SAFETY.md](SAFETY.md)) |
+| Confidence positive control | Does the one site engineered to be clean *actually* reach high confidence? | 0 mismatches |
 
 Floors live in code (`TruthsetReport.meets_floors`) and in the CI step, so
 tightening or loosening them is a reviewed change.
@@ -43,9 +44,16 @@ second tool to disagree with. That makes the gate:
 - **meaningful** — it measures biological correctness (did we call the right
   variant, flag the right artifact), not just "the tool returned 200".
 
-The current synthetic_v1 numbers: **8/8 variant alleles recovered (P=R=F1=1.0),
+The current synthetic_v1 numbers: **9/9 variant alleles recovered (P=R=F1=1.0),
 0 false positives across 3 negative regions, 3/3 artifact types surfaced,
-clean control correctly discriminated, 0 overconfident sites.**
+clean control correctly discriminated, 0 overconfident sites, and the
+high-confidence positive control reaches high confidence.**
+
+The positive control matters: a guard that says "no high-artifact site is
+high-confidence" is vacuous if the tool can *never* report high confidence. The
+chr1:2800 site (120bp reads, centered variant, balanced strands, high MAPQ, no
+artifact context) is engineered to be the one site that legitimately earns it —
+so the guard is discriminating, not just trivially satisfied.
 
 ### Real ground truth (GIAB)
 

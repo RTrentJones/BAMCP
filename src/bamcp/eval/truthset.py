@@ -40,6 +40,10 @@ class TruthSite:
     expected_artifact: str | None = None
     expected_likelihood: str | None = None
     is_clean_control: bool = False
+    # When set, the curation tool's reported confidence must equal this. Used
+    # for the high-confidence positive control that makes the overconfidence
+    # guard discriminating.
+    expected_confidence: str | None = None
 
     @property
     def key(self) -> tuple[str, int, str, str]:
@@ -108,6 +112,7 @@ def _parse_site(raw: dict[str, Any]) -> TruthSite:
         expected_artifact=_opt_str(raw.get("expected_artifact")),
         expected_likelihood=_opt_str(raw.get("expected_likelihood")),
         is_clean_control=bool(raw.get("is_clean_control", False)),
+        expected_confidence=_opt_str(raw.get("expected_confidence")),
     )
 
 
@@ -134,6 +139,10 @@ class TruthsetReport:
     # Safety guard: sites the curation tool flagged as high artifact risk yet
     # still reported as high confidence — a clinically dangerous contradiction.
     overconfident_sites: list[str] = field(default_factory=list)
+    # Sites whose reported confidence did not match expected_confidence. The
+    # high-confidence positive control lives here: if it stops reaching high
+    # confidence, the overconfidence guard would pass vacuously, so this fails.
+    confidence_mismatches: list[str] = field(default_factory=list)
 
     @property
     def artifact_recall(self) -> float:
@@ -147,6 +156,7 @@ class TruthsetReport:
         min_artifact_recall: float = 1.0,
         max_false_positives: int = 0,
         max_overconfident: int = 0,
+        max_confidence_mismatches: int = 0,
     ) -> tuple[bool, list[str]]:
         """Return (passed, reasons-for-failure) against the given floors."""
         failures: list[str] = []
@@ -176,6 +186,8 @@ class TruthsetReport:
                 "SAFETY: high-artifact sites reported as high confidence: "
                 f"{self.overconfident_sites}"
             )
+        if len(self.confidence_mismatches) > max_confidence_mismatches:
+            failures.append(f"confidence calibration off: {self.confidence_mismatches}")
         return (not failures, failures)
 
     def as_dict(self) -> dict[str, Any]:
@@ -190,6 +202,7 @@ class TruthsetReport:
             "missing_calls": self.missing_calls,
             "spurious_calls": self.spurious_calls,
             "overconfident_sites": self.overconfident_sites,
+            "confidence_mismatches": self.confidence_mismatches,
         }
 
 
@@ -258,16 +271,29 @@ async def score_truthset(
     clean_scores: list[float] = []
     flagged_scores: list[float] = []
     overconfident_sites: list[str] = []
+    confidence_mismatches: list[str] = []
     clean_not_high = True
     for site in truthset.variant_sites:
-        if site.expected_artifact is None and not site.is_clean_control:
+        interesting = (
+            site.expected_artifact is not None
+            or site.is_clean_control
+            or site.expected_confidence is not None
+        )
+        if not interesting:
             continue
         assessment, likelihood, confidence = await _curate(router, bam, reference, site)
         risk_score = _risk_score(assessment)
+        if site.expected_confidence is not None and confidence != site.expected_confidence:
+            confidence_mismatches.append(
+                f"{site.chrom}:{site.pos} expected {site.expected_confidence}, got {confidence}"
+            )
         if site.is_clean_control:
             clean_scores.append(risk_score)
             if likelihood == "high":
                 clean_not_high = False
+            continue
+        if site.expected_artifact is None:
+            # Confidence-only positive control: no artifact assertion to make.
             continue
         present = risk_types_present(assessment)
         flagged_scores.append(risk_score)
@@ -297,6 +323,7 @@ async def score_truthset(
         missing_calls=missing,
         spurious_calls=spurious,
         overconfident_sites=overconfident_sites,
+        confidence_mismatches=confidence_mismatches,
     )
 
 
@@ -363,6 +390,8 @@ def _format_report(report: TruthsetReport, passed: bool, failures: list[str]) ->
     lines.append(f"  clean discriminated {report.clean_discriminated}")
     safety = report.overconfident_sites or "none"
     lines.append(f"  overconfident sites {safety} (safety guard)")
+    calib = report.confidence_mismatches or "none"
+    lines.append(f"  confidence mismatches {calib} (positive control)")
     lines.append("")
     lines.append("PASS" if passed else "FAIL")
     for f in failures:

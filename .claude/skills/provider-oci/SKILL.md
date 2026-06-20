@@ -1,36 +1,59 @@
 ---
 name: provider-oci
-description: How Oracle Cloud (OCI) works in a Greenlight setup — the `target: oci` runtime for stateful MCP servers (BAMCP), the Always-Free idle-reclaim trap solved by converting to PAYG (manual, not code), health-check keepalive, and API-key signing. Use when wiring/debugging an oci-target tool or the idle-reclaim problem.
+description: How Oracle Cloud (OCI) works in a Greenlight setup — the `target: oci` runtime for stateful MCP servers (BAMCP) on a free-tier Ampere A1 Container Instance, the provider-agnostic build-via-GitHub→GHCR model, Greenlight-owned compute + tunnel Terraform, the OCI token CLI, deploy = restart, and staying on the free tier (no PAYG; recover-on-alert). Use when wiring/debugging an oci-target tool.
 ---
 
 # provider-oci
 
-OCI is the `target: oci` runtime for **stateful** services that don't fit serverless —
-the canonical case is **BAMCP** (a stateful MCP server). The deploy adapter for oci is a
-follow-up (not built); today oci tools deploy via their own repo's CI, and the wrapper
-manages DNS (a Cloudflare CNAME / Tunnel) + keepalive.
+OCI is the `target: oci` runtime for **stateful** services that don't fit serverless — the
+canonical case is **BAMCP** (a stateful MCP server). The split: **the tool is provider-agnostic
+and just builds a container via GitHub; Greenlight owns the OCI infra** (compute + tunnel + DNS),
+configured in the wrapper.
 
-## The idle-reclaim trap — fixed manually, NOT by code
+## Free tier — A1 Container Instance + GHCR
 
-OCI **Always Free** reclaims idle compute. The harness does **not** prevent this. The fix is
-**manual**: convert the tenancy to **Pay-As-You-Go** (+ set a low billing alarm so it stays
-effectively free). The keepalive worker only **health-checks** the service and **nags** via
-`doctor` / the alert sink — it cannot stop reclaim. Never imply otherwise.
+The Always-Free path is an **OCI Container Instance** on **Ampere A1** (the A1 allotment — 2 OCPU
+/ 12 GB as of 2026-06-15 — is shared across VM / Bare-Metal / Container-Instances). No VM to
+provision, no cloud-init, no SSH. The image comes from **GHCR** (free); **OCI's own registry
+(OCIR) is paid** — that was the trap in the old BAMCP pipeline. The container instance runs the
+tool container + a **cloudflared sidecar** (shared netns → localhost), exposed at `<name>.<domain>`.
 
-See `docs/oci-payg-runbook.md` for the PAYG conversion + billing-alarm steps.
+## Provider-agnostic tool → GHCR
 
-## Auth — API-key signing (not a bearer token)
+The tool repo (BAMCP) has ONE job: a GitHub Actions workflow that **builds + pushes the container
+to GHCR**. No OCI, no SSH, no deploy logic — portable to any provider's infra.
 
-OCI uses **request signing** with an API key (`~/.oci/config` + a PEM key), not a bearer
-token — so there's no cheap `verify()` curl. Setup is the runbook; Greenlight treats the
-credential as presence-only.
+## Greenlight OCI infra (Terraform, in the wrapper)
 
-## Terraform
+`greenlight add/adopt` emits, per oci tool:
+- **`oci-container-instance`** module — the container instance (tool image from GHCR + cloudflared
+  sidecar with the tunnel token), `CI.Standard.A1.Flex` within the free allotment, restart ALWAYS.
+- **`tunnel`** module — cloudflared tunnel + ingress `<name>.<domain> → http://localhost:8000` + token.
+- **`tool`** DNS module — CNAME → the tunnel.
+The `oci` provider (auth below) is added to `infra/main.tf`.
 
-The `tool` module manages the subdomain DNS (CNAME / Tunnel hostname) for the oci service.
-The compute itself is out of the V1 declarative scope (the oci deploy adapter is deferred).
+## OCI token CLI
 
-## MCP / verify
-An oci-hosted tool is typically an **MCP server** — verify it with `mode: mcp` (initialize →
-`tools/list` → call a tool & assert shape → assert auth rejection), and connect at
-`<name>.<domain>/mcp` (streamable HTTP).
+`greenlight add`/`init` gather the OCI creds into `.greenlight/secrets.env` (+ GH secrets):
+**provider auth** `TF_VAR_oci_tenancy_ocid`, `TF_VAR_oci_user_ocid`, `TF_VAR_oci_fingerprint`,
+`TF_VAR_oci_private_key` (PEM), `TF_VAR_oci_region`; **placement** `TF_VAR_oci_compartment_id`,
+`TF_VAR_oci_availability_domain`, `TF_VAR_oci_subnet_id`; and `OCI_CONTAINER_INSTANCE_OCID`
+(the Terraform output, for deploy). Auth is API-key request signing — no bearer, so no fetch-verify.
+
+## Deploy = restart (re-pull)
+
+`greenlight deploy <tool>` (oci) just runs `oci container-instances container-instance restart
+--container-instance-id <OCID>` — the instance re-pulls the latest GHCR image. The tool's CI
+builds; an event trigger (the chosen deploy option) fires the restart. The adapter does NOT build.
+
+## Idle-reclaim — stay free, recover on alert
+
+OCI Always-Free can reclaim idle compute. We **stay on the free tier** and accept that: the
+instance runs restart-policy ALWAYS, keepalive health-checks it, and if it's ever stopped/reclaimed
+the alert fires and a **re-apply / redeploy** restores it. **PAYG is NOT used** — it's an optional
+last resort (see `docs/oci-payg-runbook.md`) only if reclaim ever becomes a recurring problem.
+
+## Verify
+The tool is typically an **MCP server**: verify with `mode: mcp`, connect at `<name>.<domain>/mcp`
+(FastMCP's `streamable_http_app()` serves `/mcp` by default — the convention). If auth gates
+`initialize`, supply a token or use an `api`-mode 401 check. Keepalive health-checks `target: oci`.

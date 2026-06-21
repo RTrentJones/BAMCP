@@ -94,6 +94,28 @@ services:
     restart: unless-stopped
 
   # --------------------------------------------------------------------------
+  # Preview: the local pre-deploy gate for `greenlight preview bamcp`. Matches PROD's transport
+  # (streamable-http → /mcp) so the harness verifies the same contract, but with auth OFF so the
+  # mcp tools/list check runs without a token. (The stock beta profile is SSE — don't reuse it.)
+  # --------------------------------------------------------------------------
+  preview:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["preview"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - bamcp-data:/data
+    environment:
+      - BAMCP_REFERENCE=/data/reference.fa
+      - BAMCP_TRANSPORT=streamable-http
+      - BAMCP_HOST=0.0.0.0
+      - BAMCP_PORT=8000
+      - BAMCP_AUTH_ENABLED=
+      - PYTHONUNBUFFERED=1
+
+  # --------------------------------------------------------------------------
   # Production: SSE transport, OAuth enabled, locked-down
   # --------------------------------------------------------------------------
   prod:

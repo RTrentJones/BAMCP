@@ -1,8 +1,10 @@
 name: greenlight-build
 
-# Provider-agnostic: build the container -> push to GHCR -> notify the wrapper to deploy.
-# The wrapper owns the OCI infra + creds; this repo only needs GREENLIGHT_DISPATCH_TOKEN
-# (a fine-grained PAT with "Contents: write" on RTrentJones/RTrentJones.dev) to fire the dispatch.
+# Provider-agnostic: TEST -> build the container -> push to GHCR -> notify the wrapper to deploy.
+# The ship is GATED on BAMCP's own tests (build `needs: [test]`) — a broken change never produces an
+# image or reaches prod (oci is direct-to-prod, so this is the pre-deploy safety net). The wrapper
+# owns the OCI infra + creds; this repo only needs GREENLIGHT_DISPATCH_TOKEN (a fine-grained PAT with
+# "Contents: write" on RTrentJones/RTrentJones.dev) to fire the dispatch.
 on:
   push:
     branches: [main]
@@ -17,7 +19,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test:
+    # Ship-gate: pytest + the deterministic eval-smoke (no network/key) must pass before we build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: make install
+      - run: make test
+      - run: make eval-smoke
+
   build:
+    needs: [test]
     # Native arm64 runner — builds the arm64 image directly (no QEMU emulation, much faster).
     runs-on: ubuntu-24.04-arm
     steps:

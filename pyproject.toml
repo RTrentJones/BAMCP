@@ -88,7 +88,10 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.mypy]
-python_version = "3.10"
+# 3.12 (not the 3.10 requires-python floor): the CI lint job runs on Python 3.12, where pip installs
+# numpy 2.5 (numpy needs >=3.11 now), whose bundled stubs use the 3.12 `type` statement — mypy can
+# only parse those when targeting 3.12. Runtime 3.10/3.11 compat is covered by the test matrix.
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 

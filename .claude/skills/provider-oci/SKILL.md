@@ -34,11 +34,25 @@ The `oci` provider (auth below) is added to `infra/main.tf`.
 
 ## OCI token CLI
 
-`greenlight add`/`init` gather the OCI creds into `.greenlight/secrets.env` (+ GH secrets):
-**provider auth** `TF_VAR_oci_tenancy_ocid`, `TF_VAR_oci_user_ocid`, `TF_VAR_oci_fingerprint`,
-`TF_VAR_oci_private_key` (PEM), `TF_VAR_oci_region`; **placement** `TF_VAR_oci_compartment_id`,
-`TF_VAR_oci_availability_domain`, `TF_VAR_oci_subnet_id`; and `OCI_CONTAINER_INSTANCE_OCID`
-(the Terraform output, for deploy). Auth is API-key request signing — no bearer, so no fetch-verify.
+`greenlight secrets gather <tool> --repo <o/r>` pushes the OCI creds straight to GitHub secrets
+(hidden prompts, no disk/logs). **The only manual OCI inputs are the API-key auth values** —
+`TF_VAR_OCI_TENANCY_OCID`, `TF_VAR_OCI_USER_OCID`, `TF_VAR_OCI_FINGERPRINT`, `TF_VAR_OCI_PRIVATE_KEY`
+(PEM), `TF_VAR_OCI_REGION` — plus `OCI_CONTAINER_INSTANCE_OCID` (the Terraform output, set after the
+first apply, for deploy). `TF_VAR_OCI_COMPARTMENT_ID` is **optional** (blank → the tenancy/root
+compartment). Auth is API-key request signing — no bearer, so no fetch-verify.
+
+**The VCN, subnet, and availability domain are NOT manual** — they're Terraform: the `oci-network`
+module creates the VCN + a public (egress-only) subnet, and the container-instance module looks the
+AD up via an `oci_identity_availability_domains` data source. So the bootstrap is just "create one
+API key" — Terraform can't create the credential it needs to authenticate, but it owns everything
+after that. (Out-of-A1-capacity in one AD? set `availability_domain` on the instance module to pin
+another — the only time you touch it.)
+
+**Shortcut — feed the API-key config preview directly.** After *Add API key*, OCI shows a
+"Configuration file preview" (the `[DEFAULT]` block) and you download the `.pem`. Pass both:
+`greenlight secrets gather <tool> --repo <o/r> --oci-config ~/path/config [--oci-key ~/path/key.pem]`
+— it auto-fills the 5 auth secrets (incl. the multi-line PEM, read from the file so it's never
+pasted) and only prompts for the 3 placement values + the option-B deploy PATs.
 
 ## Deploy = restart (re-pull)
 

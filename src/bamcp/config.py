@@ -46,6 +46,10 @@ class BAMCPConfig:
     resource_server_url: str = DEFAULT_RESOURCE_SERVER_URL
     required_scopes: list[str] | None = None
     token_expiry: int = DEFAULT_TOKEN_EXPIRY_SECONDS
+    # Optional non-interactive service token (M2M) for CI health/verify. When set, this exact
+    # bearer is accepted as a valid access token with the required scopes — stateless, so it
+    # survives container restarts (unlike the in-memory OAuth tokens). Read-only use; keep secret.
+    verify_token: str | None = None
 
     # External database settings
     ncbi_api_key: str | None = None
@@ -137,6 +141,7 @@ class BAMCPConfig:
             resource_server_url=env.get("BAMCP_RESOURCE_SERVER_URL", DEFAULT_RESOURCE_SERVER_URL),
             required_scopes=scopes,
             token_expiry=int(env.get("BAMCP_TOKEN_EXPIRY", str(DEFAULT_TOKEN_EXPIRY_SECONDS))),
+            verify_token=env.get("BAMCP_VERIFY_TOKEN") or None,
             ncbi_api_key=env.get("BAMCP_NCBI_API_KEY"),
             clinvar_enabled=env.get("BAMCP_CLINVAR_ENABLED", "true").lower() == "true",
             gnomad_enabled=env.get("BAMCP_GNOMAD_ENABLED", "true").lower() == "true",

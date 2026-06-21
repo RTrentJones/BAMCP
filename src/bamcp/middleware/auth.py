@@ -50,8 +50,17 @@ class BAMCPAuthProvider(
 ):
     """In-memory OAuth 2.0 authorization server for BAMCP."""
 
-    def __init__(self, token_expiry: int = 3600) -> None:
+    def __init__(
+        self,
+        token_expiry: int = 3600,
+        verify_token: str | None = None,
+        verify_scopes: list[str] | None = None,
+    ) -> None:
         self.token_expiry = token_expiry
+        # Optional M2M service token (CI verify): a single configured bearer accepted statelessly,
+        # so it survives restarts (the OAuth stores below are in-memory and reset on every restart).
+        self._verify_token = verify_token or None
+        self._verify_scopes = verify_scopes or []
         self._clients: dict[str, OAuthClientInformationFull] = {}
         self._auth_codes: dict[str, AuthorizationCode] = {}
         self._access_tokens: dict[str, AccessToken] = {}
@@ -141,6 +150,15 @@ class BAMCPAuthProvider(
     # -- Access token verification -------------------------------------------
 
     async def load_access_token(self, token: str) -> AccessToken | None:
+        # M2M service token (CI verify): accepted statelessly with the required scopes and no
+        # expiry, so it works right after a restart. Constant-time compare avoids a timing oracle.
+        if self._verify_token is not None and secrets.compare_digest(token, self._verify_token):
+            return AccessToken(
+                token=token,
+                client_id="bamcp-verify",
+                scopes=list(self._verify_scopes),
+                expires_at=None,
+            )
         at = self._access_tokens.get(token)
         if at is None:
             return None

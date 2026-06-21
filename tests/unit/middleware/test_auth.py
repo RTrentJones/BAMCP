@@ -240,3 +240,31 @@ class TestBAMCPAuthProvider:
         )
         result = await provider.load_authorization_code(other, code)
         assert result is None
+
+
+class TestServiceToken:
+    """M2M service token (CI verify) — stateless, restart-proof, read scope."""
+
+    @pytest.mark.asyncio
+    async def test_service_token_is_accepted_with_scopes_and_no_expiry(self):
+        provider = BAMCPAuthProvider(verify_token="svc-secret", verify_scopes=["read"])
+        at = await provider.load_access_token("svc-secret")
+        assert at is not None
+        assert at.scopes == ["read"]
+        assert at.expires_at is None  # never expires → survives restarts
+
+    @pytest.mark.asyncio
+    async def test_wrong_token_is_rejected(self):
+        provider = BAMCPAuthProvider(verify_token="svc-secret", verify_scopes=["read"])
+        assert await provider.load_access_token("not-the-token") is None
+
+    @pytest.mark.asyncio
+    async def test_disabled_when_unset(self):
+        provider = BAMCPAuthProvider()  # no verify_token
+        assert await provider.load_access_token("svc-secret") is None
+
+    @pytest.mark.asyncio
+    async def test_config_reads_bamcp_verify_token(self, monkeypatch):
+        monkeypatch.setenv("BAMCP_VERIFY_TOKEN", "from-env")
+        cfg = BAMCPConfig.from_env()
+        assert cfg.verify_token == "from-env"

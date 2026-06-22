@@ -25,7 +25,7 @@ jobs:
     # needs the eval extra + generated truthset fixtures, or `make test`/`make eval-smoke` fail.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -43,7 +43,7 @@ jobs:
     # Native arm64 runner — builds the arm64 image directly (no QEMU emulation, much faster).
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Resolve image ref (GHCR namespaces are lowercase)
         id: img
         run: echo "base=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/bamcp" >> "$GITHUB_OUTPUT"

@@ -21,6 +21,8 @@ concurrency:
 jobs:
   test:
     # Ship-gate: pytest + the deterministic eval-smoke (no network/key) must pass before we build.
+    # Mirrors ci.yml's setup — the telemetry tests need the OTel SDK ([telemetry]) and eval-smoke
+    # needs the eval extra + generated truthset fixtures, or `make test`/`make eval-smoke` fail.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +33,9 @@ jobs:
         with:
           node-version: '24'
       - run: make install
+      - run: pip install -e ".[telemetry,eval]"
       - run: make test
+      - run: python tests/create_fixtures.py
       - run: make eval-smoke
 
   build:

@@ -37,9 +37,10 @@ The `oci` provider (auth below) is added to `infra/main.tf`.
 `greenlight secrets gather <tool> --repo <o/r>` pushes the OCI creds straight to GitHub secrets
 (hidden prompts, no disk/logs). **The only manual OCI inputs are the API-key auth values** —
 `TF_VAR_OCI_TENANCY_OCID`, `TF_VAR_OCI_USER_OCID`, `TF_VAR_OCI_FINGERPRINT`, `TF_VAR_OCI_PRIVATE_KEY`
-(PEM), `TF_VAR_OCI_REGION` — plus `OCI_CONTAINER_INSTANCE_OCID` (the Terraform output, set after the
-first apply, for deploy). `TF_VAR_OCI_COMPARTMENT_ID` is **optional** (blank → the tenancy/root
-compartment). Auth is API-key request signing — no bearer, so no fetch-verify.
+(PEM), `TF_VAR_OCI_REGION`. `TF_VAR_OCI_COMPARTMENT_ID` is **optional** (blank → the tenancy/root
+compartment). Auth is API-key request signing — no bearer, so no fetch-verify. The container
+instance OCID is **not** a manual input — the deploy workflow resolves it at deploy time from OCI
+by the instance's display name (= the tool name), so it's abstracted from the developer.
 
 **The VCN, subnet, and availability domain are NOT manual** — they're Terraform: the `oci-network`
 module creates the VCN + a public (egress-only) subnet, and the container-instance module looks the

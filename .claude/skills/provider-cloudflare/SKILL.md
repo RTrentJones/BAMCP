@@ -12,10 +12,12 @@ blog and throwaway MCP dev targets.
 
 ## Token — `CLOUDFLARE_API_TOKEN`
 
-One token, **two scopes** (the trap that took down a live apply):
+One token, these scopes (a missing scope took down a live apply more than once):
 - **Account · Workers Scripts · Edit** — deploy the keepalive worker / workers-target tools.
 - **Zone · DNS · Edit** — the subdomain CNAMEs.
 - **Account · Account Settings · Read** — read account id.
+- **Account · Cloudflare Tunnel · Edit** — only if a tool uses `target: oci` (the cloudflared
+  tunnel). Without it, the tunnel resource fails with **403 Forbidden** on `cfd_tunnel` at apply.
 
 Create at dash → My Profile → API Tokens → Custom Token. Store in `.greenlight/secrets.env`
 (gitignored) and push to GitHub Actions with `greenlight secrets sync`. `greenlight add`

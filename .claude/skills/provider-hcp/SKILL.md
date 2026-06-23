@@ -42,5 +42,5 @@ Migrate local → HCP with a plain `terraform init` (answer `yes` to copy state)
 plan -out → apply. This is the deploy half — the CLI only edits the `.tf`; CI applies.
 
 ## Alternatives
-See `docs/terraform-state-r2.md` for the full backend chooser (HCP no-CC · OCI S3-compat ·
+See `docs/terraform-state.md` for the full backend chooser (HCP no-CC · OCI S3-compat ·
 R2 card-required · AWS · local).

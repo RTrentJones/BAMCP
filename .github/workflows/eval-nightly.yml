@@ -37,7 +37,7 @@ jobs:
       - name: Score ground-truth truth set (JSON)
         run: |
           python -m bamcp.eval.truthset --json | tee truthset-report.json
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: truthset-report
           path: truthset-report.json
@@ -77,7 +77,7 @@ jobs:
           python scripts/run_eval.py \
             --provider "${{ github.event.inputs.provider || 'anthropic' }}" \
             --output-dir .eval-results
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         if: steps.key.outputs.available == 'true'
         with:
           name: eval-results

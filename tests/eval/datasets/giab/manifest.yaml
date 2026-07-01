@@ -1,0 +1,94 @@
+# GIAB benchmark slice — GENERATED, do not hand-edit.
+# Real GRCh38 reference + real NIST v4.2.1 truth SNVs (real coords,
+# alleles, zygosity) + simulated reads. See fetch_giab.py / GIAB_RESULTS.md.
+
+dataset: giab_hg001_grch38_v4.2.1
+version: 1
+description: >-
+  66 real NIST truth SNVs on chr20:1000000-1060000 inside the
+  high-confidence BED, simulated at 30x with base-error rate 0.001.
+
+provenance:
+  generator: tests/eval/datasets/giab/fetch_giab.py (seed=1)
+  bam: tests/eval/datasets/giab/data/reads.bam
+  reference: tests/eval/datasets/giab/data/chr20.fa
+  truth_vcf: https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/NA12878_HG001/NISTv4.2.1/GRCh38/HG001_GRCh38_1_22_v4.2.1_benchmark.vcf.gz
+  highconf_bed: https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/NA12878_HG001/NISTv4.2.1/GRCh38/HG001_GRCh38_1_22_v4.2.1_benchmark.bed
+  note: >-
+    Semi-synthetic. Measures recovery of real variant structures and
+    noise rejection; NOT robustness to real alignment/mapping artifacts.
+
+detection_region: chr20:1000000-1060000
+
+variant_sites:
+  - {chrom: chr20, pos: 1002294, ref: G, alt: A, category: het}
+  - {chrom: chr20, pos: 1002467, ref: G, alt: C, category: hom}
+  - {chrom: chr20, pos: 1004122, ref: C, alt: G, category: het}
+  - {chrom: chr20, pos: 1005438, ref: A, alt: G, category: hom}
+  - {chrom: chr20, pos: 1005470, ref: T, alt: A, category: hom}
+  - {chrom: chr20, pos: 1005950, ref: G, alt: A, category: het}
+  - {chrom: chr20, pos: 1007070, ref: A, alt: G, category: hom}
+  - {chrom: chr20, pos: 1008220, ref: A, alt: G, category: hom}
+  - {chrom: chr20, pos: 1008796, ref: A, alt: T, category: hom}
+  - {chrom: chr20, pos: 1011612, ref: C, alt: T, category: hom}
+  - {chrom: chr20, pos: 1014637, ref: C, alt: A, category: hom}
+  - {chrom: chr20, pos: 1014667, ref: C, alt: A, category: hom}
+  - {chrom: chr20, pos: 1015424, ref: A, alt: T, category: hom}
+  - {chrom: chr20, pos: 1015425, ref: T, alt: C, category: hom}
+  - {chrom: chr20, pos: 1015649, ref: A, alt: G, category: hom}
+  - {chrom: chr20, pos: 1017523, ref: C, alt: T, category: hom}
+  - {chrom: chr20, pos: 1017739, ref: T, alt: C, category: hom}
+  - {chrom: chr20, pos: 1017922, ref: C, alt: G, category: hom}
+  - {chrom: chr20, pos: 1017945, ref: G, alt: A, category: hom}
+  - {chrom: chr20, pos: 1018169, ref: A, alt: G, category: hom}
+  - {chrom: chr20, pos: 1018313, ref: C, alt: G, category: hom}
+  - {chrom: chr20, pos: 1018352, ref: C, alt: T, category: hom}
+  - {chrom: chr20, pos: 1018404, ref: A, alt: G, category: hom}
+  - {chrom: chr20, pos: 1018461, ref: G, alt: A, category: hom}
+  - {chrom: chr20, pos: 1018462, ref: A, alt: G, category: hom}
+  - {chrom: chr20, pos: 1018499, ref: G, alt: T, category: hom}
+  - {chrom: chr20, pos: 1018928, ref: G, alt: A, category: hom}
+  - {chrom: chr20, pos: 1019108, ref: C, alt: T, category: hom}
+  - {chrom: chr20, pos: 1019140, ref: C, alt: T, category: hom}
+  - {chrom: chr20, pos: 1020194, ref: G, alt: C, category: hom}
+  - {chrom: chr20, pos: 1021116, ref: T, alt: C, category: hom}
+  - {chrom: chr20, pos: 1021161, ref: C, alt: T, category: hom}
+  - {chrom: chr20, pos: 1021343, ref: C, alt: G, category: hom}
+  - {chrom: chr20, pos: 1021398, ref: C, alt: A, category: hom}
+  - {chrom: chr20, pos: 1021611, ref: T, alt: C, category: hom}
+  - {chrom: chr20, pos: 1023986, ref: A, alt: G, category: hom}
+  - {chrom: chr20, pos: 1025229, ref: C, alt: T, category: hom}
+  - {chrom: chr20, pos: 1026986, ref: C, alt: T, category: hom}
+  - {chrom: chr20, pos: 1027821, ref: G, alt: A, category: hom}
+  - {chrom: chr20, pos: 1027851, ref: C, alt: G, category: hom}
+  - {chrom: chr20, pos: 1028588, ref: C, alt: T, category: hom}
+  - {chrom: chr20, pos: 1028717, ref: T, alt: G, category: hom}
+  - {chrom: chr20, pos: 1029035, ref: G, alt: A, category: hom}
+  - {chrom: chr20, pos: 1029144, ref: C, alt: T, category: hom}
+  - {chrom: chr20, pos: 1030624, ref: A, alt: T, category: hom}
+  - {chrom: chr20, pos: 1031382, ref: C, alt: A, category: het}
+  - {chrom: chr20, pos: 1032115, ref: C, alt: T, category: het}
+  - {chrom: chr20, pos: 1032154, ref: G, alt: A, category: hom}
+  - {chrom: chr20, pos: 1032372, ref: G, alt: A, category: hom}
+  - {chrom: chr20, pos: 1034330, ref: A, alt: G, category: hom}
+  - {chrom: chr20, pos: 1036549, ref: T, alt: C, category: hom}
+  - {chrom: chr20, pos: 1036588, ref: C, alt: T, category: hom}
+  - {chrom: chr20, pos: 1036642, ref: A, alt: G, category: het}
+  - {chrom: chr20, pos: 1037017, ref: G, alt: A, category: hom}
+  - {chrom: chr20, pos: 1037413, ref: G, alt: A, category: hom}
+  - {chrom: chr20, pos: 1037706, ref: T, alt: C, category: hom}
+  - {chrom: chr20, pos: 1038488, ref: T, alt: G, category: het}
+  - {chrom: chr20, pos: 1040597, ref: G, alt: A, category: hom}
+  - {chrom: chr20, pos: 1042068, ref: C, alt: A, category: hom}
+  - {chrom: chr20, pos: 1043043, ref: A, alt: C, category: hom}
+  - {chrom: chr20, pos: 1043961, ref: G, alt: A, category: hom}
+  - {chrom: chr20, pos: 1048065, ref: C, alt: A, category: hom}
+  - {chrom: chr20, pos: 1051193, ref: A, alt: G, category: hom}
+  - {chrom: chr20, pos: 1054891, ref: G, alt: C, category: hom}
+  - {chrom: chr20, pos: 1058268, ref: T, alt: C, category: hom}
+  - {chrom: chr20, pos: 1058692, ref: A, alt: C, category: hom}
+
+negative_regions:
+  - {region: 'chr20:1000000-1002000', note: high-confidence, no truth SNV}
+  - {region: 'chr20:1008797-1010797', note: high-confidence, no truth SNV}
+  - {region: 'chr20:1011613-1013613', note: high-confidence, no truth SNV}

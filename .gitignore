@@ -229,3 +229,9 @@ src/bamcp/static/dist/
 
 # Cache session directories (8-char hex)
 [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/
+
+# GIAB benchmark data (downloaded/generated; regenerate with fetch_giab.py)
+tests/eval/datasets/giab/data/
+
+# Remote tabix indexes pysam caches into CWD while streaming
+*.tbi

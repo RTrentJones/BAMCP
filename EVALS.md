@@ -121,6 +121,10 @@ pytest tests/eval/test_truthset_smoke.py   # same gate as pytest assertions
 make eval                             # run text cases
 make eval-compare                     # add vanilla + rendering-mode comparison
 make eval-dry                         # list cases without calling a model
+
+# Model comparison + tool-use ablation (EVAL_RESULTS.md)
+make eval-matrix                      # real: accuracy-by-model + tool lift (needs key)
+make eval-matrix-mock                 # offline: prove the pipeline with the mock provider
 ```
 
 ---
@@ -134,7 +138,10 @@ The ground-truth gate is the foundation. Planned build-out, in priority order:
    BAMCP's remote-BAM support) to also capture real error/mapping behavior.
 2. **Judge validation** — human-label a 20-case subset and report
    judge–human concordance; add position-swap bias checks.
-3. **Model comparison** — run the harness across Claude and OpenAI models and
-   publish an accuracy-by-model table.
-4. **Tool-vs-no-tool ablation** — quantify BAMCP's value-add by comparing a
-   model with the tools against the same model answering from raw text.
+3. **Model comparison + tool-use ablation** — *infrastructure built and
+   validated offline* (`bamcp.eval.compare`, `make eval-matrix`): runs each
+   model with and without the tools, aggregates accuracy by config and
+   category, and emits a Markdown/JSON table. Real numbers pending an API key —
+   a real run is a drop-in provider swap. See
+   [EVAL_RESULTS.md](EVAL_RESULTS.md). Follow-up: add judge-graded reasoning
+   cases so the ablation measures answer-quality lift, not just tool presence.

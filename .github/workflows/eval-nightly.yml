@@ -77,6 +77,15 @@ jobs:
           python scripts/run_eval.py \
             --provider "${{ github.event.inputs.provider || 'anthropic' }}" \
             --output-dir .eval-results
+      - name: Model comparison + tool-use ablation
+        if: steps.key.outputs.available == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python scripts/run_comparison.py \
+            --provider "${{ github.event.inputs.provider || 'anthropic' }}" \
+            --models claude-opus-4-8 claude-sonnet-4-5 \
+            --output-dir .eval-results/comparison
       - uses: actions/upload-artifact@v7
         if: steps.key.outputs.available == 'true'
         with:

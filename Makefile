@@ -1,4 +1,4 @@
-.PHONY: install test test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval-smoke giab-benchmark eval eval-cached eval-compare eval-dry eval-vision-setup render-viewer render-viewer-all-modes
+.PHONY: install test test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval-smoke giab-benchmark eval-matrix eval-matrix-mock eval eval-cached eval-compare eval-dry eval-vision-setup render-viewer render-viewer-all-modes
 
 build-viewer:
 	cd src/bamcp/static && npm install && npm run build
@@ -69,6 +69,17 @@ eval-cached:
 
 eval-compare:
 	python scripts/run_eval.py --with-vanilla --with-rendering-comparison --output-dir .eval-results
+
+# Model comparison + tool-use ablation. Real providers need an API key;
+# `--provider mock` runs the whole pipeline offline. See EVAL_RESULTS.md.
+eval-matrix:
+	python scripts/run_comparison.py --provider anthropic \
+		--models claude-opus-4-8 claude-sonnet-4-5 \
+		--results-md EVAL_RESULTS.md
+
+eval-matrix-mock:
+	python scripts/run_comparison.py --provider mock --models mock-model \
+		--output-dir .eval-results/comparison
 
 eval-dry:
 	python scripts/run_eval.py --dry-run --output-dir .eval-results

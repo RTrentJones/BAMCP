@@ -423,10 +423,26 @@ def main(argv: list[str] | None = None) -> int:
         default=0.95,
         help="Minimum variant precision (default 0.95).",
     )
+    # Detection operating point. The BAMCP defaults (min-vaf 0.02, min-depth 2)
+    # are tuned for curation sensitivity, not calling; override them here to
+    # score the caller at a realistic variant-calling threshold.
+    p.add_argument("--min-vaf", type=float, default=None, help="Override caller min VAF.")
+    p.add_argument("--min-depth", type=int, default=None, help="Override caller min depth.")
+    p.add_argument("--min-mapq", type=int, default=None, help="Override caller min MAPQ.")
+    p.add_argument("--max-reads", type=int, default=None, help="Override caller max reads.")
     args = p.parse_args(argv)
 
     truthset = load_truthset(args.manifest)
-    config = BAMCPConfig(reference=truthset.reference)
+    overrides: dict[str, Any] = {"reference": truthset.reference}
+    if args.min_vaf is not None:
+        overrides["min_vaf"] = args.min_vaf
+    if args.min_depth is not None:
+        overrides["min_depth"] = args.min_depth
+    if args.min_mapq is not None:
+        overrides["min_mapq"] = args.min_mapq
+    if args.max_reads is not None:
+        overrides["max_reads"] = args.max_reads
+    config = BAMCPConfig(**overrides)
     report = asyncio.run(score_truthset(truthset, config))
     passed, failures = report.meets_floors(
         min_recall=args.min_recall, min_precision=args.min_precision

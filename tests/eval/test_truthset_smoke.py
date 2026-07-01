@@ -105,6 +105,30 @@ def test_truthset_cli_exits_zero(_ensure_fixtures, capsys):
 
 
 @pytest.mark.integration
+def test_truthset_cli_operating_point_overrides(_ensure_fixtures, capsys):
+    # Exercises the operating-point override flags (near-default values keep the
+    # synthetic gate passing while covering all four override branches).
+    from bamcp.eval.truthset import main
+
+    rc = main(
+        [
+            "--manifest",
+            str(MANIFEST),
+            "--min-vaf",
+            "0.02",
+            "--min-depth",
+            "2",
+            "--min-mapq",
+            "0",
+            "--max-reads",
+            "50000",
+        ]
+    )
+    assert rc == 0
+    assert "PASS" in capsys.readouterr().out
+
+
+@pytest.mark.integration
 def test_truthset_cli_json_output(_ensure_fixtures, capsys):
     import json
 

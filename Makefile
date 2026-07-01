@@ -1,4 +1,4 @@
-.PHONY: install test test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval-smoke eval eval-cached eval-compare eval-dry eval-vision-setup render-viewer render-viewer-all-modes
+.PHONY: install test test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval-smoke giab-benchmark eval eval-cached eval-compare eval-dry eval-vision-setup render-viewer render-viewer-all-modes
 
 build-viewer:
 	cd src/bamcp/static && npm install && npm run build
@@ -51,6 +51,14 @@ coverage-strict:
 # fails if variant detection or artifact scoring regresses.
 eval-smoke:
 	python -m bamcp.eval.truthset --manifest tests/eval/datasets/synthetic_v1/manifest.yaml
+
+# Real GIAB benchmark (network-gated, not in CI). Builds the slice then scores
+# it at a realistic calling operating point. See tests/eval/datasets/giab/.
+giab-benchmark:
+	python tests/eval/datasets/giab/fetch_giab.py --region chr20:1000000-1060000
+	python -m bamcp.eval.truthset --manifest tests/eval/datasets/giab/manifest.yaml \
+		--min-vaf 0.2 --min-depth 8 --min-mapq 20 --max-reads 50000 \
+		--min-recall 0.90 --min-precision 0.90
 
 # Eval harness — MARRVEL-MCP-compatible runner against the BAMCP server.
 eval:

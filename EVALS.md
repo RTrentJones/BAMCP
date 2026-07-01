@@ -57,13 +57,20 @@ so the guard is discriminating, not just trivially satisfied.
 
 ### Real ground truth (GIAB)
 
-`tests/eval/datasets/giab/` is the extension to the
-[Genome in a Bottle](https://www.nist.gov/programs-projects/genome-bottle)
-HG001 high-confidence call set. It uses the **same manifest schema**, so the
-scorer runs unchanged; only the provenance and floors differ (recall ≥ 0.95,
-precision ≥ 0.90 — BAMCP is a lightweight pileup caller, not DeepVariant). GIAB
-data is large and network-gated, so it is a manual / nightly job, not a PR
-gate. See `tests/eval/datasets/giab/README.md`.
+`tests/eval/datasets/giab/` runs the same scorer against **real NIST
+Genome-in-a-Bottle truth data** (HG001, v4.2.1, GRCh38). `fetch_giab.py`
+streams the truth VCF, downloads the GRCh38 reference, and simulates reads over
+it honoring the real genotypes — a semi-synthetic benchmark over real biology.
+It uses the same manifest schema, so `bamcp.eval.truthset` scores it unchanged.
+
+Headline result on a 60 kb chr20 slice (66 real NIST SNVs): **recall 1.000 at
+both operating points; precision goes from 0.034 at BAMCP's default
+curation-sensitivity thresholds to 1.000 when thresholded for calling** (VAF ≥
+0.20, depth ≥ 8, MAPQ ≥ 20). That precision/recall tradeoff — and an honest
+statement of what a simulated-read benchmark can and cannot show — is in
+[`tests/eval/datasets/giab/GIAB_RESULTS.md`](tests/eval/datasets/giab/GIAB_RESULTS.md).
+GIAB data is large and network-gated, so this is a manual / nightly job, not a
+PR gate.
 
 ### Adding a truth set
 
@@ -122,8 +129,9 @@ make eval-dry                         # list cases without calling a model
 
 The ground-truth gate is the foundation. Planned build-out, in priority order:
 
-1. **GIAB wiring** — implement `fetch_giab.py`'s slice + VCF parse so a real
-   truth set runs nightly.
+1. **Real reads for GIAB** — the GIAB benchmark now runs on real truth with
+   simulated reads (done); swap in a real HG001 alignment (sliced remotely via
+   BAMCP's remote-BAM support) to also capture real error/mapping behavior.
 2. **Judge validation** — human-label a 20-case subset and report
    judge–human concordance; add position-swap bias checks.
 3. **Model comparison** — run the harness across Claude and OpenAI models and

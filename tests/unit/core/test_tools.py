@@ -248,6 +248,76 @@ class TestHandleGetVariants:
         )
         assert "_meta" not in result
 
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_positions_are_one_based(self, small_bam_path, config_with_ref):
+        """Regression: get_variants must report 1-based positions.
+
+        Internally variants are detected in pysam's 0-based coordinates; every
+        genomics consumer a caller reaches next (VCF, dbSNP, ClinVar, gnomAD, IGV)
+        is 1-based. Leaking the 0-based value made lookup_clinvar / lookup_gnomad
+        miss by one. The LLM-facing position must be the internal one + 1.
+        """
+        from bamcp.core.tools import _fetch_region_with_timeout
+
+        region = "chr1:490-600"
+        data = await _fetch_region_with_timeout(
+            small_bam_path,
+            region,
+            config_with_ref.reference,
+            config_with_ref,
+            min_vaf=0.05,
+            min_depth=1,
+        )
+        raw_positions = sorted(v["position"] for v in data.variants)  # 0-based
+        assert raw_positions, "fixture region should contain at least one variant"
+
+        result = await handle_get_variants(
+            {"file_path": small_bam_path, "region": region, "min_vaf": 0.05, "min_depth": 1},
+            config_with_ref,
+        )
+        tool_positions = sorted(
+            v["position"] for v in json.loads(result["content"][0]["text"])["variants"]
+        )
+        assert tool_positions == [p + 1 for p in raw_positions]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_position_round_trips_into_curation(self, small_bam_path, config_with_ref):
+        """A position from get_variants must be found by get_variant_curation_summary.
+
+        Guards the convention pairing: both speak 1-based, so the exact
+        detect -> curate/lookup chain a caller follows resolves the variant.
+        """
+        from bamcp.analysis.curation import handle_get_variant_curation_summary
+
+        result = await handle_get_variants(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:490-600",
+                "min_vaf": 0.05,
+                "min_depth": 1,
+            },
+            config_with_ref,
+        )
+        variants = json.loads(result["content"][0]["text"])["variants"]
+        assert variants, "need a variant to curate"
+        v = variants[0]
+
+        summary = await handle_get_variant_curation_summary(
+            {
+                "file_path": small_bam_path,
+                "chrom": v["contig"],
+                "pos": v["position"],
+                "ref": v["ref"],
+                "alt": v["alt"],
+                "window": 50,
+            },
+            config_with_ref,
+        )
+        text = summary["content"][0]["text"]
+        assert "not found" not in text.lower(), text[:200]
+
 
 class TestHandleGetCoverage:
     """Tests for handle_get_coverage tool handler."""

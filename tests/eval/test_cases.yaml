@@ -42,7 +42,7 @@
     name: "TP53-like curation rubric scores"
     category: "Variant Curation"
     input: |
-      For variant chr1:1050 A>T in tests/fixtures/comprehensive.bam, call
+      For variant chr1:1051 A>T in tests/fixtures/comprehensive.bam, call
       get_variant_curation_summary with format="rubric". Verify the rubric
       reports adequate depth quality.
     expected: |

@@ -253,10 +253,12 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     except asyncio.TimeoutError:
         return _error_response("Timeout fetching region data", output_format)
 
-    # Find the specific variant
+    # `pos` arrives 1-based (VCF/dbSNP convention — the same coordinate
+    # get_variants / lookup_clinvar / lookup_gnomad speak), but data.variants
+    # carry pysam's 0-based position, so match against pos - 1.
     target_variant = None
     for v in data.variants:
-        if v["position"] == pos and v["ref"] == ref and v["alt"] == alt:
+        if v["position"] == pos - 1 and v["ref"] == ref and v["alt"] == alt:
             target_variant = v
             break
 

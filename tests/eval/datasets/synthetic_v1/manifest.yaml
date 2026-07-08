@@ -32,12 +32,13 @@ provenance:
 # planted variant allele falls inside it; nothing else should be called here.
 detection_region: chr1:1000-2900
 
-# Positive truth: (chrom, pos, ref, alt) the detector must recover. Optional
-# expected_artifact names a risk `type` the curation tool must surface at that
-# site; null means the site is the clean control.
+# Positive truth: (chrom, pos, ref, alt) the detector must recover. Positions are
+# 1-based (VCF/dbSNP convention — the coordinate get_variants and the lookup tools
+# report). Optional expected_artifact names a risk `type` the curation tool must
+# surface at that site; null means the site is the clean control.
 variant_sites:
   - chrom: chr1
-    pos: 1050
+    pos: 1051
     ref: A
     alt: T
     category: strand_bias
@@ -46,7 +47,7 @@ variant_sites:
     expected_likelihood: high
 
   - chrom: chr1
-    pos: 1100
+    pos: 1101
     ref: A
     alt: C
     category: position_bias
@@ -55,7 +56,7 @@ variant_sites:
     expected_likelihood: high
 
   - chrom: chr1
-    pos: 1150
+    pos: 1151
     ref: A
     alt: G
     category: clean
@@ -65,7 +66,7 @@ variant_sites:
     is_clean_control: true
 
   - chrom: chr1
-    pos: 1200
+    pos: 1201
     ref: A
     alt: T
     category: low_mapq
@@ -74,7 +75,7 @@ variant_sites:
     expected_likelihood: high
 
   - chrom: chr1
-    pos: 1802
+    pos: 1803
     ref: T
     alt: A
     category: homopolymer
@@ -83,7 +84,7 @@ variant_sites:
     expected_likelihood: high
 
   - chrom: chr1
-    pos: 2075
+    pos: 2076
     ref: C
     alt: G
     category: low_depth
@@ -92,7 +93,7 @@ variant_sites:
     expected_likelihood: low
 
   - chrom: chr1
-    pos: 2500
+    pos: 2501
     ref: A
     alt: G
     category: multi_allelic
@@ -101,7 +102,7 @@ variant_sites:
     expected_likelihood: low
 
   - chrom: chr1
-    pos: 2500
+    pos: 2501
     ref: A
     alt: T
     category: multi_allelic
@@ -114,7 +115,7 @@ variant_sites:
   # It makes the overconfidence guard discriminating — a guard against high
   # confidence on artifacts only means something if some site can reach it.
   - chrom: chr1
-    pos: 2800
+    pos: 2801
     ref: A
     alt: T
     category: clean_high_confidence

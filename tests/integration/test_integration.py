@@ -96,10 +96,13 @@ class TestBrowseRegionIntegration:
         browse_payload = browse_result["_meta"]["ui/init"]
         variant_payload = json.loads(variant_result["content"][0]["text"])
 
-        # Variant positions from browse should be a superset (get_variants may filter)
+        # get_variants reports 1-based positions (VCF/dbSNP/gnomAD/IGV convention) so a
+        # caller can hand them straight to lookup_clinvar / lookup_gnomad; the viewer
+        # payload keeps pysam's internal 0-based positions for canvas + evidence math.
+        # So each get_variants position is exactly one greater than its browse counterpart.
         browse_positions = {v["position"] for v in browse_payload["variants"]}
         variant_positions = {v["position"] for v in variant_payload["variants"]}
-        assert variant_positions.issubset(browse_positions)
+        assert variant_positions.issubset({p + 1 for p in browse_positions})
 
 
 class TestCoverageIntegration:

@@ -68,9 +68,9 @@ def test_artifact_types_surfaced(report):
     assert report.artifact_recall == 1.0
     found = {c.site: c.expected_type for c in report.artifact_checks if c.found}
     assert found == {
-        "chr1:1050": "strand_bias",
-        "chr1:1200": "low_mapq",
-        "chr1:1802": "homopolymer",
+        "chr1:1051": "strand_bias",
+        "chr1:1201": "low_mapq",
+        "chr1:1803": "homopolymer",
     }
 
 

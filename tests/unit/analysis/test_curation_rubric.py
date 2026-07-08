@@ -174,7 +174,9 @@ class TestHandlerFormatParam:
             {
                 "file_path": comprehensive_bam_path,
                 "chrom": v["contig"],
-                "pos": v["position"],
+                # data.variants carry 0-based positions; the curation tool (like
+                # get_variants) speaks 1-based, so pass position + 1.
+                "pos": v["position"] + 1,
                 "ref": v["ref"],
                 "alt": v["alt"],
                 "window": 50,

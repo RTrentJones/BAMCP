@@ -195,9 +195,23 @@ async def _fetch_region_with_timeout(
 # -- Tool Handlers -----------------------------------------------------------
 
 
+def _one_based(variant: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a detector variant with a 1-based ``position``.
+
+    Internally BAMCP works in pysam's 0-based coordinates (``detect_variants``
+    reports ``start + i``), which keeps variant positions aligned with reads,
+    coverage, and the reference array for the viewer and evidence math. But
+    every genomics consumer a caller reaches next — VCF, dbSNP, ClinVar, gnomAD,
+    IGV — is 1-based, so a 0-based position handed to ``lookup_clinvar`` /
+    ``lookup_gnomad`` misses by one. Convert at the LLM-facing boundary so the
+    positions callers see (and pass straight into the lookup tools) are 1-based.
+    """
+    return {**variant, "position": variant["position"] + 1}
+
+
 @telemetry_wrapper("get_variants")
 async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict:
-    """Return variants without UI."""
+    """Return variants without UI. Positions are 1-based (VCF/dbSNP convention)."""
     file_path = args["file_path"]
     validate_path(file_path, config)
     region = args["region"]
@@ -210,7 +224,9 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         file_path, region, reference, config, min_vaf=min_vaf, min_depth=min_depth
     )
 
-    variants = [v for v in data.variants if v["vaf"] >= min_vaf and v["depth"] >= min_depth]
+    variants = [
+        _one_based(v) for v in data.variants if v["vaf"] >= min_vaf and v["depth"] >= min_depth
+    ]
 
     return {
         "content": [
@@ -392,8 +408,9 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     ]
 
     for v in data.variants:
+        # 1-based position (VCF/dbSNP convention) — see _one_based().
         summary_lines.append(
-            f"  {v['contig']}:{v['position']} {v['ref']}>{v['alt']} "
+            f"  {v['contig']}:{v['position'] + 1} {v['ref']}>{v['alt']} "
             f"VAF={v['vaf']:.1%} depth={v['depth']}"
         )
 
@@ -615,7 +632,7 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
                 "text": json.dumps(
                     {
                         "contig": contig,
-                        "variants": variants,
+                        "variants": [_one_based(v) for v in variants],
                         "count": len(variants),
                     }
                 ),

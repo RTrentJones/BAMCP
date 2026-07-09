@@ -1,5 +1,6 @@
 import { App } from "@modelcontextprotocol/ext-apps";
 import { RegionData, ToolResultParams, Variant } from "./types";
+import { displayPos } from "./constants";
 
 export type DisplayMode = 'inline' | 'fullscreen' | 'pip';
 
@@ -277,7 +278,7 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         if (!this.app) return;
 
         const message =
-            'Explain the variant at ' + variant.contig + ':' + variant.position +
+            'Explain the variant at ' + variant.contig + ':' + displayPos(variant.position) +
             ': ' + variant.ref + '>' + variant.alt +
             ', VAF=' + (variant.vaf * 100).toFixed(1) + '%' +
             ', depth=' + variant.depth;
@@ -296,7 +297,7 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         if (!this.app) return;
 
         const message =
-            `Look up the clinical significance of ${variant.contig}:${variant.position} ` +
+            `Look up the clinical significance of ${variant.contig}:${displayPos(variant.position)} ` +
             `${variant.ref}>${variant.alt} in ClinVar using the lookup_clinvar tool.`;
 
         try {
@@ -313,7 +314,7 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         if (!this.app) return;
 
         const message =
-            `Look up the population allele frequency of ${variant.contig}:${variant.position} ` +
+            `Look up the population allele frequency of ${variant.contig}:${displayPos(variant.position)} ` +
             `${variant.ref}>${variant.alt} in gnomAD using the lookup_gnomad tool.`;
 
         try {

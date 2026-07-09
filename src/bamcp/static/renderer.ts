@@ -8,6 +8,7 @@ import {
     DV_PALETTE,
     INSERT_SIZE_THRESHOLDS,
     SOFT_CLIP_STYLE,
+    displayPos,
 } from "./constants";
 
 // Layout constants
@@ -205,8 +206,8 @@ export class Renderer {
             ctx.lineTo(x, height);
             ctx.stroke();
 
-            // Label
-            const label = this.formatPosition(pos);
+            // Label (1-based for display; tick placement stays on raw 0-based pos)
+            const label = this.formatPosition(displayPos(pos));
             const labelWidth = ctx.measureText(label).width;
             if (x + labelWidth < width - 5) {
                 ctx.fillText(label, x + 2, height - 8);
@@ -576,7 +577,7 @@ export class Renderer {
                             const insertLabel = read.insert_size ? `${Math.abs(read.insert_size)}bp` : '';
                             const label = isChimeric
                                 ? `⚠ ${read.mate_contig}`
-                                : `${insertLabel} → ${matePos.toLocaleString()}`;
+                                : `${insertLabel} → ${displayPos(matePos).toLocaleString()}`;
                             const labelWidth = ctx.measureText(label).width;
                             const labelX = direction === 'right' ? edgeX - labelWidth - 8 : 8;
                             ctx.fillText(label, labelX, myY - 8);

@@ -12,7 +12,7 @@
  */
 
 import { BAMCPClient, DebugInfo } from "./client";
-import { BASE_COLORS } from "./constants";
+import { BASE_COLORS, displayPos } from "./constants";
 import { Renderer } from "./renderer";
 import { StateManager, DEFAULT_SETTINGS } from "./state";
 import {
@@ -763,7 +763,7 @@ class BAMCPViewer {
                     : '-';
 
             tr.innerHTML = `
-                <td>${v.position.toLocaleString()}</td>
+                <td>${displayPos(v.position).toLocaleString()}</td>
                 <td>${v.ref}</td>
                 <td style="color:${BASE_COLORS[v.alt] || '#333'};font-weight:bold">${v.alt}</td>
                 <td style="color:${vafColor};font-weight:500">${(v.vaf * 100).toFixed(1)}%</td>
@@ -845,7 +845,7 @@ class BAMCPViewer {
         let mismatchHtml = '';
         if (read.mismatches.length > 0) {
             const mmList = read.mismatches.slice(0, 5).map(mm =>
-                `${mm.pos.toLocaleString()}: <span style="color:${BASE_COLORS[mm.ref] || '#666'}">${mm.ref}</span>→` +
+                `${displayPos(mm.pos).toLocaleString()}: <span style="color:${BASE_COLORS[mm.ref] || '#666'}">${mm.ref}</span>→` +
                 `<span style="color:${BASE_COLORS[mm.alt] || '#666'}">${mm.alt}</span>`
             ).join(', ');
             const more = read.mismatches.length > 5 ? ` +${read.mismatches.length - 5} more` : '';
@@ -862,7 +862,7 @@ class BAMCPViewer {
 
         this.tooltip.innerHTML = `
             <strong>${read.name}</strong><br>
-            Pos: ${read.position.toLocaleString()}-${read.end_position.toLocaleString()}<br>
+            Pos: ${displayPos(read.position).toLocaleString()}-${read.end_position.toLocaleString()}<br>
             CIGAR: <span style="font-family:monospace">${read.cigar}</span><br>
             MAPQ: <span style="color:${mapqColor};font-weight:bold">${read.mapping_quality}</span><br>
             ${pairInfo}${mismatchHtml}
@@ -905,7 +905,7 @@ class BAMCPViewer {
 
         // Update Title
         document.getElementById('evidence-title')!.textContent =
-            `Variant Evidence: ${variant.contig}:${variant.position} ${variant.ref}>${variant.alt}`;
+            `Variant Evidence: ${variant.contig}:${displayPos(variant.position)} ${variant.ref}>${variant.alt}`;
 
         if (!evidence) {
             // No detailed evidence available

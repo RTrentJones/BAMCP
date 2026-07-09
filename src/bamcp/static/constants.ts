@@ -85,3 +85,14 @@ export const SOFT_CLIP_STYLE = {
     strokeColor: '#6b7280',                  // Gray border
     dashPattern: [2, 2],
 };
+
+/**
+ * Convert an internal pysam 0-based genomic position to the 1-based value shown
+ * to humans and sent to external databases (the VCF / dbSNP / ClinVar / gnomAD /
+ * IGV convention). Use ONLY for displayed text (ruler labels, tables, tooltips)
+ * and external-lookup coordinates — NEVER for canvas placement, viewport math,
+ * or evidence/mate index keys, which all stay in the raw 0-based frame.
+ */
+export function displayPos(pos: number): number {
+    return pos + 1;
+}

@@ -178,11 +178,42 @@ class TestDataLoading:
         send_init_data(viewer_page)
         first_row = viewer_page.locator("#variant-table tr").first
         cells = first_row.locator("td")
-        assert "130" in cells.nth(0).inner_text()
+        # Positions are displayed 1-based (VCF/dbSNP/gnomAD/IGV); the variant is
+        # stored 0-based at 130, so the table shows 131.
+        assert "131" in cells.nth(0).inner_text()
         assert cells.nth(1).inner_text() == "A"
         assert cells.nth(2).inner_text() == "T"
         assert "25.0%" in cells.nth(3).inner_text()
         assert cells.nth(4).inner_text() == "20"
+
+    @pytest.mark.e2e
+    def test_lookup_buttons_send_one_based_position(self, viewer_page: Page):
+        """The ClinVar / gnomAD / Explain buttons must hand the LLM a 1-based
+        coordinate — the lookup tools are 1-based — never the raw 0-based one."""
+        send_init_data(viewer_page)
+        result = viewer_page.evaluate(
+            """async () => {
+                const captured = [];
+                // No MCP host in tests, so client.app is null; inject a capturing stub.
+                viewer.client.app = {
+                    sendMessage: (m) => { captured.push(m); return Promise.resolve({}); }
+                };
+                const v = viewer.state.data.variants[0];
+                await viewer.client.lookupGnomAD(v);
+                await viewer.client.lookupClinVar(v);
+                await viewer.client.sendVariantMessage(v);
+                return { pos0: v.position, texts: captured.map(m => m.content[0].text) };
+            }"""
+        )
+        assert len(result["texts"]) == 3, result
+        one_based = f":{result['pos0'] + 1}"
+        zero_based = f":{result['pos0']}"
+        for text in result["texts"]:
+            assert one_based in text, f"lookup prompt must use 1-based {one_based}: {text}"
+            # the raw 0-based value must not appear as a standalone coordinate
+            assert f"{zero_based} " not in text and f"{zero_based}:" not in text, (
+                f"lookup prompt leaked raw 0-based position: {text}"
+            )
 
     @pytest.mark.e2e
     def test_canvas_has_dimensions(self, viewer_page: Page):
@@ -1776,8 +1807,9 @@ class TestVariantDetection:
         viewer_page.wait_for_timeout(50)
         rows = viewer_page.locator("#variant-table tr")
         row_texts = [rows.nth(i).inner_text() for i in range(rows.count())]
-        found = any("1,050" in t or "1050" in t for t in row_texts)
-        assert found, f"Variant at 1050 not found in table rows: {row_texts}"
+        # Displayed 1-based: the 0-based-1050 strand-bias variant shows as 1051.
+        found = any("1,051" in t or "1051" in t for t in row_texts)
+        assert found, f"Variant at 1051 not found in table rows: {row_texts}"
 
     @pytest.mark.e2e
     def test_clean_variant_high_confidence(self, viewer_page: Page, comprehensive_data):
@@ -1786,8 +1818,9 @@ class TestVariantDetection:
         send_init_data(viewer_page, data)
         rows = viewer_page.locator("#variant-table tr")
         row_texts = [rows.nth(i).inner_text() for i in range(rows.count())]
-        found = any("1,150" in t or "1150" in t for t in row_texts)
-        assert found, f"Clean variant at 1150 not found: {row_texts}"
+        # Displayed 1-based: the 0-based-1150 clean variant shows as 1151.
+        found = any("1,151" in t or "1151" in t for t in row_texts)
+        assert found, f"Clean variant at 1151 not found: {row_texts}"
 
     @pytest.mark.e2e
     def test_multi_allele_both_variants(self, viewer_page: Page, comprehensive_data):
@@ -1805,8 +1838,9 @@ class TestVariantDetection:
         send_init_data(viewer_page, data)
         rows = viewer_page.locator("#variant-table tr")
         row_texts = [rows.nth(i).inner_text() for i in range(rows.count())]
-        # No variant should be in the 2000-2050 range (1x depth)
-        in_range = any(any(str(p) in t for p in range(2000, 2051)) for t in row_texts)
+        # No variant should be in the 0-based 2000-2050 range (1x depth);
+        # displayed 1-based that is 2001-2051.
+        in_range = any(any(str(p) in t for p in range(2001, 2052)) for t in row_texts)
         assert not in_range, f"Should not have variant in 1x region: {row_texts}"
 
     @pytest.mark.e2e
@@ -1821,8 +1855,9 @@ class TestVariantDetection:
         viewer_page.wait_for_timeout(50)
         rows = viewer_page.locator("#variant-table tr")
         row_texts = [rows.nth(i).inner_text() for i in range(rows.count())]
-        found = any("2,075" in t or "2075" in t for t in row_texts)
-        assert found, f"Variant at 2075 (depth=2) not found: {row_texts}"
+        # Displayed 1-based: the 0-based-2075 depth-2 variant shows as 2076.
+        found = any("2,076" in t or "2076" in t for t in row_texts)
+        assert found, f"Variant at 2076 (depth=2) not found: {row_texts}"
 
 
 class TestVariantEvidence:
@@ -2005,11 +2040,12 @@ class TestVariantTableFeatures:
     def test_variant_click_centers_viewport(self, viewer_page: Page):
         """Clicking variant row should center viewport on that position."""
         send_init_data(viewer_page, MULTI_VARIANT_DATA)
-        # Click variant at position 800
+        # The variant at 0-based 800 is displayed 1-based as 801; row search uses
+        # the displayed text, but navigation centers on the raw 0-based position.
         rows = viewer_page.locator("#variant-table tr")
         for i in range(rows.count()):
             text = rows.nth(i).inner_text()
-            if "800" in text:
+            if "801" in text:
                 rows.nth(i).click()
                 break
         viewer_page.wait_for_timeout(200)

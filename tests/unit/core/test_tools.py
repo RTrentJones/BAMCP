@@ -16,6 +16,7 @@ from bamcp.constants import (
 from bamcp.core.parsers import AlignedRead, RegionData
 from bamcp.core.serialization import serialize_region_data
 from bamcp.core.tools import (
+    close_external_clients,
     handle_get_coverage,
     handle_get_region_summary,
     handle_get_variants,
@@ -220,6 +221,9 @@ class TestHandleGetVariants:
         payload = json.loads(text)
         assert "variants" in payload
         assert "count" in payload
+        assert payload["coordinate_system"] == "1-based-inclusive"
+        assert payload["variant_type"] == "candidate"
+        assert "disclaimer" in payload
         assert isinstance(payload["variants"], list)
         assert payload["count"] == len(payload["variants"])
 
@@ -645,6 +649,24 @@ class TestHandleLookupClinvar:
         payload = json.loads(result["content"][0]["text"])
         assert "error" in payload
 
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_disabled_by_config(self, monkeypatch):
+        async def fail_lookup(self, chrom, pos, ref, alt):
+            raise AssertionError("disabled ClinVar should not call API client")
+
+        from bamcp.clients import clinvar
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", fail_lookup)
+        config = BAMCPConfig(clinvar_enabled=False)
+
+        result = await handle_lookup_clinvar(
+            {"chrom": "chr1", "pos": 100, "ref": "A", "alt": "T"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["error"] == "ClinVar lookup is disabled"
+        assert "disclaimer" in payload
+
 
 class TestHandleLookupGnomad:
     """Tests for handle_lookup_gnomad tool handler."""
@@ -695,6 +717,24 @@ class TestHandleLookupGnomad:
         )
         payload = json.loads(result["content"][0]["text"])
         assert payload["found"] is False
+        assert "disclaimer" in payload
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_disabled_by_config(self, monkeypatch):
+        async def fail_lookup(self, chrom, pos, ref, alt):
+            raise AssertionError("disabled gnomAD should not call API client")
+
+        from bamcp.clients import gnomad
+
+        monkeypatch.setattr(gnomad.GnomadClient, "lookup", fail_lookup)
+        config = BAMCPConfig(gnomad_enabled=False)
+
+        result = await handle_lookup_gnomad(
+            {"chrom": "chr1", "pos": 100, "ref": "A", "alt": "T"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["error"] == "gnomAD lookup is disabled"
         assert "disclaimer" in payload
 
 
@@ -1084,6 +1124,9 @@ class TestHandleScanVariants:
         payload = json.loads(result["content"][0]["text"])
         assert "variants" in payload
         assert "contig" in payload
+        assert payload["coordinate_system"] == "1-based-inclusive"
+        assert payload["variant_type"] == "candidate"
+        assert "disclaimer" in payload
         assert payload["contig"] == "chr1"
         assert isinstance(payload["variants"], list)
 
@@ -1110,3 +1153,358 @@ class TestHandleScanVariants:
         payload = json.loads(result["content"][0]["text"])
         assert payload["variants"] == []
         assert payload["count"] == 0
+
+
+class TestMediumRoadmapCoverage:
+    """Targeted coverage for medium-roadmap fast paths, caching, and cleanup."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_fetch_region_coverage_mode_uses_coverage_fast_path(self, config, monkeypatch):
+        """Coverage mode should avoid the full read-serialization parser."""
+        from bamcp.core import tools as tools_module
+
+        calls = []
+
+        async def mock_ensure_cached_index(file_path, cfg):
+            return None
+
+        def mock_fetch_coverage_only(*args):
+            calls.append(args)
+            return RegionData("chr1", 10, 20, reads=[], coverage=[3] * 10, variants=[])
+
+        def fail_fetch_region(*args):
+            raise AssertionError("coverage mode should not call fetch_region")
+
+        monkeypatch.setattr(tools_module, "_ensure_cached_index", mock_ensure_cached_index)
+        monkeypatch.setattr(tools_module, "fetch_coverage_only", mock_fetch_coverage_only)
+        monkeypatch.setattr(tools_module, "fetch_region", fail_fetch_region)
+
+        data = await tools_module._fetch_region_with_timeout(
+            "sample.bam", "chr1:10-20", None, config, mode="coverage"
+        )
+
+        assert data.coverage == [3] * 10
+        assert len(calls) == 1
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_fetch_region_cache_reuses_identical_query(self, config, monkeypatch):
+        """Identical region queries should hit the in-process region cache."""
+        from bamcp.core import tools as tools_module
+
+        call_count = 0
+
+        async def mock_ensure_cached_index(file_path, cfg):
+            return None
+
+        def mock_fetch_coverage_only(*args):
+            nonlocal call_count
+            call_count += 1
+            return RegionData("chr1", 10, 20, reads=[], coverage=[call_count] * 10, variants=[])
+
+        monkeypatch.setattr(tools_module, "_ensure_cached_index", mock_ensure_cached_index)
+        monkeypatch.setattr(tools_module, "fetch_coverage_only", mock_fetch_coverage_only)
+
+        cfg = BAMCPConfig(cache_ttl=60)
+        first = await tools_module._fetch_region_with_timeout(
+            "sample.bam", "chr1:10-20", None, cfg, mode="coverage"
+        )
+        second = await tools_module._fetch_region_with_timeout(
+            "sample.bam", "chr1:10-20", None, cfg, mode="coverage"
+        )
+
+        assert first is second
+        assert call_count == 1
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_fetch_region_cache_separates_query_mode(self, config, monkeypatch):
+        """Coverage and full modes must not share cached RegionData."""
+        from bamcp.core import tools as tools_module
+
+        async def mock_ensure_cached_index(file_path, cfg):
+            return None
+
+        def mock_fetch_coverage_only(*args):
+            return RegionData("chr1", 10, 20, reads=[], coverage=[1] * 10, variants=[])
+
+        def mock_fetch_region(*args):
+            return RegionData(
+                "chr1",
+                10,
+                20,
+                reads=[
+                    AlignedRead(
+                        name="r1",
+                        sequence="A",
+                        qualities=[30],
+                        cigar="1M",
+                        position=10,
+                        end_position=11,
+                        mapping_quality=60,
+                        is_reverse=False,
+                    )
+                ],
+                coverage=[2] * 10,
+                variants=[],
+            )
+
+        monkeypatch.setattr(tools_module, "_ensure_cached_index", mock_ensure_cached_index)
+        monkeypatch.setattr(tools_module, "fetch_coverage_only", mock_fetch_coverage_only)
+        monkeypatch.setattr(tools_module, "fetch_region", mock_fetch_region)
+
+        cfg = BAMCPConfig(cache_ttl=60)
+        coverage = await tools_module._fetch_region_with_timeout(
+            "sample.bam", "chr1:10-20", None, cfg, mode="coverage"
+        )
+        full = await tools_module._fetch_region_with_timeout(
+            "sample.bam", "chr1:10-20", None, cfg, mode="full"
+        )
+
+        assert coverage.reads == []
+        assert len(full.reads) == 1
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_fetch_region_overlays_vcf_and_deduplicates(self, config, monkeypatch, tmp_path):
+        """VCF variants should be overlaid without duplicating matching candidate variants."""
+        from bamcp.core import tools as tools_module
+
+        vcf_path = tmp_path / "calls.vcf.gz"
+        vcf_path.touch()
+
+        async def mock_ensure_cached_index(file_path, cfg):
+            return None
+
+        def mock_fetch_region(*args):
+            return RegionData(
+                "chr1",
+                10,
+                20,
+                reads=[],
+                coverage=[1] * 10,
+                variants=[
+                    {
+                        "contig": "chr1",
+                        "position": 12,
+                        "ref": "A",
+                        "alt": "T",
+                        "vaf": 0.5,
+                        "depth": 10,
+                        "alt_count": 5,
+                    }
+                ],
+            )
+
+        def mock_load_vcf_variants(path, region):
+            assert path == str(vcf_path)
+            assert region == "chr1:10-20"
+            return [
+                {
+                    "contig": "chr1",
+                    "position": 12,
+                    "ref": "A",
+                    "alt": "T",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                },
+                {
+                    "contig": "chr1",
+                    "position": 15,
+                    "ref": "G",
+                    "alt": "C",
+                    "vaf": 0.0,
+                    "depth": 0,
+                    "alt_count": 0,
+                    "source": "vcf",
+                },
+            ]
+
+        monkeypatch.setattr(tools_module, "_ensure_cached_index", mock_ensure_cached_index)
+        monkeypatch.setattr(tools_module, "fetch_region", mock_fetch_region)
+        monkeypatch.setattr(tools_module, "load_vcf_variants", mock_load_vcf_variants)
+
+        data = await tools_module._fetch_region_with_timeout(
+            "sample.bam", "chr1:10-20", None, config, vcf_path=str(vcf_path)
+        )
+
+        assert [(v["position"], v["ref"], v["alt"]) for v in data.variants] == [
+            (12, "A", "T"),
+            (15, "G", "C"),
+        ]
+        assert data.variants[1]["source"] == "vcf"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_fetch_region_uses_vcf_as_primary_variant_source_without_reference(
+        self, config, monkeypatch, tmp_path
+    ):
+        """Variant mode with VCF and no reference should avoid BAM parsing entirely."""
+        from bamcp.core import tools as tools_module
+
+        vcf_path = tmp_path / "primary.vcf"
+        vcf_path.touch()
+
+        def fail_ensure_cached_index(file_path, cfg):
+            raise AssertionError("VCF-primary variant mode should not fetch BAM indexes")
+
+        def fail_fetch_region(*args):
+            raise AssertionError("VCF-primary variant mode should not parse BAM reads")
+
+        def mock_load_vcf_variants(path, region):
+            assert path == str(vcf_path)
+            assert region == "chr3:100-200"
+            return [
+                {
+                    "contig": "chr3",
+                    "position": 150,
+                    "ref": "N",
+                    "alt": "<DUP>",
+                    "variant_kind": "sv",
+                    "vaf": 0.0,
+                    "depth": 0,
+                    "alt_count": 0,
+                    "source": "vcf",
+                    "sample_names": ["sample1"],
+                    "samples": {"sample1": {"GT": [0, 1]}},
+                    "sv_type": "DUP",
+                    "sv_end": 300,
+                    "sv_len": 150,
+                }
+            ]
+
+        monkeypatch.setattr(tools_module, "_ensure_cached_index", fail_ensure_cached_index)
+        monkeypatch.setattr(tools_module, "fetch_region", fail_fetch_region)
+        monkeypatch.setattr(tools_module, "load_vcf_variants", mock_load_vcf_variants)
+
+        data = await tools_module._fetch_region_with_timeout(
+            "sample.bam",
+            "chr3:100-200",
+            None,
+            config,
+            mode="variants",
+            vcf_path=str(vcf_path),
+        )
+
+        assert data.reads == []
+        assert data.coverage == []
+        assert data.variants[0]["variant_kind"] == "sv"
+        assert data.variants[0]["sample_names"] == ["sample1"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_download_index_streaming_revalidates_and_size_caps(
+        self, config, monkeypatch, tmp_path
+    ):
+        """Streaming index download should validate derived URLs and enforce size caps."""
+        from bamcp.core import tools as tools_module
+
+        validated = []
+
+        def mock_validate_remote_url(url, cfg):
+            validated.append(url)
+
+        class ResponseStub:
+            status_code = 200
+            headers = {"content-length": "5"}
+
+            async def aiter_bytes(self):
+                yield b"abc"
+                yield b"de"
+
+        class StreamContext:
+            async def __aenter__(self):
+                return ResponseStub()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class ClientStub:
+            def stream(self, method, url):
+                assert method == "GET"
+                assert url == "https://example.com/sample.bam.bai"
+                return StreamContext()
+
+        monkeypatch.setattr(tools_module, "validate_remote_url", mock_validate_remote_url)
+        index_path = tmp_path / "sample.bai"
+
+        result = await tools_module._download_index_streaming(
+            ClientStub(),
+            "https://example.com/sample.bam.bai",
+            str(index_path),
+            config,
+        )
+
+        assert result == str(index_path)
+        assert index_path.read_bytes() == b"abcde"
+        assert validated == ["https://example.com/sample.bam.bai"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_download_index_streaming_rejects_oversized_content_length(
+        self, monkeypatch, tmp_path
+    ):
+        """Content-Length above the configured cap should abort before writing."""
+        from bamcp.core import tools as tools_module
+
+        class ResponseStub:
+            status_code = 200
+            headers = {"content-length": "6"}
+
+            async def aiter_bytes(self):
+                yield b"abcdef"
+
+        class StreamContext:
+            async def __aenter__(self):
+                return ResponseStub()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class ClientStub:
+            def stream(self, method, url):
+                return StreamContext()
+
+        monkeypatch.setattr(tools_module, "validate_remote_url", lambda url, cfg: None)
+
+        with pytest.raises(ValueError, match="exceeds configured maximum"):
+            await tools_module._download_index_streaming(
+                ClientStub(),
+                "https://example.com/sample.bam.bai",
+                str(tmp_path / "sample.bai"),
+                BAMCPConfig(max_remote_index_bytes=5),
+            )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_close_external_clients_closes_clients_and_clears_cache(self):
+        """External client cleanup should close clients, reset globals, and clear region cache."""
+        from bamcp.core import tools as tools_module
+
+        closed = []
+
+        class ClientStub:
+            def __init__(self, name):
+                self.name = name
+
+            async def close(self):
+                closed.append(self.name)
+
+        tools_module._clinvar_client = ClientStub("clinvar")
+        tools_module._gnomad_client = ClientStub("gnomad")
+        tools_module._gene_client = ClientStub("gene")
+        tools_module._region_cache[("coverage", "sample.bam")] = (
+            0,
+            RegionData("chr1", 0, 1, [], [0], []),
+        )
+
+        await close_external_clients()
+
+        assert sorted(closed) == ["clinvar", "gene", "gnomad"]
+        assert tools_module._clinvar_client is None
+        assert tools_module._gnomad_client is None
+        assert tools_module._gene_client is None
+        assert tools_module._region_cache == {}

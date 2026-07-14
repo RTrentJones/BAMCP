@@ -53,6 +53,7 @@ Existing genomics MCP servers (bio-mcp-samtools, AWS HealthOmics MCP) provide co
 - **Alignment Viewer** — Visualize reads with color-coded mismatches, insertions, deletions, and soft clips
 - **Coverage Track** — Real-time depth of coverage across the viewing window
 - **Variant Highlighting** — Automatic detection and highlighting of positions with non-reference alleles
+- **VCF/BCF Overlay** — Use caller-produced variants as a primary/overlay source, including sample genotypes and structural-variant metadata
 - **Region Navigation** — Jump to coordinates, genes, or specific variants
 - **Format Support** — BAM, CRAM (with reference), and indexed remote files (HTTP/S3)
 - **Canvas Rendering** — High-performance visualization of thousands of reads via HTML5 Canvas
@@ -252,12 +253,12 @@ Returns coverage statistics without visualization.
 
 | Tool | Description | Required Args | Optional Args |
 |------|-------------|---------------|---------------|
-| `visualize_region` | View aligned reads with interactive UI | `file_path`, `region` | `reference` |
-| `get_variants` | Detect and return variants in a region | `file_path`, `region` | `reference`, `min_vaf`, `min_depth` |
+| `visualize_region` | View aligned reads with interactive UI | `file_path`, `region` | `reference`, `vcf_path` |
+| `get_variants` | Detect and return candidate variants in a region | `file_path`, `region` | `reference`, `vcf_path`, `min_vaf`, `min_depth` |
 | `get_coverage` | Calculate depth statistics | `file_path`, `region` | `reference` |
 | `list_contigs` | List chromosomes and detect genome build | `file_path` | `reference` |
-| `jump_to` | Jump to a specific genomic position | `file_path`, `position` | `contig`, `window`, `reference` |
-| `get_region_summary` | Text summary for LLM reasoning (no UI) | `file_path`, `region` | `reference` |
+| `jump_to` | Jump to a specific genomic position | `file_path`, `position` | `contig`, `window`, `reference`, `vcf_path` |
+| `get_region_summary` | Text summary for LLM reasoning (no UI) | `file_path`, `region` | `reference`, `vcf_path` |
 | `lookup_clinvar` | Look up variant in ClinVar | `chrom`, `pos`, `ref`, `alt` | — |
 | `lookup_gnomad` | Look up variant in gnomAD | `chrom`, `pos`, `ref`, `alt` | — |
 | `get_variant_curation_summary` | Detailed curation with artifact risk | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference` |
@@ -282,9 +283,11 @@ Regions can be specified as:
 | `BAMCP_REFERENCE` | Path to reference FASTA (required for CRAM) | None |
 | `BAMCP_MAX_READS` | Maximum reads to fetch per region | `10000` |
 | `BAMCP_DEFAULT_WINDOW` | Default viewing window size (bp) | `500` |
-| `BAMCP_MIN_VAF` | Minimum variant allele frequency to report | `0.1` |
-| `BAMCP_MIN_DEPTH` | Minimum depth for variant calls | `10` |
+| `BAMCP_MIN_VAF` | Minimum allele fraction for candidate variants | `0.02` |
+| `BAMCP_MIN_DEPTH` | Minimum depth for candidate variants | `2` |
 | `BAMCP_MIN_MAPQ` | Minimum mapping quality filter | `0` |
+| `BAMCP_MIN_BASEQ` | Minimum base quality for coverage and candidate variant counts | `0` |
+| `BAMCP_MAX_REMOTE_INDEX_BYTES` | Maximum remote BAM/CRAM index download size | `67108864` |
 
 ### Transport Settings
 

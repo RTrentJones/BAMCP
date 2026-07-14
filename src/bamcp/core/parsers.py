@@ -61,6 +61,18 @@ MAX_REGION_SIZE = 1_000_000  # 1 Mbp
 CIGAR_SOFT_CLIP = 4  # S operation
 
 
+def read_passes_filters(read: pysam.AlignedSegment, min_mapq: int = 0) -> bool:
+    """Return whether a read should contribute to BAMCP coverage/read evidence."""
+    return (
+        read.mapping_quality >= min_mapq
+        and not read.is_unmapped
+        and not read.is_secondary
+        and not read.is_supplementary
+        and not read.is_duplicate
+        and not read.is_qcfail
+    )
+
+
 def extract_soft_clips(read: pysam.AlignedSegment) -> list[SoftClip]:
     """
     Extract soft clip positions and sequences from CIGAR.
@@ -152,12 +164,151 @@ def parse_region(region: str) -> tuple[str, int, int]:
     return contig, start, end
 
 
+def _open_alignment(
+    bam_path: str,
+    reference_path: str | None = None,
+    index_filename: str | None = None,
+) -> pysam.AlignmentFile:
+    """Open a BAM/CRAM with the correct mode and shared options."""
+    mode = "rc" if bam_path.endswith(".cram") else "rb"
+    return pysam.AlignmentFile(
+        bam_path,
+        mode,  # type: ignore[arg-type]
+        reference_filename=reference_path,
+        index_filename=index_filename,
+    )
+
+
+def count_coverage_arrays(
+    bam_path: str,
+    region: str,
+    reference_path: str | None = None,
+    min_mapq: int = 0,
+    min_baseq: int = 0,
+    index_filename: str | None = None,
+) -> tuple[str, int, int, tuple[Sequence[int], Sequence[int], Sequence[int], Sequence[int]]]:
+    """Return base-count coverage arrays for a region without extracting reads."""
+    contig, start, end = parse_region(region)
+    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
+        counts = samfile.count_coverage(
+            contig,
+            start,
+            end,
+            quality_threshold=min_baseq,
+            read_callback=lambda r: read_passes_filters(r, min_mapq),
+        )
+    return contig, start, end, counts
+
+
+def fetch_coverage_only(
+    bam_path: str,
+    region: str,
+    reference_path: str | None = None,
+    min_mapq: int = 0,
+    min_baseq: int = 0,
+    index_filename: str | None = None,
+) -> RegionData:
+    """Fetch only coverage for a region, skipping read serialization."""
+    contig, start, end, counts = count_coverage_arrays(
+        bam_path, region, reference_path, min_mapq, min_baseq, index_filename
+    )
+    cov_A, cov_C, cov_G, cov_T = counts
+    coverage = (np.array(cov_A) + np.array(cov_C) + np.array(cov_G) + np.array(cov_T)).tolist()
+    return RegionData(contig=contig, start=start, end=end, reads=[], coverage=coverage, variants=[])
+
+
+def fetch_candidate_variants_only(
+    bam_path: str,
+    region: str,
+    reference_path: str,
+    min_mapq: int = 0,
+    min_baseq: int = 0,
+    index_filename: str | None = None,
+    min_vaf: float = 0.1,
+    min_depth: int = 3,
+) -> RegionData:
+    """Fetch coverage-derived candidate variants without serializing reads."""
+    contig, start, end, counts = count_coverage_arrays(
+        bam_path, region, reference_path, min_mapq, min_baseq, index_filename
+    )
+    cov_A, cov_C, cov_G, cov_T = counts
+    coverage = (np.array(cov_A) + np.array(cov_C) + np.array(cov_G) + np.array(cov_T)).tolist()
+    with pysam.FastaFile(reference_path) as fasta:
+        ref_seq = fasta.fetch(contig, start, end)
+    variants = detect_variants(counts, ref_seq, contig, start, min_vaf, min_depth)
+    return RegionData(
+        contig=contig,
+        start=start,
+        end=end,
+        reads=[],
+        coverage=coverage,
+        variants=variants,
+        reference_sequence=ref_seq,
+    )
+
+
+def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
+    """Load VCF/BCF records for a region as internal 0-based candidate variants."""
+    contig, start, end = parse_region(region)
+    variants: list[dict] = []
+    with pysam.VariantFile(vcf_path) as vcf:
+        for record in vcf.fetch(contig, start, end):
+            pos0 = int(record.pos) - 1
+            if pos0 < start or pos0 >= end:
+                continue
+            depth = int(record.info.get("DP", 0) or 0)
+            af_value = record.info.get("AF", 0.0)
+            af_values = af_value if isinstance(af_value, tuple) else (af_value,)
+            sv_type = record.info.get("SVTYPE")
+            sv_end = record.info.get("END")
+            sv_len = record.info.get("SVLEN")
+            is_structural = bool(sv_type) or any(
+                str(alt).startswith("<") for alt in record.alts or []
+            )
+            samples = {
+                sample_name: {
+                    key: list(value) if isinstance(value, tuple) else value
+                    for key, value in sample_data.items()
+                }
+                for sample_name, sample_data in record.samples.items()
+            }
+            for idx, alt in enumerate(record.alts or []):
+                af = float(af_values[idx]) if idx < len(af_values) else 0.0
+                alt_len = len(str(alt))
+                ref_len = len(str(record.ref))
+                variant_kind = (
+                    "sv"
+                    if is_structural
+                    else ("snv" if ref_len == 1 and alt_len == 1 else "indel")
+                )
+                variants.append(
+                    {
+                        "contig": record.contig,
+                        "position": pos0,
+                        "ref": record.ref,
+                        "alt": alt,
+                        "variant_kind": variant_kind,
+                        "vaf": round(af, 3),
+                        "depth": depth,
+                        "alt_count": round(af * depth) if depth else 0,
+                        "source": "vcf",
+                        "samples": samples,
+                        "sample_names": list(samples.keys()),
+                        "sv_type": sv_type,
+                        "sv_end": sv_end,
+                        "sv_len": sv_len,
+                    }
+                )
+    return variants
+
+
 def fetch_region(
     bam_path: str,
     region: str,
     reference_path: str | None = None,
     max_reads: int = 10000,
     min_mapq: int = 0,
+    min_baseq: int = 0,
     index_filename: str | None = None,
     min_vaf: float = 0.1,
     min_depth: int = 3,
@@ -171,6 +322,7 @@ def fetch_region(
         reference_path: Path to reference FASTA (required for CRAM).
         max_reads: Maximum reads to return (stop after this many).
         min_mapq: Minimum mapping quality filter.
+        min_baseq: Minimum base quality for coverage/candidate variant counts.
         index_filename: Path to index file (.bai/.crai). Used to redirect
             remote BAM index downloads to a cache directory.
 
@@ -179,15 +331,8 @@ def fetch_region(
     """
     contig, start, end = parse_region(region)
 
-    mode = "rc" if bam_path.endswith(".cram") else "rb"
-
     # Use context manager to ensure file handles are properly closed on exception
-    with pysam.AlignmentFile(
-        bam_path,
-        mode,  # type: ignore[arg-type]
-        reference_filename=reference_path,
-        index_filename=index_filename,
-    ) as samfile:
+    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
         # 1. Calculate coverage and base counts using pysam's optimized C engine
         # Returns tuple of arrays (A, C, G, T)
         # Use read_callback to respect min_mapq filter for consistency with read filtering
@@ -195,13 +340,8 @@ def fetch_region(
             contig,
             start,
             end,
-            quality_threshold=0,
-            read_callback=lambda r: (
-                r.mapping_quality >= min_mapq
-                and not r.is_unmapped
-                and not r.is_secondary
-                and not r.is_supplementary
-            ),
+            quality_threshold=min_baseq,
+            read_callback=lambda r: read_passes_filters(r, min_mapq),
         )
 
         # Vectorized sum using numpy for O(n) instead of Python loop
@@ -217,9 +357,7 @@ def fetch_region(
 
         read_count = 0
         for read in samfile.fetch(contig, start, end):
-            if read.mapping_quality < min_mapq:
-                continue
-            if read.is_unmapped or read.is_secondary or read.is_supplementary:
+            if not read_passes_filters(read, min_mapq):
                 continue
 
             read_count += 1
@@ -391,6 +529,8 @@ def scan_variants_chunked(
     chunk_size: int = 50_000,
     min_vaf: float = 0.1,
     min_depth: int = 3,
+    min_mapq: int = 0,
+    min_baseq: int = 0,
     max_region: int = 250_000_000,
     index_filename: str | None = None,
 ) -> list[dict]:
@@ -406,6 +546,8 @@ def scan_variants_chunked(
         chunk_size: Window size per iteration.
         min_vaf: Minimum variant allele frequency.
         min_depth: Minimum read depth.
+        min_mapq: Minimum mapping quality filter.
+        min_baseq: Minimum base quality for coverage/candidate variant counts.
         max_region: Maximum bases to scan (safety limit).
         index_filename: Path to cached index file for remote BAMs.
 
@@ -414,15 +556,9 @@ def scan_variants_chunked(
     """
     from ..constants import SCAN_VARIANTS_MAX_RESULTS
 
-    mode = "rc" if bam_path.endswith(".cram") else "rb"
     all_variants: list[dict] = []
 
-    with pysam.AlignmentFile(
-        bam_path,
-        mode,  # type: ignore[arg-type]
-        reference_filename=reference_path,
-        index_filename=index_filename,
-    ) as samfile:
+    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
         # Get contig length from header
         contig_lengths = dict(zip(samfile.references, samfile.lengths, strict=False))
         contig_length = contig_lengths.get(contig)
@@ -441,10 +577,8 @@ def scan_variants_chunked(
                     contig,
                     chunk_start,
                     chunk_end,
-                    quality_threshold=0,
-                    read_callback=lambda r: (
-                        not r.is_unmapped and not r.is_secondary and not r.is_supplementary
-                    ),
+                    quality_threshold=min_baseq,
+                    read_callback=lambda r: read_passes_filters(r, min_mapq),
                 )
 
                 chunk_variants = detect_variants(

@@ -12,6 +12,8 @@ from .constants import (
     DEFAULT_HOST,
     DEFAULT_ISSUER_URL,
     DEFAULT_MAX_READS,
+    DEFAULT_MAX_REMOTE_INDEX_BYTES,
+    DEFAULT_MIN_BASEQ,
     DEFAULT_MIN_DEPTH,
     DEFAULT_MIN_MAPQ,
     DEFAULT_MIN_VAF,
@@ -34,6 +36,7 @@ class BAMCPConfig:
     min_vaf: float = DEFAULT_MIN_VAF
     min_depth: int = DEFAULT_MIN_DEPTH
     min_mapq: int = DEFAULT_MIN_MAPQ
+    min_baseq: int = DEFAULT_MIN_BASEQ
 
     # Transport settings
     transport: str = DEFAULT_TRANSPORT
@@ -61,6 +64,7 @@ class BAMCPConfig:
     # Cache settings
     cache_dir: str = ""  # Defaults to ~/.cache/bamcp if empty
     cache_ttl: int = DEFAULT_CACHE_TTL_SECONDS
+    max_remote_index_bytes: int = DEFAULT_MAX_REMOTE_INDEX_BYTES
 
     # Security settings
     allowed_directories: list[str] | None = None
@@ -93,6 +97,9 @@ class BAMCPConfig:
         if not 0 <= self.min_mapq <= 255:
             raise ValueError(f"min_mapq must be between 0 and 255, got {self.min_mapq}")
 
+        if not 0 <= self.min_baseq <= 255:
+            raise ValueError(f"min_baseq must be between 0 and 255, got {self.min_baseq}")
+
         if self.default_window < 1:
             raise ValueError(f"default_window must be at least 1, got {self.default_window}")
 
@@ -111,6 +118,12 @@ class BAMCPConfig:
         # Validate cache settings
         if self.cache_ttl < 0:
             raise ValueError(f"cache_ttl must be non-negative, got {self.cache_ttl}")
+
+        if self.max_remote_index_bytes < 1:
+            raise ValueError(
+                "max_remote_index_bytes must be at least 1 byte, "
+                f"got {self.max_remote_index_bytes}"
+            )
 
     @classmethod
     def from_env(cls) -> "BAMCPConfig":
@@ -133,6 +146,7 @@ class BAMCPConfig:
             min_vaf=float(env.get("BAMCP_MIN_VAF", str(DEFAULT_MIN_VAF))),
             min_depth=int(env.get("BAMCP_MIN_DEPTH", str(DEFAULT_MIN_DEPTH))),
             min_mapq=int(env.get("BAMCP_MIN_MAPQ", str(DEFAULT_MIN_MAPQ))),
+            min_baseq=int(env.get("BAMCP_MIN_BASEQ", str(DEFAULT_MIN_BASEQ))),
             transport=env.get("BAMCP_TRANSPORT", DEFAULT_TRANSPORT),
             host=env.get("BAMCP_HOST", DEFAULT_HOST),
             port=int(env.get("BAMCP_PORT", str(DEFAULT_PORT))),
@@ -149,6 +163,9 @@ class BAMCPConfig:
             genome_build=env.get("BAMCP_GENOME_BUILD", DEFAULT_GENOME_BUILD),
             cache_dir=cache_dir,
             cache_ttl=int(env.get("BAMCP_CACHE_TTL", str(DEFAULT_CACHE_TTL_SECONDS))),
+            max_remote_index_bytes=int(
+                env.get("BAMCP_MAX_REMOTE_INDEX_BYTES", str(DEFAULT_MAX_REMOTE_INDEX_BYTES))
+            ),
             allowed_directories=[
                 d.strip() for d in env.get("BAMCP_ALLOWED_DIRECTORIES", "").split(",") if d.strip()
             ]

@@ -21,15 +21,20 @@ CHROM_PATTERN = re.compile(r"^(chr)?(\d{1,2}|[XYM]|MT)$", re.IGNORECASE)
 # Pattern for valid allele strings (only ACGTN)
 ALLELE_PATTERN = re.compile(r"^[ACGTN]+$", re.IGNORECASE)
 
-# Pattern for valid genomic region strings (e.g., chr1:1000-2000)
-REGION_PATTERN = re.compile(r"^(chr)?(\d{1,2}|[XYM]|MT):(\d{1,11})-(\d{1,11})$", re.IGNORECASE)
+# Pattern for valid genomic region strings (e.g., chr1:1000-2000 or chr1:1,000-2,000)
+REGION_PATTERN = re.compile(
+    r"^(chr)?(\d{1,2}|[XYM]|MT):(\d{1,3}(?:,\d{3})*|\d{1,11})-"
+    r"(\d{1,3}(?:,\d{3})*|\d{1,11})$",
+    re.IGNORECASE,
+)
 
 # Input length limits
 MAX_FILE_PATH_LENGTH = 2048
 MAX_REGION_LENGTH = 100
 
-# Allowed BAM/CRAM file extensions
+# Allowed file extensions
 ALLOWED_FILE_EXTENSIONS = (".bam", ".cram")
+ALLOWED_VARIANT_FILE_EXTENSIONS = (".vcf", ".vcf.gz", ".bcf")
 
 
 def _is_private_ip(addr: str) -> bool:
@@ -147,6 +152,40 @@ def validate_path(file_path: str, config: BAMCPConfig) -> None:
                 continue
 
         if not allowed:
+            raise ValueError("Path is not in allowed directories")
+
+
+def validate_variant_file_path(file_path: str, config: BAMCPConfig) -> None:
+    """Validate an optional VCF/BCF path used to overlay called variants."""
+    if len(file_path) > MAX_FILE_PATH_LENGTH:
+        raise ValueError(f"File path too long (max {MAX_FILE_PATH_LENGTH} characters)")
+
+    lower_path = file_path.lower()
+    if "://" in file_path:
+        if not config.allow_remote_files:
+            raise ValueError("Remote files are disabled")
+        if not file_path.startswith(REMOTE_FILE_SCHEMES):
+            raise ValueError(f"Scheme not supported for remote file: {file_path}")
+        if not any(lower_path.endswith(ext) for ext in ALLOWED_VARIANT_FILE_EXTENSIONS):
+            raise ValueError(
+                "Unsupported variant file type. "
+                f"Allowed extensions: {ALLOWED_VARIANT_FILE_EXTENSIONS}"
+            )
+        validate_remote_url(file_path, config)
+        return
+
+    if not any(lower_path.endswith(ext) for ext in ALLOWED_VARIANT_FILE_EXTENSIONS):
+        raise ValueError(
+            f"Unsupported variant file type. Allowed extensions: {ALLOWED_VARIANT_FILE_EXTENSIONS}"
+        )
+
+    if config.allowed_directories:
+        try:
+            abs_path = Path(file_path).resolve()
+        except OSError as e:
+            raise ValueError(f"Invalid path: {file_path}") from e
+
+        if not any(abs_path.is_relative_to(Path(d).resolve()) for d in config.allowed_directories):
             raise ValueError("Path is not in allowed directories")
 
 

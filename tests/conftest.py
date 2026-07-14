@@ -17,6 +17,8 @@ def _reset_client_singletons():
     _tools_module._gnomad_client = None
     _tools_module._gene_client = None
     _tools_module._cache_instance = None
+    _tools_module._region_cache.clear()
+    _tools_module._index_download_locks.clear()
 
 
 @pytest.fixture

@@ -121,8 +121,7 @@ class BAMCPConfig:
 
         if self.max_remote_index_bytes < 1:
             raise ValueError(
-                "max_remote_index_bytes must be at least 1 byte, "
-                f"got {self.max_remote_index_bytes}"
+                f"max_remote_index_bytes must be at least 1 byte, got {self.max_remote_index_bytes}"
             )
 
     @classmethod

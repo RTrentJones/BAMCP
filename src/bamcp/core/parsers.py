@@ -277,9 +277,7 @@ def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
                 alt_len = len(str(alt))
                 ref_len = len(str(record.ref))
                 variant_kind = (
-                    "sv"
-                    if is_structural
-                    else ("snv" if ref_len == 1 and alt_len == 1 else "indel")
+                    "sv" if is_structural else ("snv" if ref_len == 1 and alt_len == 1 else "indel")
                 )
                 variants.append(
                     {

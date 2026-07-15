@@ -542,9 +542,7 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     end = position + window // 2
     region = f"{contig}:{start}-{end}"
 
-    data = await _fetch_region_with_timeout(
-        file_path, region, reference, config, vcf_path=vcf_path
-    )
+    data = await _fetch_region_with_timeout(file_path, region, reference, config, vcf_path=vcf_path)
     payload = serialize_region_data(data)
     payload["coordinate_system"] = _INTERNAL_COORDINATE_SYSTEM
     payload["variant_type"] = "candidate"
@@ -580,9 +578,7 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     reference = args.get("reference", config.reference)
     vcf_path = args.get("vcf_path")
 
-    data = await _fetch_region_with_timeout(
-        file_path, region, reference, config, vcf_path=vcf_path
-    )
+    data = await _fetch_region_with_timeout(file_path, region, reference, config, vcf_path=vcf_path)
     payload = serialize_region_data(data)
     payload["coordinate_system"] = _INTERNAL_COORDINATE_SYSTEM
     payload["variant_type"] = "candidate"
@@ -618,9 +614,7 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     reference = args.get("reference", config.reference)
     vcf_path = args.get("vcf_path")
 
-    data = await _fetch_region_with_timeout(
-        file_path, region, reference, config, vcf_path=vcf_path
-    )
+    data = await _fetch_region_with_timeout(file_path, region, reference, config, vcf_path=vcf_path)
 
     coverage = data.coverage
     mean_cov = round(sum(coverage) / len(coverage), 2) if coverage else 0

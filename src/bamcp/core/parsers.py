@@ -319,9 +319,6 @@ def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
     return variants
 
 
-_BASE_INDEX = {"A": 0, "C": 1, "G": 2, "T": 3}
-
-
 def annotate_vcf_snv_support(
     bam_path: str,
     region: str,
@@ -331,59 +328,81 @@ def annotate_vcf_snv_support(
     min_baseq: int = 0,
     index_filename: str | None = None,
 ) -> list[dict]:
-    """Attach truncation-free read-level support to VCF SNV variants (in place).
+    """Attach truncation-free read-level support + per-read metrics to VCF SNVs (in place).
 
-    For each VCF single-nucleotide variant, counts forward/reverse reads carrying
-    the alt allele at that site using ``pysam.count_coverage`` — htslib counts every
-    read at each position, so this is immune to the ``max_reads`` cap that limits the
-    serialized read list (and to which alignments happen to be retained). Adds
-    ``strand_forward``/``strand_reverse``/``read_depth``/``read_support_vaf``. Indels
-    and SVs are left unchanged (single-base counts can't corroborate them).
+    Pileups each VCF SNV site — htslib sees every read there, so this is immune to
+    the ``max_reads`` cap that limits the serialized read list — and, for reads
+    carrying the alt allele, collects strand, base quality, position-in-read, and
+    MAPQ. Adds ``strand_forward``/``strand_reverse``/``read_depth``/
+    ``read_support_vaf`` plus raw ``_alt_qualities``/``_alt_positions``/``_alt_mapqs``
+    arrays that :func:`bamcp.analysis.evidence._vcf_evidence` turns into the
+    quality/position/MAPQ histograms and mean quality. Indels/SVs are untouched
+    (single-base support can't corroborate them).
     """
     snvs = [v for v in variants if v.get("source") == "vcf" and len(v["ref"]) == 1 == len(v["alt"])]
     if not snvs:
         return variants
 
     contig, start, end = parse_region(region)
-    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        fwd = samfile.count_coverage(
-            contig,
-            start,
-            end,
-            quality_threshold=min_baseq,
-            read_callback=lambda r: read_passes_filters(r, min_mapq) and not r.is_reverse,
-        )
-        rev = samfile.count_coverage(
-            contig,
-            start,
-            end,
-            quality_threshold=min_baseq,
-            read_callback=lambda r: read_passes_filters(r, min_mapq) and r.is_reverse,
-        )
-
-    length = end - start
+    # A position may host several alt alleles, so index the targets by position.
+    by_pos: dict[int, list[dict]] = {}
     for v in snvs:
-        i = v["position"] - start
-        base = _BASE_INDEX.get(v["alt"].upper())
-        if base is None or not (0 <= i < length):
-            continue
-        f = int(fwd[base][i])
-        r = int(rev[base][i])
-        depth = sum(int(fwd[b][i]) + int(rev[b][i]) for b in range(4))
-        support_vaf = round((f + r) / depth, 3) if depth else 0.0
-        v["strand_forward"] = f
-        v["strand_reverse"] = r
-        v["read_depth"] = depth
-        v["read_support_vaf"] = support_vaf
-        # If the VCF omitted INFO DP/AF, show BAMCP's counted support in the
-        # depth/VAF/alt-reads the viewer and summaries render, rather than a
-        # misleading 0 (and keep the three mutually consistent).
-        if not v.get("depth"):
-            v["depth"] = depth
-        if not v.get("vaf"):
-            v["vaf"] = support_vaf
-        if not v.get("alt_count"):
-            v["alt_count"] = f + r
+        by_pos.setdefault(v["position"], []).append(v)
+
+    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
+        for column in samfile.pileup(
+            contig, start, end, truncate=True, min_base_quality=min_baseq, stepper="nofilter"
+        ):
+            targets = by_pos.get(column.reference_pos)
+            if not targets:
+                continue
+
+            depth = 0
+            # Per-alt accumulators for alt-supporting reads at this column.
+            acc: dict[str, dict] = {
+                v["alt"].upper(): {"fwd": 0, "rev": 0, "quals": [], "positions": [], "mapqs": []}
+                for v in targets
+            }
+            for pread in column.pileups:
+                aln = pread.alignment
+                if not read_passes_filters(aln, min_mapq) or pread.is_del or pread.is_refskip:
+                    continue
+                qpos = pread.query_position
+                seq = aln.query_sequence
+                if qpos is None or seq is None:
+                    continue
+                depth += 1
+                support = acc.get(seq[qpos].upper())
+                if support is None:
+                    continue
+                if aln.is_reverse:
+                    support["rev"] += 1
+                else:
+                    support["fwd"] += 1
+                quals = aln.query_qualities
+                if quals is not None and qpos < len(quals):
+                    support["quals"].append(int(quals[qpos]))
+                    support["positions"].append(min(qpos, len(quals) - qpos - 1))
+                support["mapqs"].append(aln.mapping_quality)
+
+            for v in targets:
+                support = acc[v["alt"].upper()]
+                alt = support["fwd"] + support["rev"]
+                v["strand_forward"] = support["fwd"]
+                v["strand_reverse"] = support["rev"]
+                v["read_depth"] = depth
+                v["read_support_vaf"] = round(alt / depth, 3) if depth else 0.0
+                v["_alt_qualities"] = support["quals"]
+                v["_alt_positions"] = support["positions"]
+                v["_alt_mapqs"] = support["mapqs"]
+                # Fill any DP/AF/alt_count the VCF omitted from the counted support,
+                # keeping the displayed depth/VAF/alt-reads mutually consistent.
+                if not v.get("depth"):
+                    v["depth"] = depth
+                if not v.get("vaf"):
+                    v["vaf"] = v["read_support_vaf"]
+                if not v.get("alt_count"):
+                    v["alt_count"] = alt
 
     return variants
 

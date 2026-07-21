@@ -357,57 +357,54 @@ def compute_confidence(
     return confidence
 
 
+# Transient per-read arrays the annotator attaches for aggregation; not serialized.
+_VCF_RAW_FIELDS = ("_alt_qualities", "_alt_positions", "_alt_mapqs")
+
+
 def _vcf_evidence(
     variant: dict, reference_sequence: str | None, region_start: int
 ) -> tuple[dict, dict]:
-    """Build an evidence record for a VCF variant from its count_coverage support.
+    """Build a full evidence record for a VCF SNV from the annotator's per-read metrics.
 
-    :func:`bamcp.core.parsers.annotate_vcf_snv_support` attaches
-    ``strand_forward``/``strand_reverse``/``read_depth``/``read_support_vaf``. Turn
-    those into the same evidence shape as BAMCP candidates so the viewer has a
-    confidence and evidence entry to render and filter on. count_coverage carries no
-    per-base quality, so quality/position/mapq histograms are empty and confidence
-    is derived from read support (depth/VAF/strand balance) rather than quality.
+    :func:`bamcp.core.parsers.annotate_vcf_snv_support` pileups the site and attaches
+    strand counts, read depth, and raw quality/position/MAPQ arrays for the
+    alt-supporting reads. Aggregate them into the same evidence shape as BAMCP
+    candidates — strand bias, quality/position/MAPQ histograms, mean quality — then
+    score artifact risk and confidence, so VCF-primary SNVs get the full read-level
+    curation contract rather than zero-filled quality.
     """
     fwd = int(variant.get("strand_forward", 0))
     rev = int(variant.get("strand_reverse", 0))
     depth = int(variant.get("read_depth", 0))
     vaf = float(variant.get("read_support_vaf", 0.0))
+    quals = variant.get("_alt_qualities", [])
+    positions = variant.get("_alt_positions", [])
+    mapqs = variant.get("_alt_mapqs", [])
     strand_bias = round(abs(fwd - rev) / max(fwd + rev, 1), 3)
 
     evidence = {
         "forward_count": fwd,
         "reverse_count": rev,
         "strand_bias": strand_bias,
-        "mean_quality": 0,  # count_coverage does not measure per-base quality
-        "median_quality": 0,
-        "quality_histogram": [],
-        "position_histogram": [],
-        "mapq_histogram": [],
+        "mean_quality": round(sum(quals) / len(quals), 1) if quals else 0,
+        "median_quality": sorted(quals)[len(quals) // 2] if quals else 0,
+        "quality_histogram": bin_values(quals, QUALITY_HISTOGRAM_BINS),
+        "position_histogram": bin_values(positions, POSITION_HISTOGRAM_BINS),
+        "mapq_histogram": bin_values(mapqs, MAPQ_HISTOGRAM_BINS),
     }
-    # Only depth/homopolymer/strand-bias risks apply; the empty histograms make the
-    # quality/position/mapq risks skip cleanly.
     artifact_risk = compute_artifact_risk(
         {**variant, "depth": depth}, evidence, reference_sequence, region_start
     )
     evidence["artifact_risk"] = artifact_risk
+    # Score confidence from BAMCP's measured read support (depth/VAF/quality/strand).
+    confidence = compute_confidence(
+        {**variant, "vaf": vaf, "depth": depth}, evidence, artifact_risk
+    )
 
-    if vaf >= 0.2 and depth >= 20 and strand_bias <= 0.7:
-        confidence = "high"
-    elif (
-        vaf >= LOW_CONFIDENCE_MIN_VAF
-        and depth >= LOW_CONFIDENCE_MIN_DEPTH
-        and strand_bias <= LOW_CONFIDENCE_MAX_STRAND_BIAS
-    ):
-        confidence = "medium"
-    else:
-        confidence = "low"
-    if artifact_risk["artifact_likelihood"] == "high":
-        confidence = "low"
-    elif artifact_risk["artifact_likelihood"] == "medium" and confidence == "high":
-        confidence = "medium"
-
-    enhanced = dict(variant)
+    enhanced = {k: val for k, val in variant.items() if k not in _VCF_RAW_FIELDS}
+    enhanced["strand_forward"] = fwd
+    enhanced["strand_reverse"] = rev
+    enhanced["mean_quality"] = evidence["mean_quality"]
     enhanced["strand_bias"] = strand_bias
     enhanced["artifact_risk"] = artifact_risk
     enhanced["confidence"] = confidence
@@ -447,10 +444,10 @@ def enhance_variants_with_evidence(
     reads (via a mismatch index), an artifact-risk assessment, and a confidence
     level, returning the enhanced variants plus a keyed evidence map for the viewer.
 
-    VCF-sourced variants are passed through unchanged: their read-level support is
-    attached upstream by :func:`bamcp.core.parsers.annotate_vcf_snv_support`, which
-    uses count_coverage over all reads at each site and so isn't limited by the
-    ``max_reads`` read cap that bounds ``reads`` here.
+    VCF SNVs are scored by :func:`_vcf_evidence` from the per-read metrics that
+    :func:`bamcp.core.parsers.annotate_vcf_snv_support` pileups at each site (immune
+    to the ``max_reads`` cap that bounds ``reads`` here); VCF indels/SVs, which BAMCP
+    can't corroborate from single-base support, pass through unscored.
     """
     mismatch_index = build_mismatch_index(reads)
     variant_evidence: dict = {}

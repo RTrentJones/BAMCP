@@ -220,11 +220,24 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
      * Callers decide how to load the data (loadTile vs loadData),
      * keeping this path separate from host-initiated ontoolresult.
      */
-    public async fetchRegionDirect(filePath: string, region: string, reference?: string): Promise<RegionData | null> {
+    public async fetchRegionDirect(
+        filePath: string,
+        region: string,
+        reference?: string,
+        vcfPath?: string,
+        variantSource?: string,
+    ): Promise<RegionData | null> {
         if (!this.app) return null;
         const args: Record<string, string> = { file_path: filePath, region: region };
         if (reference) {
             args.reference = reference;
+        }
+        // Keep VCF-as-primary sourcing on pan/zoom refetches (else tiles revert to auto).
+        if (vcfPath) {
+            args.vcf_path = vcfPath;
+        }
+        if (variantSource) {
+            args.variant_source = variantSource;
         }
         const toolCallInfo = `visualize_region(${JSON.stringify(args)})`;
         this.updateDebug('lastToolCall', toolCallInfo);

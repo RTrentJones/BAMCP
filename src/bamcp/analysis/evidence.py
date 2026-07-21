@@ -135,55 +135,35 @@ def build_mismatch_index(
     return index
 
 
-def compute_variant_evidence(
-    index: dict[tuple[int, str], list[tuple[AlignedRead, dict]]],
-    variant: dict,
-) -> dict:
-    """Compute variant evidence using pre-built mismatch index.
+def _aggregate_read_evidence(supporting: list[tuple[AlignedRead, int | None]]) -> dict:
+    """Aggregate ``(read, query_position)`` support tuples into an evidence dict.
 
-    This is O(k) where k is the number of reads supporting the variant,
-    rather than O(n*m) when iterating all reads for each variant.
-
-    Returns evidence including histogram distributions for curation.
+    Shared by the mismatch-index path (BAMCP candidates) and the base-scan path
+    (VCF SNVs); ``query_position`` may be None when the site isn't aligned in a read.
     """
-    pos = variant["position"]
-    alt = variant["alt"]
-
-    matches = index.get((pos, alt), [])
-
     forward_count = 0
     reverse_count = 0
     qualities: list[int] = []
     positions_in_read: list[int] = []
     mapq_values: list[int] = []
 
-    for read, mm in matches:
+    for read, query_pos in supporting:
         if read.is_reverse:
             reverse_count += 1
         else:
             forward_count += 1
 
-        # Get quality at mismatch position
-        query_pos = get_query_position(read, mm["pos"])
         if query_pos is not None and query_pos < len(read.qualities):
             qualities.append(read.qualities[query_pos])
-
-            # Compute position relative to nearest read end
+            # Position relative to the nearest read end.
             read_length = len(read.qualities)
-            dist_from_end = min(query_pos, read_length - query_pos - 1)
-            positions_in_read.append(dist_from_end)
+            positions_in_read.append(min(query_pos, read_length - query_pos - 1))
 
-        # Collect MAPQ for all reads
         mapq_values.append(read.mapping_quality)
 
     # Strand bias: 0 = balanced, 1 = all one strand
     total = forward_count + reverse_count
     strand_bias = abs(forward_count - reverse_count) / max(total, 1)
-
-    # Compute histogram distributions
-    quality_histogram = bin_values(qualities, QUALITY_HISTOGRAM_BINS)
-    position_histogram = bin_values(positions_in_read, POSITION_HISTOGRAM_BINS)
-    mapq_histogram = bin_values(mapq_values, MAPQ_HISTOGRAM_BINS)
 
     return {
         "forward_count": forward_count,
@@ -191,10 +171,49 @@ def compute_variant_evidence(
         "strand_bias": round(strand_bias, 3),
         "mean_quality": round(sum(qualities) / len(qualities), 1) if qualities else 0,
         "median_quality": sorted(qualities)[len(qualities) // 2] if qualities else 0,
-        "quality_histogram": quality_histogram,
-        "position_histogram": position_histogram,
-        "mapq_histogram": mapq_histogram,
+        "quality_histogram": bin_values(qualities, QUALITY_HISTOGRAM_BINS),
+        "position_histogram": bin_values(positions_in_read, POSITION_HISTOGRAM_BINS),
+        "mapq_histogram": bin_values(mapq_values, MAPQ_HISTOGRAM_BINS),
     }
+
+
+def compute_variant_evidence(
+    index: dict[tuple[int, str], list[tuple[AlignedRead, dict]]],
+    variant: dict,
+) -> dict:
+    """Compute variant evidence using a pre-built mismatch index.
+
+    This is O(k) where k is the number of reads supporting the variant, rather
+    than O(n*m) when iterating all reads for each variant. Returns evidence
+    including histogram distributions for curation.
+    """
+    matches = index.get((variant["position"], variant["alt"]), [])
+    supporting = [(read, get_query_position(read, mm["pos"])) for read, mm in matches]
+    return _aggregate_read_evidence(supporting)
+
+
+def compute_snv_evidence_from_reads(variant: dict, reads: list[AlignedRead]) -> dict:
+    """Compute read-level support for an SNV directly from read bases.
+
+    Reference-independent: it compares each spanning read's own base to the
+    variant's alt allele, so a VCF SNV gets real read-level evidence even when no
+    reference sequence was loaded — unlike the mismatch-index path, which is empty
+    without a reference (mismatches are only recorded relative to a reference).
+    """
+    pos = variant["position"]
+    alt = variant["alt"].upper()
+    supporting: list[tuple[AlignedRead, int | None]] = []
+
+    for read in reads:
+        if not (read.position <= pos < read.end_position):
+            continue
+        qpos = get_query_position(read, pos)
+        if qpos is None or qpos >= len(read.sequence):
+            continue
+        if read.sequence[qpos].upper() == alt:
+            supporting.append((read, qpos))
+
+    return _aggregate_read_evidence(supporting)
 
 
 def compute_artifact_risk(
@@ -385,7 +404,13 @@ def enhance_variants_with_evidence(
 
     for variant in variants:
         key = f"{variant['position']}:{variant['ref']}>{variant['alt']}"
-        evidence = compute_variant_evidence(mismatch_index, variant)
+        # VCF SNVs are scored from read bases (reference-independent) so their
+        # read-level support is correct even without a loaded reference; BAMCP's
+        # own candidates are defined by mismatches, so use the fast index for them.
+        if variant.get("source") == "vcf" and len(variant["ref"]) == 1 == len(variant["alt"]):
+            evidence = compute_snv_evidence_from_reads(variant, reads)
+        else:
+            evidence = compute_variant_evidence(mismatch_index, variant)
         artifact_risk = compute_artifact_risk(variant, evidence, reference_sequence, region_start)
         evidence["artifact_risk"] = artifact_risk
         variant_evidence[key] = evidence

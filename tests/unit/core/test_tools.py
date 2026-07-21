@@ -457,6 +457,67 @@ class TestVariantSource:
         assert "strand_forward" in v and "confidence" in v and "artifact_risk" in v
         assert v["strand_forward"] + v["strand_reverse"] >= 1
 
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_vcf_evidence_computed_without_reference(
+        self, small_bam_path, config, tmp_path, monkeypatch
+    ):
+        """VCF SNV support is scored from read bases, so it works with no reference."""
+        from bamcp.core import tools as tools_module
+
+        def fake_load(vcf_path, region):
+            return [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                }
+            ]
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", fake_load)
+        # `config` has no reference configured — the mismatch-index path would be
+        # empty here, but the base-scan path still finds read3's G at 133.
+        result = await handle_get_variants(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config,
+        )
+        payload = json.loads(result["content"][0]["text"])
+        v = next(v for v in payload["variants"] if v["position"] == 134)
+        assert v["strand_forward"] + v["strand_reverse"] >= 1
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_visualize_payload_preserves_vcf_source(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """visualize_region echoes vcf_path/variant_source so viewer refetches keep them."""
+        from bamcp.core import tools as tools_module
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", lambda vcf, region: [])
+        result = await handle_visualize_region(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,
+        )
+        payload = result["_meta"]["ui/init"]
+        assert payload["variant_source"] == "vcf"
+        assert payload["vcf_path"].endswith("calls.vcf.gz")
+
 
 class TestHandleGetCoverage:
     """Tests for handle_get_coverage tool handler."""

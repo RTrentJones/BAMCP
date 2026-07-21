@@ -762,9 +762,8 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     contig = args.get("contig", DEFAULT_CONTIG)
     window = args.get("window", config.default_window)
     reference = args.get("reference", config.reference)
-    effective_vcf, vcf_primary = _resolve_variant_source(
-        args.get("variant_source", "auto"), args.get("vcf_path")
-    )
+    variant_source = args.get("variant_source", "auto")
+    effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
     start = max(0, position - window // 2)
     end = position + window // 2
@@ -778,6 +777,10 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     payload["variant_type"] = "candidate"
     payload["disclaimer"] = _CANDIDATE_VARIANT_DISCLAIMER
     payload["file_path"] = file_path  # For client-side re-queries
+    # Preserve the variant sourcing so the viewer's pan/zoom refetches keep it.
+    payload["variant_source"] = variant_source
+    if effective_vcf is not None:
+        payload["vcf_path"] = effective_vcf
 
     # Return summary text in content (for LLM context), full data only in _meta
     reads_count = len(data.reads)
@@ -806,9 +809,8 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     region = args["region"]
     validate_region(region)
     reference = args.get("reference", config.reference)
-    effective_vcf, vcf_primary = _resolve_variant_source(
-        args.get("variant_source", "auto"), args.get("vcf_path")
-    )
+    variant_source = args.get("variant_source", "auto")
+    effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
     data = await _fetch_region_with_timeout(
         file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
@@ -818,6 +820,10 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     payload["variant_type"] = "candidate"
     payload["disclaimer"] = _CANDIDATE_VARIANT_DISCLAIMER
     payload["file_path"] = file_path  # For client-side re-queries
+    # Preserve the variant sourcing so the viewer's pan/zoom refetches keep it.
+    payload["variant_source"] = variant_source
+    if effective_vcf is not None:
+        payload["vcf_path"] = effective_vcf
 
     # Return summary text in content (for LLM context), full data only in _meta
     reads_count = len(data.reads)
@@ -846,9 +852,8 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     region = args["region"]
     validate_region(region)
     reference = args.get("reference", config.reference)
-    effective_vcf, vcf_primary = _resolve_variant_source(
-        args.get("variant_source", "auto"), args.get("vcf_path")
-    )
+    variant_source = args.get("variant_source", "auto")
+    effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
     data = await _fetch_region_with_timeout(
         file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary

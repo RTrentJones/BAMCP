@@ -559,6 +559,84 @@ class TestVariantSource:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_vcf_snv_uses_counted_support_when_dp_af_missing(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """A VCF SNV with no INFO DP/AF shows BAMCP's counted depth/VAF, not 0."""
+        from bamcp.core import tools as tools_module
+
+        def fake_load(vcf_path, region):
+            return [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.0,
+                    "depth": 0,
+                    "alt_count": 0,
+                    "source": "vcf",
+                }
+            ]
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", fake_load)
+        result = await handle_get_variants(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,
+        )
+        payload = json.loads(result["content"][0]["text"])
+        v = next(v for v in payload["variants"] if v["position"] == 134)
+        assert v["depth"] > 0  # counted from the BAM, not the missing VCF DP
+        assert v["depth"] == v["read_depth"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_vcf_indel_passed_through_not_hidden(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """A trusted VCF indel isn't zero-scored to low confidence (which would hide it)."""
+        from bamcp.core import tools as tools_module
+
+        def fake_load(vcf_path, region):
+            return [
+                {
+                    "contig": "chr1",
+                    "position": 150,
+                    "ref": "A",
+                    "alt": "ATG",
+                    "variant_kind": "indel",
+                    "indel_type": "ins",
+                    "vaf": 0.4,
+                    "depth": 30,
+                    "alt_count": 12,
+                    "source": "vcf",
+                }
+            ]
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", fake_load)
+        result = await handle_visualize_region(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,
+        )
+        payload = result["_meta"]["ui/init"]
+        v = next(v for v in payload["variants"] if v["position"] == 150)
+        # Passed through unscored: no forced low-confidence flag to hide it, VCF fields intact.
+        assert v.get("is_low_confidence") is not True
+        assert (v["ref"], v["alt"], v["depth"]) == ("A", "ATG", 30)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_vcf_support_is_unaffected_by_max_reads(
         self, small_bam_path, ref_fasta_path, tmp_path, monkeypatch
     ):

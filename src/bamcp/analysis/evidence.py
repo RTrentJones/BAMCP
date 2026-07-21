@@ -440,12 +440,17 @@ def enhance_variants_with_evidence(
         key = f"{variant['position']}:{variant['ref']}>{variant['alt']}"
 
         if variant.get("source") == "vcf":
-            # Build the evidence record from the count_coverage support the annotator
-            # attached (strand/depth/VAF), so the viewer has a confidence + evidence
-            # entry to render and filter on.
-            enhanced, evidence = _vcf_evidence(variant, reference_sequence, region_start)
-            variant_evidence[key] = evidence
-            enhanced_variants.append(enhanced)
+            if len(variant["ref"]) == 1 == len(variant["alt"]):
+                # Annotated SNV: build an evidence record from the count_coverage
+                # support so the viewer has a confidence + evidence entry to filter on.
+                enhanced, evidence = _vcf_evidence(variant, reference_sequence, region_start)
+                variant_evidence[key] = evidence
+                enhanced_variants.append(enhanced)
+            else:
+                # Indel/SV: BAMCP can't count single-base support, so pass the trusted
+                # VCF record through unscored rather than zero-scoring it to low
+                # confidence (which the viewer's high-confidence filter would hide).
+                enhanced_variants.append(dict(variant))
             continue
 
         evidence = compute_variant_evidence(mismatch_index, variant)

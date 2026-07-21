@@ -518,6 +518,59 @@ class TestVariantSource:
         assert payload["variant_source"] == "vcf"
         assert payload["vcf_path"].endswith("calls.vcf.gz")
 
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_vcf_evidence_skips_uncovered_sites_when_reads_truncated(
+        self, small_bam_path, ref_fasta_path, tmp_path, monkeypatch
+    ):
+        """When reads hit max_reads, VCF sites past the covered span aren't mis-scored."""
+        from bamcp.core import tools as tools_module
+
+        def fake_load(vcf_path, region):
+            return [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                },
+                {
+                    "contig": "chr1",
+                    "position": 300,
+                    "ref": "A",
+                    "alt": "C",
+                    "variant_kind": "snv",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                },
+            ]
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", fake_load)
+        # max_reads=4 materializes only the leftmost reads (ends <= ~180), so the
+        # VCF site at 300 is beyond the covered span.
+        cfg = BAMCPConfig(reference=ref_fasta_path, max_reads=4)
+        result = await handle_get_variants(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-400",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            cfg,
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["reads_truncated"] is True
+        by_pos = {v["position"]: v for v in payload["variants"]}
+        assert "strand_forward" in by_pos[134]  # covered -> evidence attached
+        assert "strand_forward" not in by_pos[301]  # beyond covered span -> not scored
+
 
 class TestHandleGetCoverage:
     """Tests for handle_get_coverage tool handler."""

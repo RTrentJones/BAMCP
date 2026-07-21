@@ -635,12 +635,26 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     )
 
     detected = data.variants
+    reads_truncated = False
     if use_vcf:
+        # The read loop stops after config.max_reads, so on a broad/high-depth
+        # interval reads only cover a left prefix of the region. Attaching evidence
+        # to a VCF site the reads don't reach would report a misleading 0F/0R. Only
+        # enhance sites within the covered span; flag truncation for the rest.
+        reads = data.reads
+        reads_truncated = len(reads) >= config.max_reads
+        covered_end = max((r.end_position for r in reads), default=data.start)
+        eligible = [v for v in detected if not reads_truncated or v["position"] < covered_end]
         # Attach BAMCP read-level evidence (strand, quality, artifact risk) so a
         # caller's VCF variant is reviewable against the actual reads.
-        detected, _ = enhance_variants_with_evidence(
-            detected, data.reads, data.reference_sequence, data.start
+        enhanced, _ = enhance_variants_with_evidence(
+            eligible, reads, data.reference_sequence, data.start
         )
+        enhanced_iter = iter(enhanced)
+        detected = [
+            next(enhanced_iter) if (not reads_truncated or v["position"] < covered_end) else v
+            for v in detected
+        ]
 
     variants = [
         _one_based(v)
@@ -648,23 +662,20 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         if v.get("source") == "vcf" or (v["vaf"] >= min_vaf and v["depth"] >= min_depth)
     ]
 
-    return {
-        "content": [
-            {
-                "type": "text",
-                "text": json.dumps(
-                    {
-                        "variants": variants,
-                        "count": len(variants),
-                        "variant_source": variant_source,
-                        "coordinate_system": _LLM_COORDINATE_SYSTEM,
-                        "variant_type": "candidate",
-                        "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
-                    }
-                ),
-            }
-        ]
+    payload: dict[str, Any] = {
+        "variants": variants,
+        "count": len(variants),
+        "variant_source": variant_source,
+        "coordinate_system": _LLM_COORDINATE_SYSTEM,
+        "variant_type": "candidate",
+        "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
     }
+    if reads_truncated:
+        # Read-level evidence is complete only for sites within the first
+        # config.max_reads reads; narrow the region for evidence past that.
+        payload["reads_truncated"] = True
+
+    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 
 
 @telemetry_wrapper("get_coverage")

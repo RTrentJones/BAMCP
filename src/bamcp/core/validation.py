@@ -62,6 +62,14 @@ def validate_remote_url(url: str, config: BAMCPConfig) -> None:
 
     Raises:
         ValueError: If the URL targets a private/internal IP or is not allowed.
+
+    Note:
+        This resolves DNS and the real fetch happens separately, so a hostname
+        could be rebound to an internal address between the two calls (a
+        TOCTOU / DNS-rebinding gap). Callers re-validate derived URLs (e.g. index
+        downloads) to narrow the window, but the only robust defense for
+        untrusted input is the ``allowed_remote_hosts`` allow-list. Host matching
+        is exact per-host (no implicit subdomain wildcards).
     """
     parsed = urlparse(url)
     hostname = parsed.hostname
@@ -69,9 +77,13 @@ def validate_remote_url(url: str, config: BAMCPConfig) -> None:
     if not hostname:
         raise ValueError("Remote URL has no hostname")
 
-    # Check domain allowlist if configured
-    if config.allowed_remote_hosts and hostname not in config.allowed_remote_hosts:
-        raise ValueError(f"Host '{hostname}' is not in the allowed remote hosts list")
+    # Check domain allowlist if configured. Hostnames are case-insensitive
+    # (urlparse already lower-cases parsed.hostname), so normalize the allow-list
+    # too — otherwise a config entry like "Example.com" would never match.
+    if config.allowed_remote_hosts:
+        allowed_hosts = {h.lower() for h in config.allowed_remote_hosts}
+        if hostname.lower() not in allowed_hosts:
+            raise ValueError(f"Host '{hostname}' is not in the allowed remote hosts list")
 
     # Resolve hostname to IP addresses and check each one
     try:
@@ -153,6 +165,12 @@ def validate_path(file_path: str, config: BAMCPConfig) -> None:
 
         if not allowed:
             raise ValueError("Path is not in allowed directories")
+
+    # Surface a clean error for a missing local file instead of a cryptic pysam
+    # failure deeper in the call stack. Checked last so allow-list violations take
+    # precedence and never leak the existence of files outside allowed directories.
+    if not Path(file_path).is_file():
+        raise FileNotFoundError(f"File not found: {file_path}")
 
 
 def validate_variant_file_path(file_path: str, config: BAMCPConfig) -> None:

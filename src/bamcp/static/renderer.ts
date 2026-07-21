@@ -781,9 +781,11 @@ export class Renderer {
      * ``sv_end`` ≤ ``position``) render as a single breakpoint marker.
      */
     private renderSvSpans(ctx: CanvasRenderingContext2D, scale: number, width: number): void {
-        const data = this.state.data;
-        if (!data) return;
-        const svs = data.variants.filter(v => v.variant_kind === 'sv');
+        if (!this.state.data) return;
+        // Pull from the accumulated variant set, not the current tile's data.variants: a
+        // long SV discovered in one tile must keep rendering when the viewport pans into a
+        // tile that falls inside its span but past its POS (so no longer lists it).
+        const svs = this.state.store.getAllVariants().filter(v => v.variant_kind === 'sv');
         if (!svs.length) return;
 
         const vpStart = this.state.viewport.start;

@@ -396,6 +396,30 @@ class TestSvSpanRendering:
         assert painted == 0
 
     @pytest.mark.e2e
+    def test_long_sv_persists_across_tiles(self, viewer_page: Page):
+        """A long SV discovered in one tile still renders after panning into a later
+        tile that falls inside its span but no longer lists the SV (past its POS)."""
+        # Tile A (viewport 100–600) carries the SV at 200→5000.
+        send_init_data(viewer_page, self._sv_data(position=200, sv_end=5000))
+        # Tile B (viewport 3000–3500) is inside the span but lists no variants, as a
+        # real tile past the SV's POS would. The DataStore retains the SV across tiles.
+        viewer_page.evaluate(
+            """() => {
+                viewer.state.loadData({
+                    contig: 'chr1', start: 3000, end: 3500,
+                    reads: [], coverage: new Array(500).fill(0),
+                    variants: [], reference_sequence: 'ACGTACGTAC'.repeat(50),
+                    variant_evidence: {},
+                });
+                viewer.renderer.resize();
+            }"""
+        )
+        # Both breakpoints are off-screen, so the band spans the width — sample mid-view.
+        px = sample_pixel_at_genomic(viewer_page, "reads-canvas", 3250, 7)
+        assert px["a"] > 100
+        assert px["r"] > 150 and px["r"] > px["b"]  # DEL red band still drawn
+
+    @pytest.mark.e2e
     def test_sv_span_rendered_in_deepvariant_mode(self, viewer_page: Page):
         """SV spans still render after switching the reads track to a DeepVariant mode."""
         send_init_data(viewer_page, self._sv_data(position=200, sv_end=400))

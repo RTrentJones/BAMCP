@@ -910,6 +910,23 @@ class BAMCPViewer {
         this.tooltip.style.top = top + 'px';
     }
 
+    /** Blank every evidence chart/stat so a no-evidence variant shows nothing stale. */
+    private clearEvidenceCharts(): void {
+        for (const id of ['strand-chart', 'quality-chart', 'position-chart', 'mapq-chart']) {
+            const canvas = document.getElementById(id) as HTMLCanvasElement | null;
+            const ctx = canvas?.getContext('2d');
+            if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+        for (const id of ['strand-ratio', 'quality-stats', 'position-stats']) {
+            const el = document.getElementById(id);
+            if (el) el.textContent = '';
+        }
+        const warning = document.getElementById('strand-warning');
+        if (warning) warning.style.display = 'none';
+        const list = document.getElementById('artifact-risk-list');
+        if (list) list.innerHTML = '';
+    }
+
     private showVariantEvidence(variant: Variant): void {
         this.evidencePanel.classList.add('visible');
         const evidence = this.state.store.getEvidence(`${variant.position}:${variant.ref}>${variant.alt}`);
@@ -919,7 +936,16 @@ class BAMCPViewer {
             `Variant Evidence: ${variant.contig}:${displayPos(variant.position)} ${variant.ref}>${variant.alt}`;
 
         if (!evidence) {
-            // No detailed evidence available
+            // No BAMCP read-level evidence for this variant (e.g. a pass-through VCF
+            // indel/SV). Clear the previous variant's charts so the panel never shows
+            // stale evidence for the wrong variant.
+            this.clearEvidenceCharts();
+            const meter = document.getElementById('artifact-risk-meter');
+            if (meter) {
+                meter.innerHTML =
+                    '<span style="color:var(--color-text-muted)">' +
+                    'No BAMCP read-level evidence for this variant.</span>';
+            }
             return;
         }
 

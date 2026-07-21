@@ -234,6 +234,109 @@ class TestEvidencePanelClear:
         assert "ATG" in result["title"]  # panel reflects the selected indel
 
 
+class TestMultiSampleAndSvViews:
+    """E2E: the viewer surfaces SV metadata and multi-sample genotypes."""
+
+    _DATA = {
+        **SAMPLE_DATA,
+        "variants": [
+            {
+                "contig": "chr1",
+                "position": 300,
+                "ref": "N",
+                "alt": "<DEL>",
+                "variant_kind": "sv",
+                "vaf": 0.0,
+                "depth": 0,
+                "alt_count": 0,
+                "source": "vcf",
+                "sv_type": "DEL",
+                "sv_end": 5000,
+                "sv_len": -4700,
+            },
+            {
+                "contig": "chr1",
+                "position": 130,
+                "ref": "A",
+                "alt": "G",
+                "variant_kind": "snv",
+                "vaf": 0.5,
+                "depth": 20,
+                "alt_count": 10,
+                "source": "vcf",
+                "sample_names": ["NA12878", "NA12891"],
+                "samples": {"NA12878": {"GT": [0, 1]}, "NA12891": {"GT": [1, 1]}},
+            },
+        ],
+        "variant_evidence": {},
+    }
+
+    @pytest.mark.e2e
+    def test_sv_alt_rendered_as_escaped_badge(self, viewer_page: Page):
+        """The symbolic SV alt renders as a text badge, never as an injected <del> tag."""
+        send_init_data(viewer_page, self._DATA)
+        result = viewer_page.evaluate(
+            """() => {
+                const row = [...document.querySelectorAll('#variant-table tr')]
+                    .find(r => r.textContent.includes('DEL'));
+                const badge = row.querySelector('.sv-badge');
+                return {
+                    badgeText: badge ? badge.textContent : null,
+                    // No real <del> element should have been created from the alt.
+                    delTags: row.getElementsByTagName('del').length,
+                };
+            }"""
+        )
+        assert result["badgeText"] == "DEL"
+        assert result["delTags"] == 0
+
+    @pytest.mark.e2e
+    def test_sv_details_show_type_and_span(self, viewer_page: Page):
+        """Selecting an SV populates the details block with type and span."""
+        send_init_data(viewer_page, self._DATA)
+        details = viewer_page.evaluate(
+            """() => {
+                const sv = viewer.state.data.variants.find(v => v.variant_kind === 'sv');
+                viewer.showVariantEvidence(sv);
+                const el = document.getElementById('variant-details');
+                return { hidden: el.classList.contains('hidden'), text: el.textContent };
+            }"""
+        )
+        assert details["hidden"] is False
+        assert "DEL" in details["text"]
+        assert "301" in details["text"]  # 0-based 300 -> 1-based 301 span start
+        assert "5,000" in details["text"]  # sv_end, locale-formatted
+
+    @pytest.mark.e2e
+    def test_multisample_genotypes_shown(self, viewer_page: Page):
+        """A multi-sample SNV shows per-sample genotypes and a sample-count marker."""
+        send_init_data(viewer_page, self._DATA)
+        result = viewer_page.evaluate(
+            """() => {
+                const snv = viewer.state.data.variants.find(v => v.variant_kind === 'snv');
+                viewer.showVariantEvidence(snv);
+                const details = document.getElementById('variant-details').textContent;
+                const marker = document.querySelector('#variant-table .sample-count');
+                return { details, marker: marker ? marker.textContent : null };
+            }"""
+        )
+        assert "NA12878=0/1" in result["details"]
+        assert "NA12891=1/1" in result["details"]
+        assert result["marker"] == "×2"
+
+    @pytest.mark.e2e
+    def test_details_hidden_for_plain_snv(self, viewer_page: Page):
+        """A plain SNV with no SV/sample data hides the details block."""
+        send_init_data(viewer_page)  # default SAMPLE_DATA: plain SNVs
+        hidden = viewer_page.evaluate(
+            """() => {
+                viewer.showVariantEvidence(viewer.state.data.variants[0]);
+                return document.getElementById('variant-details').classList.contains('hidden');
+            }"""
+        )
+        assert hidden is True
+
+
 class TestColumnarReads:
     """E2E: the viewer decodes columnar reads (parallel arrays) into read objects."""
 

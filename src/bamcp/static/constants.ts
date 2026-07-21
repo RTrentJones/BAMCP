@@ -96,3 +96,17 @@ export const SOFT_CLIP_STYLE = {
 export function displayPos(pos: number): number {
     return pos + 1;
 }
+
+/**
+ * Escape a string for safe interpolation into innerHTML. VCF-derived fields such as
+ * a symbolic SV alt (`<DEL>`, `<DUP>`) contain angle brackets that would otherwise be
+ * parsed as markup, so escape before injecting them into any HTML template.
+ */
+export function escapeHtml(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}

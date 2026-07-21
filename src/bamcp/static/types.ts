@@ -71,7 +71,8 @@ export interface Variant {
     sample_names?: string[];
     sv_type?: string | null;
     sv_end?: number | null;
-    sv_len?: number | number[] | null;
+    // Normalized to this ALT's SVLEN by the backend (load_vcf_variants), so a scalar.
+    sv_len?: number | null;
     // Enhanced fields from tools.py
     strand_forward?: number;
     strand_reverse?: number;

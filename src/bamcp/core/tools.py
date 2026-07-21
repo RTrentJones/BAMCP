@@ -643,6 +643,55 @@ def _one_based(variant: dict[str, Any]) -> dict[str, Any]:
     return {**variant, "position": variant["position"] + 1}
 
 
+def _format_genotypes(samples: dict[str, Any]) -> list[str]:
+    """Render per-sample genotypes as ``name=allele/allele`` (missing alleles as ``.``)."""
+    formatted: list[str] = []
+    for name, sample_data in samples.items():
+        gt = sample_data.get("GT") if isinstance(sample_data, dict) else None
+        if gt is None:
+            gt_str = "."
+        else:
+            alleles = gt if isinstance(gt, (list, tuple)) else (gt,)
+            gt_str = "/".join("." if a is None else str(a) for a in alleles)
+        formatted.append(f"{name}={gt_str}")
+    return formatted
+
+
+def _format_variant_line(variant: dict[str, Any]) -> str:
+    """One human-readable summary line for a candidate variant.
+
+    ``variant`` uses BAMCP's internal 0-based position; the rendered line is 1-based
+    (VCF/dbSNP convention, see :func:`_one_based`). Structural variants are described
+    by type and span (their ``ref>alt`` is symbolic); every kind appends per-sample
+    genotypes when a multi-sample VCF supplied them.
+    """
+    pos = variant["position"] + 1
+    contig = variant["contig"]
+
+    if variant.get("variant_kind") == "sv":
+        alt = str(variant.get("alt", ""))
+        sv_type = variant.get("sv_type") or (alt.strip("<>") if alt.startswith("<") else "SV")
+        line = f"  {contig}:{pos} <{sv_type}>"
+        # sv_end (END, Number=1) and sv_len (SVLEN, normalized per-ALT by load_vcf_variants)
+        # arrive as scalars.
+        sv_end = variant.get("sv_end")
+        if sv_end:
+            line += f" span={pos}-{sv_end}"
+        sv_len = variant.get("sv_len")
+        if sv_len is not None:
+            line += f" len={sv_len}"
+    else:
+        line = (
+            f"  {contig}:{pos} {variant['ref']}>{variant['alt']} "
+            f"VAF={variant['vaf']:.1%} depth={variant['depth']}"
+        )
+
+    genotypes = _format_genotypes(variant.get("samples") or {})
+    if genotypes:
+        line += f" [{' '.join(genotypes)}]"
+    return line
+
+
 def _resolve_variant_source(variant_source: str, vcf_path: str | None) -> tuple[str | None, bool]:
     """Validate ``variant_source`` and return the effective ``(vcf_path, vcf_primary)``.
 
@@ -925,11 +974,9 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     ]
 
     for v in data.variants:
-        # 1-based position (VCF/dbSNP convention) — see _one_based().
-        summary_lines.append(
-            f"  {v['contig']}:{v['position'] + 1} {v['ref']}>{v['alt']} "
-            f"VAF={v['vaf']:.1%} depth={v['depth']}"
-        )
+        # 1-based position (VCF/dbSNP convention); SV type/span + per-sample genotypes
+        # surfaced by _format_variant_line().
+        summary_lines.append(_format_variant_line(v))
 
     return {"content": [{"type": "text", "text": "\n".join(summary_lines)}]}
 

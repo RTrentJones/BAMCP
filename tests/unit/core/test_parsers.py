@@ -10,6 +10,7 @@ from bamcp.core.parsers import (
     RegionData,
     SoftClip,
     _merge_snv_intervals,
+    _per_alt_value,
     annotate_vcf_snv_support,
     detect_indels,
     detect_variants,
@@ -417,6 +418,46 @@ class TestLoadVcfVariants:
         assert variant["sample_names"] == ["tumor", "normal"]
         assert variant["samples"]["tumor"]["GT"] == [0, 1]
         assert variant["samples"]["tumor"]["AD"] == [20, 22]
+
+    @pytest.mark.unit
+    def test_per_alt_svlen_selected_by_alt_index(self, monkeypatch):
+        """A multi-ALT SV record reports each ALT's own SVLEN, not the first for all."""
+
+        class Record:
+            contig = "chr3"
+            pos = 1001
+            ref = "N"
+            alts = ("<DEL>", "<DUP>")
+            # SVLEN is Number=A: one value per ALT.
+            info = {"SVTYPE": "DEL", "END": 2000, "SVLEN": (-500, 900)}
+            samples: dict = {}
+
+        class VariantFileStub:
+            def __init__(self, path):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def fetch(self, contig, start, end):
+                return [Record()]
+
+        monkeypatch.setattr("bamcp.core.parsers.pysam.VariantFile", VariantFileStub)
+
+        variants = load_vcf_variants("sv.vcf", "chr3:900-3000")
+        assert [v["alt"] for v in variants] == ["<DEL>", "<DUP>"]
+        assert variants[0]["sv_len"] == -500  # DEL's own length
+        assert variants[1]["sv_len"] == 900  # DUP's own length, not the first ALT's
+
+    @pytest.mark.unit
+    def test_per_alt_value_edges(self):
+        assert _per_alt_value(-400, 0) == -400  # scalar broadcasts to every ALT
+        assert _per_alt_value(-400, 3) == -400
+        assert _per_alt_value((-100, -200), 1) == -200  # per-ALT tuple
+        assert _per_alt_value((-100,), 1) is None  # short tuple can't report another ALT
 
 
 class TestFetchRegion:

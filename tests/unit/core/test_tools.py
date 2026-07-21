@@ -1480,9 +1480,9 @@ class TestMediumRoadmapCoverage:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_close_external_clients_closes_clients_and_clears_cache(self):
-        """External client cleanup should close clients, reset globals, and clear region cache."""
-        from bamcp.core import tools as tools_module
+    async def test_close_external_clients_closes_clients_and_clears_cache(self, config):
+        """External client cleanup should close clients and clear the region cache."""
+        from bamcp.core.tools import get_services
 
         closed = []
 
@@ -1493,18 +1493,38 @@ class TestMediumRoadmapCoverage:
             async def close(self):
                 closed.append(self.name)
 
-        tools_module._clinvar_client = ClientStub("clinvar")
-        tools_module._gnomad_client = ClientStub("gnomad")
-        tools_module._gene_client = ClientStub("gene")
-        tools_module._region_cache[("coverage", "sample.bam")] = (
+        services = get_services(config)
+        services._clinvar = ClientStub("clinvar")
+        services._gnomad = ClientStub("gnomad")
+        services._genes = ClientStub("gene")
+        services.region_cache[("coverage", "sample.bam")] = (
             0,
             RegionData("chr1", 0, 1, [], [0], []),
         )
 
-        await close_external_clients()
+        await close_external_clients(config)
 
         assert sorted(closed) == ["clinvar", "gene", "gnomad"]
-        assert tools_module._clinvar_client is None
-        assert tools_module._gnomad_client is None
-        assert tools_module._gene_client is None
-        assert tools_module._region_cache == {}
+        assert services._clinvar is None
+        assert services._gnomad is None
+        assert services._genes is None
+        assert services.region_cache == {}
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_services_isolated_per_config(self):
+        """Two servers built from different configs must not share cache or clients."""
+        from bamcp.core.tools import get_services
+
+        cfg_a = BAMCPConfig(gnomad_dataset="gnomad_r4")
+        cfg_b = BAMCPConfig(gnomad_dataset="gnomad_r2_1")
+
+        services_a = get_services(cfg_a)
+        services_b = get_services(cfg_b)
+
+        assert services_a is not services_b
+        assert services_a.cache is not services_b.cache
+        # gnomAD clients are built lazily from each config's dataset.
+        assert services_a.gnomad() is not services_b.gnomad()
+        assert services_a.gnomad().dataset == "gnomad_r4"
+        assert services_b.gnomad().dataset == "gnomad_r2_1"

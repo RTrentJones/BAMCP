@@ -7,7 +7,7 @@ import json
 import logging
 import tempfile
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -49,13 +49,111 @@ from .validation import (
 
 logger = logging.getLogger(__name__)
 
-# Module-level singleton instances for session consistency and connection reuse
-_cache_instance: BAMIndexCache | None = None
-_clinvar_client: ClinVarClient | None = None
-_gnomad_client: GnomadClient | None = None
-_gene_client: GeneClient | None = None
-_region_cache: dict[tuple, tuple[float, RegionData]] = {}
-_index_download_locks: dict[str, asyncio.Lock] = {}
+
+@dataclass
+class BAMCPServices:
+    """Per-server runtime services: the index cache, external API clients, the
+    region cache, and per-index download locks.
+
+    These were previously module-level singletons, which meant two servers built
+    from different :class:`BAMCPConfig` instances in one process (tests, embedded
+    deployments) would silently share a cache directory, NCBI API key, or gnomAD
+    dataset — whichever config constructed them first. Bundling them here and
+    keying by config identity (see :func:`get_services`) keeps each server
+    isolated while preserving connection reuse within a server.
+    """
+
+    config: BAMCPConfig
+    cache: BAMIndexCache
+    region_cache: dict[tuple, tuple[float, RegionData]] = field(default_factory=dict)
+    index_download_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    _clinvar: ClinVarClient | None = field(default=None, repr=False)
+    _gnomad: GnomadClient | None = field(default=None, repr=False)
+    _genes: GeneClient | None = field(default=None, repr=False)
+
+    @classmethod
+    def from_config(cls, config: BAMCPConfig) -> BAMCPServices:
+        return cls(config=config, cache=BAMIndexCache(config.cache_dir, config.cache_ttl))
+
+    def clinvar(self) -> ClinVarClient:
+        if self._clinvar is None:
+            self._clinvar = ClinVarClient(api_key=self.config.ncbi_api_key)
+        return self._clinvar
+
+    def gnomad(self) -> GnomadClient:
+        if self._gnomad is None:
+            self._gnomad = GnomadClient(dataset=self.config.gnomad_dataset)
+        return self._gnomad
+
+    def genes(self) -> GeneClient:
+        if self._genes is None:
+            self._genes = GeneClient(
+                api_key=self.config.ncbi_api_key,
+                genome_build=self.config.genome_build,
+            )
+        return self._genes
+
+    async def aclose(self) -> None:
+        """Close external HTTP clients and drop per-process caches.
+
+        Keeps the index cache instance (and its session id) so callers can reuse
+        the session; only the network clients and transient caches are released.
+        """
+        clients = (self._clinvar, self._gnomad, self._genes)
+        await asyncio.gather(
+            *(client.close() for client in clients if client is not None),
+            return_exceptions=True,
+        )
+        self._clinvar = None
+        self._gnomad = None
+        self._genes = None
+        self.region_cache.clear()
+        self.index_download_locks.clear()
+
+
+# Services keyed by config identity so distinct server instances stay isolated.
+_services_registry: dict[int, BAMCPServices] = {}
+
+
+def get_services(config: BAMCPConfig) -> BAMCPServices:
+    """Return the :class:`BAMCPServices` for ``config``, creating it on first use.
+
+    Keyed by ``id(config)``: every server has exactly one config object, so this
+    memoizes services per server while never sharing them across servers.
+    """
+    services = _services_registry.get(id(config))
+    if services is None:
+        services = BAMCPServices.from_config(config)
+        _services_registry[id(config)] = services
+    return services
+
+
+def get_cache(config: BAMCPConfig) -> BAMIndexCache:
+    """Get or create the session index cache for this server's config."""
+    return get_services(config).cache
+
+
+def get_clinvar_client(config: BAMCPConfig) -> ClinVarClient:
+    """Get or create this server's ClinVar client."""
+    return get_services(config).clinvar()
+
+
+def get_gnomad_client(config: BAMCPConfig) -> GnomadClient:
+    """Get or create this server's gnomAD client."""
+    return get_services(config).gnomad()
+
+
+def get_gene_client(config: BAMCPConfig) -> GeneClient:
+    """Get or create this server's gene client."""
+    return get_services(config).genes()
+
+
+async def close_external_clients(config: BAMCPConfig) -> None:
+    """Close this server's external HTTP clients and clear its per-process caches."""
+    services = _services_registry.get(id(config))
+    if services is not None:
+        await services.aclose()
+
 
 _CLINVAR_DISCLAIMER = (
     "Note: This is research-grade information from ClinVar and is not intended "
@@ -74,59 +172,6 @@ _CANDIDATE_VARIANT_DISCLAIMER = (
 
 _INTERNAL_COORDINATE_SYSTEM = "0-based-half-open"
 _LLM_COORDINATE_SYSTEM = "1-based-inclusive"
-
-
-def get_cache(config: BAMCPConfig) -> BAMIndexCache:
-    """Get or create the session cache instance.
-
-    Uses a module-level singleton to maintain consistent session ID
-    across all tool calls within a server process.
-    """
-    global _cache_instance
-    if _cache_instance is None:
-        _cache_instance = BAMIndexCache(config.cache_dir, config.cache_ttl)
-    return _cache_instance
-
-
-def get_clinvar_client(config: BAMCPConfig) -> ClinVarClient:
-    """Get or create the singleton ClinVar client."""
-    global _clinvar_client
-    if _clinvar_client is None:
-        _clinvar_client = ClinVarClient(api_key=config.ncbi_api_key)
-    return _clinvar_client
-
-
-def get_gnomad_client(config: BAMCPConfig) -> GnomadClient:
-    """Get or create the singleton gnomAD client."""
-    global _gnomad_client
-    if _gnomad_client is None:
-        _gnomad_client = GnomadClient(dataset=config.gnomad_dataset)
-    return _gnomad_client
-
-
-def get_gene_client(config: BAMCPConfig) -> GeneClient:
-    """Get or create the singleton gene client."""
-    global _gene_client
-    if _gene_client is None:
-        _gene_client = GeneClient(
-            api_key=config.ncbi_api_key,
-            genome_build=config.genome_build,
-        )
-    return _gene_client
-
-
-async def close_external_clients() -> None:
-    """Close shared external HTTP clients and clear per-process caches."""
-    global _clinvar_client, _gnomad_client, _gene_client
-    clients = (_clinvar_client, _gnomad_client, _gene_client)
-    await asyncio.gather(
-        *(client.close() for client in clients if client is not None),
-        return_exceptions=True,
-    )
-    _clinvar_client = None
-    _gnomad_client = None
-    _gene_client = None
-    _region_cache.clear()
 
 
 def _cache_key(
@@ -153,22 +198,26 @@ def _cache_key(
     )
 
 
-def _get_cached_region(key: tuple, ttl: int) -> RegionData | None:
+def _get_cached_region(
+    region_cache: dict[tuple, tuple[float, RegionData]], key: tuple, ttl: int
+) -> RegionData | None:
     if ttl <= 0:
         return None
-    cached = _region_cache.get(key)
+    cached = region_cache.get(key)
     if cached is None:
         return None
     created, data = cached
     if (time.monotonic() - created) > ttl:
-        _region_cache.pop(key, None)
+        region_cache.pop(key, None)
         return None
     return data
 
 
-def _set_cached_region(key: tuple, data: RegionData, ttl: int) -> RegionData:
+def _set_cached_region(
+    region_cache: dict[tuple, tuple[float, RegionData]], key: tuple, data: RegionData, ttl: int
+) -> RegionData:
     if ttl > 0:
-        _region_cache[key] = (time.monotonic(), data)
+        region_cache[key] = (time.monotonic(), data)
     return data
 
 
@@ -228,7 +277,8 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
         - File is local (no caching needed)
         - Download failed (pysam will try its own resolution)
     """
-    cache = get_cache(config)
+    services = get_services(config)
+    cache = services.cache
     index_path = cache.get_index_path(file_path)
 
     # Local file - no caching needed
@@ -248,7 +298,7 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
         # BAM files: try .bam.bai first, then .bai
         index_urls = [file_path + ".bai", file_path.rsplit(".", 1)[0] + ".bai"]
 
-    lock = _index_download_locks.setdefault(index_path, asyncio.Lock())
+    lock = services.index_download_locks.setdefault(index_path, asyncio.Lock())
     async with lock:
         if cache.is_valid(index_path):
             logger.debug("Using cached index after waiting for download lock: %s", index_path)
@@ -299,8 +349,11 @@ async def _fetch_region_with_timeout(
     Raises:
         asyncio.TimeoutError: If BAM parsing exceeds timeout.
     """
+    region_cache = get_services(config).region_cache
     key = _cache_key(file_path, region, reference, config, mode, min_vaf, min_depth, vcf_path)
-    if cached := _get_cached_region(key, min(config.cache_ttl, DEFAULT_CACHE_TTL_SECONDS)):
+    if cached := _get_cached_region(
+        region_cache, key, min(config.cache_ttl, DEFAULT_CACHE_TTL_SECONDS)
+    ):
         return cached
 
     if vcf_path is not None:
@@ -313,6 +366,7 @@ async def _fetch_region_with_timeout(
             timeout=BAM_PARSE_TIMEOUT_SECONDS,
         )
         return _set_cached_region(
+            region_cache,
             key,
             RegionData(
                 contig=contig,
@@ -385,7 +439,9 @@ async def _fetch_region_with_timeout(
             v for v in vcf_variants if (v["position"], v["ref"], v["alt"]) not in seen
         )
 
-    return _set_cached_region(key, data, min(config.cache_ttl, DEFAULT_CACHE_TTL_SECONDS))
+    return _set_cached_region(
+        region_cache, key, data, min(config.cache_ttl, DEFAULT_CACHE_TTL_SECONDS)
+    )
 
 
 # -- Tool Handlers -----------------------------------------------------------

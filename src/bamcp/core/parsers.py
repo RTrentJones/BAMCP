@@ -179,6 +179,13 @@ def _open_alignment(
     )
 
 
+def fetch_reference_sequence(reference_path: str, region: str) -> str:
+    """Fetch the reference sequence for a region (0-based half-open)."""
+    contig, start, end = parse_region(region)
+    with pysam.FastaFile(reference_path) as fasta:
+        return fasta.fetch(contig, start, end)
+
+
 def count_coverage_arrays(
     bam_path: str,
     region: str,

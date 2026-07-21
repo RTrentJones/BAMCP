@@ -38,6 +38,7 @@ from .parsers import (
     annotate_vcf_snv_support,
     fetch_candidate_variants_only,
     fetch_coverage_only,
+    fetch_reference_sequence,
     fetch_region,
     load_vcf_variants,
     parse_region,
@@ -567,6 +568,14 @@ async def _fetch_region_with_timeout(
             await _annotate_vcf_support(
                 file_path, region, reference, vcf_variants, config, index_path
             )
+        # Keep the reference slice so downstream artifact scoring (homopolymer
+        # context) matches the full/viewer path for VCF-primary SNVs.
+        ref_seq = None
+        if reference:
+            ref_seq = await asyncio.wait_for(
+                asyncio.to_thread(fetch_reference_sequence, reference, region),
+                timeout=BAM_PARSE_TIMEOUT_SECONDS,
+            )
         return _set_cached_region(
             region_cache,
             key,
@@ -577,6 +586,7 @@ async def _fetch_region_with_timeout(
                 reads=[],
                 coverage=[],
                 variants=vcf_variants,
+                reference_sequence=ref_seq,
             ),
             ttl,
         )

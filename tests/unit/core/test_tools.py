@@ -708,6 +708,44 @@ class TestVariantSource:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_vcf_primary_shortcut_loads_reference(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """The VCF-primary variants short-circuit keeps the reference slice so downstream
+        artifact scoring (homopolymer context) matches the full/viewer path."""
+        from bamcp.core import tools as tools_module
+
+        monkeypatch.setattr(
+            tools_module,
+            "load_vcf_variants",
+            lambda vcf, region: [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                }
+            ],
+        )
+        data = await tools_module._fetch_region_with_timeout(
+            small_bam_path,
+            "chr1:90-200",
+            config_with_ref.reference,
+            config_with_ref,
+            mode="variants",
+            vcf_path=self._vcf(tmp_path),
+            vcf_primary=True,
+        )
+        assert data.reference_sequence is not None
+        assert len(data.reference_sequence) == 110  # chr1:90-200
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_vcf_support_is_unaffected_by_max_reads(
         self, small_bam_path, ref_fasta_path, tmp_path, monkeypatch
     ):

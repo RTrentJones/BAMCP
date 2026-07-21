@@ -643,13 +643,6 @@ def _one_based(variant: dict[str, Any]) -> dict[str, Any]:
     return {**variant, "position": variant["position"] + 1}
 
 
-def _first_scalar(value: Any) -> Any:
-    """First element of a per-alt tuple/list INFO value (e.g. SVLEN), else the value."""
-    if isinstance(value, (list, tuple)):
-        return value[0] if value else None
-    return value
-
-
 def _format_genotypes(samples: dict[str, Any]) -> list[str]:
     """Render per-sample genotypes as ``name=allele/allele`` (missing alleles as ``.``)."""
     formatted: list[str] = []
@@ -679,10 +672,12 @@ def _format_variant_line(variant: dict[str, Any]) -> str:
         alt = str(variant.get("alt", ""))
         sv_type = variant.get("sv_type") or (alt.strip("<>") if alt.startswith("<") else "SV")
         line = f"  {contig}:{pos} <{sv_type}>"
-        sv_end = _first_scalar(variant.get("sv_end"))
+        # sv_end (END, Number=1) and sv_len (SVLEN, normalized per-ALT by load_vcf_variants)
+        # arrive as scalars.
+        sv_end = variant.get("sv_end")
         if sv_end:
             line += f" span={pos}-{sv_end}"
-        sv_len = _first_scalar(variant.get("sv_len"))
+        sv_len = variant.get("sv_len")
         if sv_len is not None:
             line += f" len={sv_len}"
     else:

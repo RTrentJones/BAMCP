@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pysam
@@ -278,6 +279,19 @@ def fetch_candidate_variants_only(
     )
 
 
+def _per_alt_value(value: Any, idx: int) -> Any:
+    """Select the ``idx``-th element of a per-ALT INFO value.
+
+    Number=A INFO fields (e.g. ``SVLEN``) carry one value per ALT as a tuple; scalar
+    (Number=1 / broadcast) values apply to every ALT. Returns ``None`` when a per-ALT
+    tuple is shorter than the ALT it's asked for, so a mismatched record can't report
+    another ALT's value.
+    """
+    if isinstance(value, (list, tuple)):
+        return value[idx] if idx < len(value) else None
+    return value
+
+
 def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
     """Load VCF/BCF records for a region as internal 0-based candidate variants."""
     contig, start, end = parse_region(region)
@@ -325,7 +339,8 @@ def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
                         "sample_names": list(samples.keys()),
                         "sv_type": sv_type,
                         "sv_end": sv_end,
-                        "sv_len": sv_len,
+                        # SVLEN is Number=A (one value per ALT); pick this ALT's.
+                        "sv_len": _per_alt_value(sv_len, idx),
                     }
                 )
     return variants

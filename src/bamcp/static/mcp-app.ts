@@ -966,9 +966,9 @@ class BAMCPViewer {
                     `–${Number(variant.sv_end).toLocaleString()}`;
                 rows.push(`<span class="detail-key">Span</span>${escapeHtml(span)}`);
             }
-            const svLen = Array.isArray(variant.sv_len) ? variant.sv_len[0] : variant.sv_len;
-            if (svLen != null) {
-                rows.push(`<span class="detail-key">Length</span>${escapeHtml(String(svLen))} bp`);
+            // sv_len is normalized to this ALT's SVLEN by the backend (load_vcf_variants).
+            if (variant.sv_len != null) {
+                rows.push(`<span class="detail-key">Length</span>${escapeHtml(String(variant.sv_len))} bp`);
             }
         }
 

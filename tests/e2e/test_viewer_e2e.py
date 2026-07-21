@@ -252,7 +252,7 @@ class TestMultiSampleAndSvViews:
                 "source": "vcf",
                 "sv_type": "DEL",
                 "sv_end": 5000,
-                "sv_len": [-4700],
+                "sv_len": -4700,
             },
             {
                 "contig": "chr1",

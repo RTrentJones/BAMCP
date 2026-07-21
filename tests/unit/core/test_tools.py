@@ -64,7 +64,7 @@ class TestVariantLineFormatting:
             "depth": 0,
             "sv_type": "DEL",
             "sv_end": 5000,
-            "sv_len": [-4000],
+            "sv_len": -4000,  # normalized to a scalar upstream by load_vcf_variants
         }
         line = _format_variant_line(v)
         assert line == "  chr1:1000 <DEL> span=1000-5000 len=-4000"

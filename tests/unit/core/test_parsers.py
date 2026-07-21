@@ -9,7 +9,9 @@ from bamcp.core.parsers import (
     detect_variants,
     extract_soft_clips,
     fetch_region,
+    load_vcf_variants,
     parse_region,
+    read_passes_filters,
     scan_variants_chunked,
 )
 
@@ -193,6 +195,102 @@ class TestDetectVariants:
         assert variants[0]["alt"] == "G"
 
 
+class TestLoadVcfVariants:
+    """Tests for VCF-backed candidate variant overlays."""
+
+    @pytest.mark.unit
+    def test_loads_vcf_records_as_internal_zero_based_variants(self, monkeypatch):
+        class Record:
+            contig = "chr1"
+            pos = 101
+            ref = "A"
+            alts = ("T",)
+            info = {"DP": 20, "AF": (0.25,)}
+            samples = {}
+
+        class VariantFileStub:
+            def __init__(self, path):
+                self.path = path
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def fetch(self, contig, start, end):
+                assert (contig, start, end) == ("chr1", 90, 120)
+                return [Record()]
+
+        monkeypatch.setattr("bamcp.core.parsers.pysam.VariantFile", VariantFileStub)
+
+        variants = load_vcf_variants("calls.vcf.gz", "chr1:90-120")
+        assert variants == [
+            {
+                "contig": "chr1",
+                "position": 100,
+                "ref": "A",
+                "alt": "T",
+                "variant_kind": "snv",
+                "vaf": 0.25,
+                "depth": 20,
+                "alt_count": 5,
+                "source": "vcf",
+                "samples": {},
+                "sample_names": [],
+                "sv_type": None,
+                "sv_end": None,
+                "sv_len": None,
+            }
+        ]
+
+    @pytest.mark.unit
+    def test_loads_multisample_structural_variant_metadata(self, monkeypatch):
+        class SampleData(dict):
+            pass
+
+        class Samples(dict):
+            pass
+
+        class Record:
+            contig = "chr2"
+            pos = 501
+            ref = "N"
+            alts = ("<DEL>",)
+            info = {"DP": 42, "AF": (0.5,), "SVTYPE": "DEL", "END": 900, "SVLEN": -400}
+            samples = Samples(
+                {
+                    "tumor": SampleData({"GT": (0, 1), "AD": (20, 22)}),
+                    "normal": SampleData({"GT": (0, 0), "AD": (40, 0)}),
+                }
+            )
+
+        class VariantFileStub:
+            def __init__(self, path):
+                self.path = path
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def fetch(self, contig, start, end):
+                assert (contig, start, end) == ("chr2", 400, 1000)
+                return [Record()]
+
+        monkeypatch.setattr("bamcp.core.parsers.pysam.VariantFile", VariantFileStub)
+
+        [variant] = load_vcf_variants("sv.bcf", "chr2:400-1000")
+        assert variant["variant_kind"] == "sv"
+        assert variant["sv_type"] == "DEL"
+        assert variant["sv_end"] == 900
+        assert variant["sv_len"] == -400
+        assert variant["sample_names"] == ["tumor", "normal"]
+        assert variant["samples"]["tumor"]["GT"] == [0, 1]
+        assert variant["samples"]["tumor"]["AD"] == [20, 22]
+
+
 class TestFetchRegion:
     """Tests for the fetch_region function using real BAM fixtures."""
 
@@ -257,6 +355,42 @@ class TestFetchRegion:
         data = fetch_region(small_bam_path, "chr1:390-450")
         names = {r.name for r in data.reads}
         assert "read7_secondary" not in names
+
+    @pytest.mark.unit
+    def test_read_filter_excludes_duplicate_and_qcfail(self):
+        """Duplicate and QC-failed reads should not contribute evidence."""
+
+        class ReadStub:
+            mapping_quality = 60
+            is_unmapped = False
+            is_secondary = False
+            is_supplementary = False
+            is_duplicate = False
+            is_qcfail = False
+
+        read = ReadStub()
+        assert read_passes_filters(read, min_mapq=30)
+
+        read.is_duplicate = True
+        assert not read_passes_filters(read, min_mapq=30)
+
+        read.is_duplicate = False
+        read.is_qcfail = True
+        assert not read_passes_filters(read, min_mapq=30)
+
+    @pytest.mark.unit
+    def test_read_filter_respects_min_mapq(self):
+        """Reads below configured MAPQ should not contribute evidence."""
+
+        class ReadStub:
+            mapping_quality = 20
+            is_unmapped = False
+            is_secondary = False
+            is_supplementary = False
+            is_duplicate = False
+            is_qcfail = False
+
+        assert not read_passes_filters(ReadStub(), min_mapq=30)
 
     @pytest.mark.unit
     def test_secondary_reads_excluded_from_coverage(self, small_bam_path):

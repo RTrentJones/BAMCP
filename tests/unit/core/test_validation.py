@@ -13,6 +13,7 @@ from bamcp.core.validation import (
     validate_path,
     validate_region,
     validate_remote_url,
+    validate_variant_file_path,
     validate_variant_input,
 )
 
@@ -116,6 +117,32 @@ class TestValidatePath:
         f = tmp_path / "test.cram"
         f.touch()
         validate_path(str(f), config)
+
+
+class TestValidateVariantFilePath:
+    """Tests for VCF/BCF overlay path validation."""
+
+    @pytest.mark.unit
+    def test_vcf_extension_allowed(self, tmp_path):
+        config = BAMCPConfig()
+        f = tmp_path / "calls.vcf"
+        f.touch()
+        validate_variant_file_path(str(f), config)
+
+    @pytest.mark.unit
+    def test_vcf_gz_extension_allowed(self, tmp_path):
+        config = BAMCPConfig()
+        f = tmp_path / "calls.vcf.gz"
+        f.touch()
+        validate_variant_file_path(str(f), config)
+
+    @pytest.mark.unit
+    def test_bam_extension_rejected_for_variant_file(self, tmp_path):
+        config = BAMCPConfig()
+        f = tmp_path / "sample.bam"
+        f.touch()
+        with pytest.raises(ValueError, match="Unsupported variant file type"):
+            validate_variant_file_path(str(f), config)
 
 
 class TestSSRFPrevention:
@@ -236,6 +263,10 @@ class TestValidateRegion:
         validate_region("chrM:1-100")
 
     @pytest.mark.unit
+    def test_valid_region_with_commas(self):
+        validate_region("chr17:7,577,000-7,577,500")
+
+    @pytest.mark.unit
     def test_invalid_region_no_positions(self):
         with pytest.raises(ValueError, match="Invalid region format"):
             validate_region("chr1")
@@ -261,6 +292,7 @@ class TestValidateRegion:
         assert REGION_PATTERN.match("1:100-200")
         assert REGION_PATTERN.match("chrX:1-1000000")
         assert REGION_PATTERN.match("MT:1-100")
+        assert REGION_PATTERN.match("chr1:1,000-2,000")
 
     @pytest.mark.unit
     def test_region_pattern_invalid(self):

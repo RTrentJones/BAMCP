@@ -121,12 +121,44 @@ export class StateManager {
         }
     }
 
+    private heapPush(heap: Array<{ end: number; rowIndex: number }>, item: { end: number; rowIndex: number }): void {
+        heap.push(item);
+        let i = heap.length - 1;
+        while (i > 0) {
+            const parent = Math.floor((i - 1) / 2);
+            if (heap[parent].end <= item.end) break;
+            heap[i] = heap[parent];
+            i = parent;
+        }
+        heap[i] = item;
+    }
+
+    private heapPop(heap: Array<{ end: number; rowIndex: number }>): { end: number; rowIndex: number } | undefined {
+        if (heap.length === 0) return undefined;
+        const root = heap[0];
+        const last = heap.pop()!;
+        if (heap.length > 0) {
+            let i = 0;
+            while (true) {
+                const left = 2 * i + 1;
+                const right = left + 1;
+                if (left >= heap.length) break;
+                const child = right < heap.length && heap[right].end < heap[left].end ? right : left;
+                if (heap[child].end >= last.end) break;
+                heap[i] = heap[child];
+                i = child;
+            }
+            heap[i] = last;
+        }
+        return root;
+    }
+
     private packReads(): void {
         if (!this.data) return;
 
         this.packedRows = [];
         this.readRowIndex.clear();
-        const rowEnds: number[] = [];
+        const rowHeap: Array<{ end: number; rowIndex: number }> = [];
 
         // Group reads by name to identify pairs (for packing)
         const readsByName = new Map<string, Read[]>();
@@ -162,18 +194,21 @@ export class StateManager {
 
         // Pack into rows
         for (const read of sortedReads) {
-            let rowIndex = rowEnds.findIndex(end => end < read.position);
+            const reusable = rowHeap.length > 0 && rowHeap[0].end < read.position
+                ? this.heapPop(rowHeap)
+                : undefined;
 
-            if (rowIndex === -1) {
-                rowIndex = rowEnds.length;
-                rowEnds.push(read.end_position);
+            let rowIndex: number;
+            if (!reusable) {
+                rowIndex = this.packedRows.length;
                 this.packedRows.push([]);
             } else {
-                rowEnds[rowIndex] = read.end_position;
+                rowIndex = reusable.rowIndex;
             }
 
             this.packedRows[rowIndex].push(read);
             this.readRowIndex.set(read, rowIndex);
+            this.heapPush(rowHeap, { end: read.end_position, rowIndex });
         }
     }
 

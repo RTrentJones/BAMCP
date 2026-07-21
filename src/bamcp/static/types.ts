@@ -63,8 +63,15 @@ export interface Variant {
     position: number;
     ref: string;
     alt: string;
+    variant_kind?: 'snv' | 'indel' | 'sv';
+    source?: 'bamcp' | 'vcf';
     vaf: number;
     depth: number;
+    samples?: Record<string, Record<string, unknown>>;
+    sample_names?: string[];
+    sv_type?: string | null;
+    sv_end?: number | null;
+    sv_len?: number | number[] | null;
     // Enhanced fields from tools.py
     strand_forward?: number;
     strand_reverse?: number;

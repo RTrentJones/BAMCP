@@ -8,6 +8,7 @@ from mcp.types import CallToolResult, TextContent
 from .analysis.curation import handle_get_variant_curation_summary
 from .config import BAMCPConfig
 from .core.tools import (
+    close_external_clients,
     get_cache,
     get_gene_client,
     handle_get_coverage,
@@ -53,17 +54,20 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     # Thin wrappers delegate to the existing handlers in tools.py.
     # FastMCP derives the JSON-Schema from the function signature.
 
-    @mcp.tool(description="Detect and return variants in a genomic region")
+    @mcp.tool(description="Detect and return candidate variants in a genomic region")
     async def get_variants(
         file_path: str,
         region: str,
         reference: str | None = None,
+        vcf_path: str | None = None,
         min_vaf: float | None = None,
         min_depth: int | None = None,
     ) -> str:
         args: dict = {"file_path": file_path, "region": region}
         if reference is not None:
             args["reference"] = reference
+        if vcf_path is not None:
+            args["vcf_path"] = vcf_path
         if min_vaf is not None:
             args["min_vaf"] = min_vaf
         if min_depth is not None:
@@ -110,6 +114,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         contig: str | None = None,
         window: int | None = None,
         reference: str | None = None,
+        vcf_path: str | None = None,
     ) -> CallToolResult:
         args: dict = {"file_path": file_path, "position": position}
         if contig is not None:
@@ -118,6 +123,8 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             args["window"] = window
         if reference is not None:
             args["reference"] = reference
+        if vcf_path is not None:
+            args["vcf_path"] = vcf_path
         result = await handle_jump_to(args, config)
         payload = result.get("_meta", {}).get("ui/init", {})
         return CallToolResult(
@@ -135,11 +142,14 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         file_path: str,
         region: str,
         reference: str | None = None,
+        vcf_path: str | None = None,
     ) -> CallToolResult:
-        result = await handle_visualize_region(
-            {"file_path": file_path, "region": region, "reference": reference},
-            config,
-        )
+        args: dict = {"file_path": file_path, "region": region}
+        if reference is not None:
+            args["reference"] = reference
+        if vcf_path is not None:
+            args["vcf_path"] = vcf_path
+        result = await handle_visualize_region(args, config)
         payload = result.get("_meta", {}).get("ui/init", {})
         return CallToolResult(
             content=[TextContent(type="text", text=result["content"][0]["text"])],
@@ -149,17 +159,20 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     @mcp.tool(
         description=(
             "Get a text summary of a genomic region "
-            "(read count, coverage, variants) for LLM reasoning"
+            "(read count, coverage, candidate variants) for LLM reasoning"
         ),
     )
     async def get_region_summary(
         file_path: str,
         region: str,
         reference: str | None = None,
+        vcf_path: str | None = None,
     ) -> str:
         args: dict = {"file_path": file_path, "region": region}
         if reference is not None:
             args["reference"] = reference
+        if vcf_path is not None:
+            args["vcf_path"] = vcf_path
         result = await handle_get_region_summary(args, config)
         return str(result["content"][0]["text"])
 
@@ -262,8 +275,8 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     @mcp.tool(
         description=(
-            "Scan an entire contig for variants using fast coverage-based detection. "
-            "Requires a reference genome. Returns up to 500 variants ranked by VAF. "
+            "Scan an entire contig for candidate variants using fast coverage-based detection. "
+            "Requires a reference genome. Returns up to 500 candidate variants ranked by VAF. "
             "Use list_contigs first to detect genome build and get a reference URL."
         ),
     )
@@ -298,6 +311,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         """
         cache = get_cache(config)
         removed = cache.cleanup_session()
+        await close_external_clients()
         return f"Removed {removed} cached index files from session {cache.session_id}"
 
     # -- Resources -----------------------------------------------------------

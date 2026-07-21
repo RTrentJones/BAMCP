@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import tempfile
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,7 @@ from ..clients.gnomad import GnomadClient
 from ..config import BAMCPConfig
 from ..constants import (
     BAM_PARSE_TIMEOUT_SECONDS,
+    DEFAULT_CACHE_TTL_SECONDS,
     DEFAULT_CONTIG,
     SCAN_VARIANTS_CHUNK_SIZE,
     SCAN_VARIANTS_MAX_REGION,
@@ -26,9 +29,23 @@ from ..constants import (
 )
 from ..middleware.telemetry import telemetry_wrapper
 from .cache import BAMIndexCache
-from .parsers import RegionData, fetch_region, scan_variants_chunked
+from .parsers import (
+    RegionData,
+    fetch_candidate_variants_only,
+    fetch_coverage_only,
+    fetch_region,
+    load_vcf_variants,
+    parse_region,
+    scan_variants_chunked,
+)
 from .serialization import serialize_region_data
-from .validation import validate_path, validate_region, validate_variant_input
+from .validation import (
+    validate_path,
+    validate_region,
+    validate_remote_url,
+    validate_variant_file_path,
+    validate_variant_input,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +54,8 @@ _cache_instance: BAMIndexCache | None = None
 _clinvar_client: ClinVarClient | None = None
 _gnomad_client: GnomadClient | None = None
 _gene_client: GeneClient | None = None
+_region_cache: dict[tuple, tuple[float, RegionData]] = {}
+_index_download_locks: dict[str, asyncio.Lock] = {}
 
 _CLINVAR_DISCLAIMER = (
     "Note: This is research-grade information from ClinVar and is not intended "
@@ -47,6 +66,14 @@ _GNOMAD_DISCLAIMER = (
     "Note: This is research-grade population frequency data from gnomAD and is "
     "not intended for clinical diagnostic use."
 )
+
+_CANDIDATE_VARIANT_DISCLAIMER = (
+    "Note: BAMCP reports research-grade candidate variants from read-level evidence; "
+    "confirm with validated variant-calling and clinical workflows before use."
+)
+
+_INTERNAL_COORDINATE_SYSTEM = "0-based-half-open"
+_LLM_COORDINATE_SYSTEM = "1-based-inclusive"
 
 
 def get_cache(config: BAMCPConfig) -> BAMIndexCache:
@@ -88,6 +115,103 @@ def get_gene_client(config: BAMCPConfig) -> GeneClient:
     return _gene_client
 
 
+async def close_external_clients() -> None:
+    """Close shared external HTTP clients and clear per-process caches."""
+    global _clinvar_client, _gnomad_client, _gene_client
+    clients = (_clinvar_client, _gnomad_client, _gene_client)
+    await asyncio.gather(
+        *(client.close() for client in clients if client is not None),
+        return_exceptions=True,
+    )
+    _clinvar_client = None
+    _gnomad_client = None
+    _gene_client = None
+    _region_cache.clear()
+
+
+def _cache_key(
+    file_path: str,
+    region: str,
+    reference: str | None,
+    config: BAMCPConfig,
+    mode: str,
+    min_vaf: float | None,
+    min_depth: int | None,
+    vcf_path: str | None,
+) -> tuple:
+    return (
+        mode,
+        file_path,
+        region,
+        reference,
+        vcf_path,
+        config.max_reads,
+        config.min_mapq,
+        config.min_baseq,
+        min_vaf if min_vaf is not None else config.min_vaf,
+        min_depth if min_depth is not None else config.min_depth,
+    )
+
+
+def _get_cached_region(key: tuple, ttl: int) -> RegionData | None:
+    if ttl <= 0:
+        return None
+    cached = _region_cache.get(key)
+    if cached is None:
+        return None
+    created, data = cached
+    if (time.monotonic() - created) > ttl:
+        _region_cache.pop(key, None)
+        return None
+    return data
+
+
+def _set_cached_region(key: tuple, data: RegionData, ttl: int) -> RegionData:
+    if ttl > 0:
+        _region_cache[key] = (time.monotonic(), data)
+    return data
+
+
+async def _download_index_streaming(
+    client: httpx.AsyncClient,
+    index_url: str,
+    index_path: str,
+    config: BAMCPConfig,
+) -> str | None:
+    """Download an index with SSRF revalidation, streaming, and a size cap."""
+    validate_remote_url(index_url, config)
+    total = 0
+    tmp_path = ""
+    async with client.stream("GET", index_url) as resp:
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            logger.warning("Index download failed (%d): %s", resp.status_code, index_url)
+            return None
+
+        content_length = resp.headers.get("content-length")
+        if content_length and int(content_length) > config.max_remote_index_bytes:
+            raise ValueError("Remote index exceeds configured maximum size")
+
+        Path(index_path).parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            dir=str(Path(index_path).parent),
+            prefix=".index-",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_path = tmp.name
+            async for chunk in resp.aiter_bytes():
+                total += len(chunk)
+                if total > config.max_remote_index_bytes:
+                    raise ValueError("Remote index exceeds configured maximum size")
+                tmp.write(chunk)
+
+    Path(tmp_path).replace(index_path)
+    logger.info("Cached index (%d bytes): %s", total, index_path)
+    return index_path
+
+
 async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | None:
     """Download and cache the BAM/CRAM index file if not already cached.
 
@@ -124,25 +248,25 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
         # BAM files: try .bam.bai first, then .bai
         index_urls = [file_path + ".bai", file_path.rsplit(".", 1)[0] + ".bai"]
 
-    logger.info("Downloading index for remote BAM: %s", file_path)
+    lock = _index_download_locks.setdefault(index_path, asyncio.Lock())
+    async with lock:
+        if cache.is_valid(index_path):
+            logger.debug("Using cached index after waiting for download lock: %s", index_path)
+            return index_path
 
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-        for index_url in index_urls:
-            try:
-                resp = await client.get(index_url)
-                if resp.status_code == 200:
-                    # Save to cache
-                    Path(index_path).write_bytes(resp.content)
-                    logger.info("Cached index (%d bytes): %s", len(resp.content), index_path)
-                    return index_path
-                elif resp.status_code == 404:
+        logger.info("Downloading index for remote BAM: %s", file_path)
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            for index_url in index_urls:
+                try:
+                    downloaded = await _download_index_streaming(
+                        client, index_url, index_path, config
+                    )
+                    if downloaded:
+                        return downloaded
                     logger.debug("Index not found at %s, trying next", index_url)
+                except (httpx.RequestError, OSError, ValueError) as e:
+                    logger.warning("Index download error for %s: %s", index_url, e)
                     continue
-                else:
-                    logger.warning("Index download failed (%d): %s", resp.status_code, index_url)
-            except (httpx.RequestError, OSError) as e:
-                logger.warning("Index download error for %s: %s", index_url, e)
-                continue
 
     # All attempts failed - let pysam try its own resolution
     logger.warning("Could not download index for %s, falling back to pysam", file_path)
@@ -156,6 +280,8 @@ async def _fetch_region_with_timeout(
     config: BAMCPConfig,
     min_vaf: float | None = None,
     min_depth: int | None = None,
+    mode: str = "full",
+    vcf_path: str | None = None,
 ) -> RegionData:
     """Fetch region data from BAM/CRAM file with timeout protection.
 
@@ -173,23 +299,93 @@ async def _fetch_region_with_timeout(
     Raises:
         asyncio.TimeoutError: If BAM parsing exceeds timeout.
     """
+    key = _cache_key(file_path, region, reference, config, mode, min_vaf, min_depth, vcf_path)
+    if cached := _get_cached_region(key, min(config.cache_ttl, DEFAULT_CACHE_TTL_SECONDS)):
+        return cached
+
+    if vcf_path is not None:
+        validate_variant_file_path(vcf_path, config)
+
+    if mode == "variants" and vcf_path and not reference:
+        contig, start, end = parse_region(region)
+        vcf_variants = await asyncio.wait_for(
+            asyncio.to_thread(load_vcf_variants, vcf_path, region),
+            timeout=BAM_PARSE_TIMEOUT_SECONDS,
+        )
+        return _set_cached_region(
+            key,
+            RegionData(
+                contig=contig,
+                start=start,
+                end=end,
+                reads=[],
+                coverage=[],
+                variants=vcf_variants,
+            ),
+            min(config.cache_ttl, DEFAULT_CACHE_TTL_SECONDS),
+        )
+
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
+    effective_min_vaf = min_vaf if min_vaf is not None else config.min_vaf
+    effective_min_depth = min_depth if min_depth is not None else config.min_depth
 
-    return await asyncio.wait_for(
-        asyncio.to_thread(
-            fetch_region,
-            file_path,
-            region,
-            reference,
-            max_reads=config.max_reads,
-            min_mapq=config.min_mapq,
-            index_filename=index_path,
-            min_vaf=min_vaf if min_vaf is not None else config.min_vaf,
-            min_depth=min_depth if min_depth is not None else config.min_depth,
-        ),
-        timeout=BAM_PARSE_TIMEOUT_SECONDS,
-    )
+    if mode == "coverage":
+        data = await asyncio.wait_for(
+            asyncio.to_thread(
+                fetch_coverage_only,
+                file_path,
+                region,
+                reference,
+                config.min_mapq,
+                config.min_baseq,
+                index_path,
+            ),
+            timeout=BAM_PARSE_TIMEOUT_SECONDS,
+        )
+    elif mode == "variants" and reference:
+        data = await asyncio.wait_for(
+            asyncio.to_thread(
+                fetch_candidate_variants_only,
+                file_path,
+                region,
+                reference,
+                config.min_mapq,
+                config.min_baseq,
+                index_path,
+                effective_min_vaf,
+                effective_min_depth,
+            ),
+            timeout=BAM_PARSE_TIMEOUT_SECONDS,
+        )
+    else:
+        data = await asyncio.wait_for(
+            asyncio.to_thread(
+                fetch_region,
+                file_path,
+                region,
+                reference,
+                config.max_reads,
+                config.min_mapq,
+                config.min_baseq,
+                index_path,
+                effective_min_vaf,
+                effective_min_depth,
+            ),
+            timeout=BAM_PARSE_TIMEOUT_SECONDS,
+        )
+
+    if vcf_path:
+        vcf_variants = await asyncio.wait_for(
+            asyncio.to_thread(load_vcf_variants, vcf_path, region),
+            timeout=BAM_PARSE_TIMEOUT_SECONDS,
+        )
+        seen = {(v["position"], v["ref"], v["alt"]) for v in data.variants}
+        data.variants.extend(
+            v for v in vcf_variants if (v["position"], v["ref"], v["alt"]) not in seen
+        )
+
+    return _set_cached_region(key, data, min(config.cache_ttl, DEFAULT_CACHE_TTL_SECONDS))
 
 
 # -- Tool Handlers -----------------------------------------------------------
@@ -217,20 +413,41 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     region = args["region"]
     validate_region(region)
     reference = args.get("reference", config.reference)
+    vcf_path = args.get("vcf_path")
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
 
     data = await _fetch_region_with_timeout(
-        file_path, region, reference, config, min_vaf=min_vaf, min_depth=min_depth
+        file_path,
+        region,
+        reference,
+        config,
+        min_vaf=min_vaf,
+        min_depth=min_depth,
+        mode="variants",
+        vcf_path=vcf_path,
     )
 
     variants = [
-        _one_based(v) for v in data.variants if v["vaf"] >= min_vaf and v["depth"] >= min_depth
+        _one_based(v)
+        for v in data.variants
+        if v.get("source") == "vcf" or (v["vaf"] >= min_vaf and v["depth"] >= min_depth)
     ]
 
     return {
         "content": [
-            {"type": "text", "text": json.dumps({"variants": variants, "count": len(variants)})}
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "variants": variants,
+                        "count": len(variants),
+                        "coordinate_system": _LLM_COORDINATE_SYSTEM,
+                        "variant_type": "candidate",
+                        "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
+                    }
+                ),
+            }
         ]
     }
 
@@ -244,7 +461,7 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
     validate_region(region)
     reference = args.get("reference", config.reference)
 
-    data = await _fetch_region_with_timeout(file_path, region, reference, config)
+    data = await _fetch_region_with_timeout(file_path, region, reference, config, mode="coverage")
 
     coverage = data.coverage
     stats = {
@@ -255,6 +472,7 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
         "median": sorted(coverage)[len(coverage) // 2] if coverage else 0,
         "bases_covered": sum(1 for c in coverage if c > 0),
         "total_bases": len(coverage),
+        "coordinate_system": _INTERNAL_COORDINATE_SYSTEM,
     }
 
     return {"content": [{"type": "text", "text": json.dumps(stats)}]}
@@ -309,6 +527,7 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
                         "genome_build": build_info,
                         "reference_configured": config.reference is not None,
                         "suggested_reference_url": suggested_url,
+                        "coordinate_system": _INTERNAL_COORDINATE_SYSTEM,
                     }
                 ),
             }
@@ -328,19 +547,26 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     contig = args.get("contig", DEFAULT_CONTIG)
     window = args.get("window", config.default_window)
     reference = args.get("reference", config.reference)
+    vcf_path = args.get("vcf_path")
 
     start = max(0, position - window // 2)
     end = position + window // 2
     region = f"{contig}:{start}-{end}"
 
-    data = await _fetch_region_with_timeout(file_path, region, reference, config)
+    data = await _fetch_region_with_timeout(file_path, region, reference, config, vcf_path=vcf_path)
     payload = serialize_region_data(data)
+    payload["coordinate_system"] = _INTERNAL_COORDINATE_SYSTEM
+    payload["variant_type"] = "candidate"
+    payload["disclaimer"] = _CANDIDATE_VARIANT_DISCLAIMER
     payload["file_path"] = file_path  # For client-side re-queries
 
     # Return summary text in content (for LLM context), full data only in _meta
     reads_count = len(data.reads)
     variants_count = len(data.variants)
-    summary = f"Jumped to {data.contig}:{position}: {reads_count} reads, {variants_count} variants"
+    summary = (
+        f"Jumped to {data.contig}:{position}: {reads_count} reads, "
+        f"{variants_count} candidate variants"
+    )
     return {
         "content": [{"type": "text", "text": summary}],
         "_meta": {
@@ -361,9 +587,13 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     region = args["region"]
     validate_region(region)
     reference = args.get("reference", config.reference)
+    vcf_path = args.get("vcf_path")
 
-    data = await _fetch_region_with_timeout(file_path, region, reference, config)
+    data = await _fetch_region_with_timeout(file_path, region, reference, config, vcf_path=vcf_path)
     payload = serialize_region_data(data)
+    payload["coordinate_system"] = _INTERNAL_COORDINATE_SYSTEM
+    payload["variant_type"] = "candidate"
+    payload["disclaimer"] = _CANDIDATE_VARIANT_DISCLAIMER
     payload["file_path"] = file_path  # For client-side re-queries
 
     # Return summary text in content (for LLM context), full data only in _meta
@@ -371,7 +601,7 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     variants_count = len(data.variants)
     summary = (
         f"Region {data.contig}:{data.start}-{data.end}: "
-        f"{reads_count} reads, {variants_count} variants"
+        f"{reads_count} reads, {variants_count} candidate variants"
     )
     return {
         "content": [{"type": "text", "text": summary}],
@@ -393,8 +623,9 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     region = args["region"]
     validate_region(region)
     reference = args.get("reference", config.reference)
+    vcf_path = args.get("vcf_path")
 
-    data = await _fetch_region_with_timeout(file_path, region, reference, config)
+    data = await _fetch_region_with_timeout(file_path, region, reference, config, vcf_path=vcf_path)
 
     coverage = data.coverage
     mean_cov = round(sum(coverage) / len(coverage), 2) if coverage else 0
@@ -404,7 +635,9 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
         f"Region: {data.contig}:{data.start}-{data.end}",
         f"Reads: {len(data.reads)}",
         f"Coverage: mean={mean_cov}x, max={max_cov}x",
-        f"Variants detected: {len(data.variants)}",
+        f"Candidate variants detected: {len(data.variants)}",
+        f"Coordinate system: {_LLM_COORDINATE_SYSTEM}",
+        _CANDIDATE_VARIANT_DISCLAIMER,
     ]
 
     for v in data.variants:
@@ -427,6 +660,18 @@ async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> di
     pos = args["pos"]
     ref = args["ref"]
     alt = args["alt"]
+
+    if not config.clinvar_enabled:
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {"error": "ClinVar lookup is disabled", "disclaimer": _CLINVAR_DISCLAIMER}
+                    ),
+                }
+            ]
+        }
 
     # Validate input parameters
     validation_error = validate_variant_input(chrom, pos, ref, alt)
@@ -504,6 +749,18 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
     pos = args["pos"]
     ref = args["ref"]
     alt = args["alt"]
+
+    if not config.gnomad_enabled:
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {"error": "gnomAD lookup is disabled", "disclaimer": _GNOMAD_DISCLAIMER}
+                    ),
+                }
+            ]
+        }
 
     # Validate input parameters
     validation_error = validate_variant_input(chrom, pos, ref, alt)
@@ -608,6 +865,8 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
                 chunk_size=SCAN_VARIANTS_CHUNK_SIZE,
                 min_vaf=min_vaf,
                 min_depth=min_depth,
+                min_mapq=config.min_mapq,
+                min_baseq=config.min_baseq,
                 max_region=SCAN_VARIANTS_MAX_REGION,
                 index_filename=index_path,
             ),
@@ -634,6 +893,9 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
                         "contig": contig,
                         "variants": [_one_based(v) for v in variants],
                         "count": len(variants),
+                        "coordinate_system": _LLM_COORDINATE_SYSTEM,
+                        "variant_type": "candidate",
+                        "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
                     }
                 ),
             }

@@ -14,7 +14,6 @@ from typing import Any
 import httpx
 import pysam
 
-from ..analysis.evidence import enhance_variants_with_evidence
 from ..clients.clinvar import ClinVarClient
 from ..clients.genes import GeneClient
 from ..clients.gnomad import GnomadClient
@@ -35,6 +34,7 @@ from .cache import BAMIndexCache
 from .parsers import (
     MAX_REGION_SIZE,
     RegionData,
+    annotate_vcf_snv_support,
     fetch_candidate_variants_only,
     fetch_coverage_only,
     fetch_region,
@@ -470,6 +470,37 @@ async def _fetch_readless_tiled(
     return _slice_readless_region_data(tile_data, r_start, r_end)
 
 
+def _has_vcf_snv(variants: list[dict]) -> bool:
+    """Whether any variant is a VCF single-nucleotide site (needs read-support scoring)."""
+    return any(
+        v.get("source") == "vcf" and len(v["ref"]) == 1 == len(v["alt"]) for v in variants
+    )
+
+
+async def _annotate_vcf_support(
+    file_path: str,
+    region: str,
+    reference: str | None,
+    variants: list[dict],
+    config: BAMCPConfig,
+    index_path: str | None,
+) -> None:
+    """Attach truncation-free read-level support to VCF SNVs (off the event loop)."""
+    await asyncio.wait_for(
+        asyncio.to_thread(
+            annotate_vcf_snv_support,
+            file_path,
+            region,
+            reference,
+            variants,
+            config.min_mapq,
+            config.min_baseq,
+            index_path,
+        ),
+        timeout=BAM_PARSE_TIMEOUT_SECONDS,
+    )
+
+
 async def _fetch_region_with_timeout(
     file_path: str,
     region: str,
@@ -523,6 +554,12 @@ async def _fetch_region_with_timeout(
             asyncio.to_thread(load_vcf_variants, vcf_path, region),
             timeout=BAM_PARSE_TIMEOUT_SECONDS,
         )
+        # Only touch the BAM when there's an SNV whose support we can actually count.
+        if _has_vcf_snv(vcf_variants):
+            index_path = await _ensure_cached_index(file_path, config)
+            await _annotate_vcf_support(
+                file_path, region, reference, vcf_variants, config, index_path
+            )
         return _set_cached_region(
             region_cache,
             key,
@@ -558,6 +595,7 @@ async def _fetch_region_with_timeout(
             data.variants.extend(
                 v for v in vcf_variants if (v["position"], v["ref"], v["alt"]) not in seen
             )
+        await _annotate_vcf_support(file_path, region, reference, data.variants, config, index_path)
 
     return _set_cached_region(region_cache, key, data, ttl)
 
@@ -619,9 +657,9 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
 
-    use_vcf = effective_vcf is not None
-    # With a VCF we fetch reads (full mode) so BAMCP can attach read-level evidence
-    # to each VCF site; otherwise the readless candidate fast path is enough.
+    # Readless: BAMCP candidates come from count_coverage, and VCF sites get their
+    # read-level support attached by the fetch (annotate_vcf_snv_support), which
+    # counts all reads at each site and so isn't affected by the max_reads read cap.
     data = await _fetch_region_with_timeout(
         file_path,
         region,
@@ -629,36 +667,14 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         config,
         min_vaf=min_vaf,
         min_depth=min_depth,
-        mode="full" if use_vcf else "variants",
+        mode="variants",
         vcf_path=effective_vcf,
         vcf_primary=vcf_primary,
     )
 
-    detected = data.variants
-    reads_truncated = False
-    if use_vcf:
-        # The read loop stops after config.max_reads, so on a broad/high-depth
-        # interval reads only cover a left prefix of the region. Attaching evidence
-        # to a VCF site the reads don't reach would report a misleading 0F/0R. Only
-        # enhance sites within the covered span; flag truncation for the rest.
-        reads = data.reads
-        reads_truncated = len(reads) >= config.max_reads
-        covered_end = max((r.end_position for r in reads), default=data.start)
-        eligible = [v for v in detected if not reads_truncated or v["position"] < covered_end]
-        # Attach BAMCP read-level evidence (strand, quality, artifact risk) so a
-        # caller's VCF variant is reviewable against the actual reads.
-        enhanced, _ = enhance_variants_with_evidence(
-            eligible, reads, data.reference_sequence, data.start
-        )
-        enhanced_iter = iter(enhanced)
-        detected = [
-            next(enhanced_iter) if (not reads_truncated or v["position"] < covered_end) else v
-            for v in detected
-        ]
-
     variants = [
         _one_based(v)
-        for v in detected
+        for v in data.variants
         if v.get("source") == "vcf" or (v["vaf"] >= min_vaf and v["depth"] >= min_depth)
     ]
 
@@ -670,10 +686,6 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         "variant_type": "candidate",
         "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
     }
-    if reads_truncated:
-        # Read-level evidence is complete only for sites within the first
-        # config.max_reads reads; narrow the region for evidence past that.
-        payload["reads_truncated"] = True
 
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 

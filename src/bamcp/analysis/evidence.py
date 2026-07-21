@@ -192,30 +192,6 @@ def compute_variant_evidence(
     return _aggregate_read_evidence(supporting)
 
 
-def compute_snv_evidence_from_reads(variant: dict, reads: list[AlignedRead]) -> dict:
-    """Compute read-level support for an SNV directly from read bases.
-
-    Reference-independent: it compares each spanning read's own base to the
-    variant's alt allele, so a VCF SNV gets real read-level evidence even when no
-    reference sequence was loaded — unlike the mismatch-index path, which is empty
-    without a reference (mismatches are only recorded relative to a reference).
-    """
-    pos = variant["position"]
-    alt = variant["alt"].upper()
-    supporting: list[tuple[AlignedRead, int | None]] = []
-
-    for read in reads:
-        if not (read.position <= pos < read.end_position):
-            continue
-        qpos = get_query_position(read, pos)
-        if qpos is None or qpos >= len(read.sequence):
-            continue
-        if read.sequence[qpos].upper() == alt:
-            supporting.append((read, qpos))
-
-    return _aggregate_read_evidence(supporting)
-
-
 def compute_artifact_risk(
     variant: dict,
     evidence: dict,
@@ -387,30 +363,28 @@ def enhance_variants_with_evidence(
     reference_sequence: str | None,
     region_start: int,
 ) -> tuple[list[dict], dict]:
-    """Attach BAMCP read-level evidence to each variant.
+    """Attach BAMCP read-level evidence to BAMCP-candidate variants.
 
-    For every variant, computes strand/quality/position evidence from the reads
-    (via a mismatch index), an artifact-risk assessment, and a confidence level,
-    returning the enhanced variants plus a keyed evidence map for the viewer.
+    For each BAMCP candidate, computes strand/quality/position evidence from the
+    reads (via a mismatch index), an artifact-risk assessment, and a confidence
+    level, returning the enhanced variants plus a keyed evidence map for the viewer.
 
-    Source-agnostic: works for BAMCP candidates and VCF-overlay variants alike, so
-    a caller's VCF variant gets BAMCP's read-level support at that site. Indels/SVs
-    that don't match a single-base read mismatch get zeroed read-level evidence,
-    which honestly reflects that BAMCP can't corroborate them from mismatches.
+    VCF-sourced variants are passed through unchanged: their read-level support is
+    attached upstream by :func:`bamcp.core.parsers.annotate_vcf_snv_support`, which
+    uses count_coverage over all reads at each site and so isn't limited by the
+    ``max_reads`` read cap that bounds ``reads`` here.
     """
     mismatch_index = build_mismatch_index(reads)
     variant_evidence: dict = {}
     enhanced_variants: list[dict] = []
 
     for variant in variants:
+        if variant.get("source") == "vcf":
+            enhanced_variants.append(dict(variant))
+            continue
+
         key = f"{variant['position']}:{variant['ref']}>{variant['alt']}"
-        # VCF SNVs are scored from read bases (reference-independent) so their
-        # read-level support is correct even without a loaded reference; BAMCP's
-        # own candidates are defined by mismatches, so use the fast index for them.
-        if variant.get("source") == "vcf" and len(variant["ref"]) == 1 == len(variant["alt"]):
-            evidence = compute_snv_evidence_from_reads(variant, reads)
-        else:
-            evidence = compute_variant_evidence(mismatch_index, variant)
+        evidence = compute_variant_evidence(mismatch_index, variant)
         artifact_risk = compute_artifact_risk(variant, evidence, reference_sequence, region_start)
         evidence["artifact_risk"] = artifact_risk
         variant_evidence[key] = evidence

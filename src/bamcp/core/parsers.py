@@ -312,6 +312,65 @@ def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
     return variants
 
 
+_BASE_INDEX = {"A": 0, "C": 1, "G": 2, "T": 3}
+
+
+def annotate_vcf_snv_support(
+    bam_path: str,
+    region: str,
+    reference_path: str | None,
+    variants: list[dict],
+    min_mapq: int = 0,
+    min_baseq: int = 0,
+    index_filename: str | None = None,
+) -> list[dict]:
+    """Attach truncation-free read-level support to VCF SNV variants (in place).
+
+    For each VCF single-nucleotide variant, counts forward/reverse reads carrying
+    the alt allele at that site using ``pysam.count_coverage`` — htslib counts every
+    read at each position, so this is immune to the ``max_reads`` cap that limits the
+    serialized read list (and to which alignments happen to be retained). Adds
+    ``strand_forward``/``strand_reverse``/``read_depth``/``read_support_vaf``. Indels
+    and SVs are left unchanged (single-base counts can't corroborate them).
+    """
+    snvs = [v for v in variants if v.get("source") == "vcf" and len(v["ref"]) == 1 == len(v["alt"])]
+    if not snvs:
+        return variants
+
+    contig, start, end = parse_region(region)
+    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
+        fwd = samfile.count_coverage(
+            contig,
+            start,
+            end,
+            quality_threshold=min_baseq,
+            read_callback=lambda r: read_passes_filters(r, min_mapq) and not r.is_reverse,
+        )
+        rev = samfile.count_coverage(
+            contig,
+            start,
+            end,
+            quality_threshold=min_baseq,
+            read_callback=lambda r: read_passes_filters(r, min_mapq) and r.is_reverse,
+        )
+
+    length = end - start
+    for v in snvs:
+        i = v["position"] - start
+        base = _BASE_INDEX.get(v["alt"].upper())
+        if base is None or not (0 <= i < length):
+            continue
+        f = int(fwd[base][i])
+        r = int(rev[base][i])
+        depth = sum(int(fwd[b][i]) + int(rev[b][i]) for b in range(4))
+        v["strand_forward"] = f
+        v["strand_reverse"] = r
+        v["read_depth"] = depth
+        v["read_support_vaf"] = round((f + r) / depth, 3) if depth else 0.0
+
+    return variants
+
+
 def fetch_region(
     bam_path: str,
     region: str,

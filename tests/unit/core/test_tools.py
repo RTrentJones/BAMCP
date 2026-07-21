@@ -453,8 +453,8 @@ class TestVariantSource:
         # VCF is authoritative: every returned variant is VCF-sourced (no local mix-in).
         assert payload["variants"] and all(v["source"] == "vcf" for v in payload["variants"])
         v = next(v for v in payload["variants"] if v["position"] == 134)  # 133 -> 1-based
-        # BAMCP read-level evidence is attached, and reflects the supporting read.
-        assert "strand_forward" in v and "confidence" in v and "artifact_risk" in v
+        # BAMCP read-level support (from count_coverage) is attached and reflects read3.
+        assert "strand_forward" in v and "read_depth" in v and "read_support_vaf" in v
         assert v["strand_forward"] + v["strand_reverse"] >= 1
 
     @pytest.mark.unit
@@ -520,10 +520,10 @@ class TestVariantSource:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_vcf_evidence_skips_uncovered_sites_when_reads_truncated(
+    async def test_vcf_support_is_unaffected_by_max_reads(
         self, small_bam_path, ref_fasta_path, tmp_path, monkeypatch
     ):
-        """When reads hit max_reads, VCF sites past the covered span aren't mis-scored."""
+        """VCF support comes from count_coverage (all reads), so max_reads can't blank it."""
         from bamcp.core import tools as tools_module
 
         def fake_load(vcf_path, region):
@@ -539,23 +539,12 @@ class TestVariantSource:
                     "alt_count": 5,
                     "source": "vcf",
                 },
-                {
-                    "contig": "chr1",
-                    "position": 300,
-                    "ref": "A",
-                    "alt": "C",
-                    "variant_kind": "snv",
-                    "vaf": 0.5,
-                    "depth": 10,
-                    "alt_count": 5,
-                    "source": "vcf",
-                },
             ]
 
         monkeypatch.setattr(tools_module, "load_vcf_variants", fake_load)
-        # max_reads=4 materializes only the leftmost reads (ends <= ~180), so the
-        # VCF site at 300 is beyond the covered span.
-        cfg = BAMCPConfig(reference=ref_fasta_path, max_reads=4)
+        # A tiny read cap would truncate a serialized read list, but count_coverage
+        # still tallies read3's G at 133 regardless of the cap.
+        cfg = BAMCPConfig(reference=ref_fasta_path, max_reads=1)
         result = await handle_get_variants(
             {
                 "file_path": small_bam_path,
@@ -566,10 +555,9 @@ class TestVariantSource:
             cfg,
         )
         payload = json.loads(result["content"][0]["text"])
-        assert payload["reads_truncated"] is True
-        by_pos = {v["position"]: v for v in payload["variants"]}
-        assert "strand_forward" in by_pos[134]  # covered -> evidence attached
-        assert "strand_forward" not in by_pos[301]  # beyond covered span -> not scored
+        assert "reads_truncated" not in payload  # no longer a read-list concern
+        v = next(v for v in payload["variants"] if v["position"] == 134)
+        assert v["strand_forward"] + v["strand_reverse"] >= 1
 
 
 class TestHandleGetCoverage:
@@ -1690,6 +1678,8 @@ class TestMediumRoadmapCoverage:
         monkeypatch.setattr(tools_module, "_ensure_cached_index", mock_ensure_cached_index)
         monkeypatch.setattr(tools_module, "fetch_region", mock_fetch_region)
         monkeypatch.setattr(tools_module, "load_vcf_variants", mock_load_vcf_variants)
+        # Overlay/dedup is what's under test; skip the BAM-touching support scoring.
+        monkeypatch.setattr(tools_module, "annotate_vcf_snv_support", lambda *a, **k: None)
 
         data = await tools_module._fetch_region_with_timeout(
             "sample.bam", "chr1:10-20", None, config, vcf_path=str(vcf_path)

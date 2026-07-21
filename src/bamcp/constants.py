@@ -31,6 +31,10 @@ DEFAULT_CONTIG = "chr1"
 # SNV/coverage detection (C-backed count_coverage) still runs at any size.
 INDEL_DETECTION_MAX_REGION = 100_000
 
+# Readless coverage/variant queries are computed and cached per fixed-width genomic
+# tile so panning the viewport reuses work instead of recomputing each region.
+REGION_TILE_SIZE = 4_096
+
 # Auth and integrations
 DEFAULT_TOKEN_EXPIRY_SECONDS = 3_600
 DEFAULT_GNOMAD_DATASET = "gnomad_r4"

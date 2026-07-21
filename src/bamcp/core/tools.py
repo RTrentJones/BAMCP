@@ -22,6 +22,7 @@ from ..constants import (
     BAM_PARSE_TIMEOUT_SECONDS,
     DEFAULT_CACHE_TTL_SECONDS,
     DEFAULT_CONTIG,
+    REGION_TILE_SIZE,
     SCAN_VARIANTS_CHUNK_SIZE,
     SCAN_VARIANTS_MAX_REGION,
     SCAN_VARIANTS_TIMEOUT_SECONDS,
@@ -30,6 +31,7 @@ from ..constants import (
 from ..middleware.telemetry import telemetry_wrapper
 from .cache import BAMIndexCache
 from .parsers import (
+    MAX_REGION_SIZE,
     RegionData,
     fetch_candidate_variants_only,
     fetch_coverage_only,
@@ -323,6 +325,138 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
     return None
 
 
+def _tile_bounds(start: int, end: int, tile: int) -> tuple[int, int]:
+    """Snap [start, end) outward to fixed-width tile boundaries."""
+    t_start = (start // tile) * tile
+    t_end = ((end - 1) // tile + 1) * tile
+    return t_start, t_end
+
+
+def _slice_readless_region_data(data: RegionData, start: int, end: int) -> RegionData:
+    """Slice a readless (coverage/variants) tile RegionData down to [start, end).
+
+    Coverage and reference are per-position arrays sliced by offset; variants are
+    position-anchored so they filter by position. Reads are always empty in the
+    readless modes this serves.
+    """
+    offset = start - data.start
+    length = end - start
+    coverage = data.coverage[offset : offset + length] if data.coverage else []
+    reference = (
+        data.reference_sequence[offset : offset + length]
+        if data.reference_sequence is not None
+        else None
+    )
+    variants = [v for v in data.variants if start <= v["position"] < end]
+    return RegionData(
+        contig=data.contig,
+        start=start,
+        end=end,
+        reads=[],
+        coverage=coverage,
+        variants=variants,
+        reference_sequence=reference,
+    )
+
+
+async def _compute_region_data(
+    file_path: str,
+    region: str,
+    reference: str | None,
+    config: BAMCPConfig,
+    mode: str,
+    min_vaf: float | None,
+    min_depth: int | None,
+    index_path: str | None,
+) -> RegionData:
+    """Run the mode-appropriate parser for an exact region under the parse timeout."""
+    effective_min_vaf = min_vaf if min_vaf is not None else config.min_vaf
+    effective_min_depth = min_depth if min_depth is not None else config.min_depth
+
+    if mode == "coverage":
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                fetch_coverage_only,
+                file_path,
+                region,
+                reference,
+                config.min_mapq,
+                config.min_baseq,
+                index_path,
+            ),
+            timeout=BAM_PARSE_TIMEOUT_SECONDS,
+        )
+    if mode == "variants" and reference:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                fetch_candidate_variants_only,
+                file_path,
+                region,
+                reference,
+                config.min_mapq,
+                config.min_baseq,
+                index_path,
+                effective_min_vaf,
+                effective_min_depth,
+            ),
+            timeout=BAM_PARSE_TIMEOUT_SECONDS,
+        )
+    return await asyncio.wait_for(
+        asyncio.to_thread(
+            fetch_region,
+            file_path,
+            region,
+            reference,
+            config.max_reads,
+            config.min_mapq,
+            config.min_baseq,
+            index_path,
+            effective_min_vaf,
+            effective_min_depth,
+        ),
+        timeout=BAM_PARSE_TIMEOUT_SECONDS,
+    )
+
+
+async def _fetch_readless_tiled(
+    file_path: str,
+    region: str,
+    reference: str | None,
+    config: BAMCPConfig,
+    mode: str,
+    min_vaf: float | None,
+    min_depth: int | None,
+    region_cache: dict[tuple, tuple[float, RegionData]],
+    ttl: int,
+) -> RegionData:
+    """Serve a readless (coverage/variants) query from a per-tile cache.
+
+    The heavy parse runs once per fixed-width tile and is sliced down to the
+    requested region, so panning the viewport within a tile reuses cached work.
+    Reads can't tile this way — max_reads truncation over a wider tile could drop
+    reads from the requested sub-region — so this path is coverage/variants only.
+    """
+    contig, r_start, r_end = parse_region(region)
+    t_start, t_end = _tile_bounds(r_start, r_end, REGION_TILE_SIZE)
+    # Never let the widened tile exceed the parser's max region size.
+    if (t_end - t_start) > MAX_REGION_SIZE:
+        t_start, t_end = r_start, r_end
+    tile_region = f"{contig}:{t_start}-{t_end}"
+
+    tile_key = _cache_key(file_path, tile_region, reference, config, mode, min_vaf, min_depth, None)
+    tile_data = _get_cached_region(region_cache, tile_key, ttl)
+    if tile_data is None:
+        index_path = await _ensure_cached_index(file_path, config)
+        tile_data = await _compute_region_data(
+            file_path, tile_region, reference, config, mode, min_vaf, min_depth, index_path
+        )
+        _set_cached_region(region_cache, tile_key, tile_data, ttl)
+
+    if t_start == r_start and t_end == r_end:
+        return tile_data
+    return _slice_readless_region_data(tile_data, r_start, r_end)
+
+
 async def _fetch_region_with_timeout(
     file_path: str,
     region: str,
@@ -350,14 +484,22 @@ async def _fetch_region_with_timeout(
         asyncio.TimeoutError: If BAM parsing exceeds timeout.
     """
     region_cache = get_services(config).region_cache
-    key = _cache_key(file_path, region, reference, config, mode, min_vaf, min_depth, vcf_path)
-    if cached := _get_cached_region(
-        region_cache, key, min(config.cache_ttl, DEFAULT_CACHE_TTL_SECONDS)
-    ):
-        return cached
+    ttl = min(config.cache_ttl, DEFAULT_CACHE_TTL_SECONDS)
 
     if vcf_path is not None:
         validate_variant_file_path(vcf_path, config)
+
+    # Readless coverage/variant queries (no reads, no VCF overlay) are tile-cached
+    # so overlapping viewports reuse work. variants mode needs a reference for the
+    # candidate-detection fast path; without one it falls through to the read parser.
+    if mode in ("coverage", "variants") and vcf_path is None and (mode != "variants" or reference):
+        return await _fetch_readless_tiled(
+            file_path, region, reference, config, mode, min_vaf, min_depth, region_cache, ttl
+        )
+
+    key = _cache_key(file_path, region, reference, config, mode, min_vaf, min_depth, vcf_path)
+    if cached := _get_cached_region(region_cache, key, ttl):
+        return cached
 
     if mode == "variants" and vcf_path and not reference:
         contig, start, end = parse_region(region)
@@ -376,58 +518,14 @@ async def _fetch_region_with_timeout(
                 coverage=[],
                 variants=vcf_variants,
             ),
-            min(config.cache_ttl, DEFAULT_CACHE_TTL_SECONDS),
+            ttl,
         )
 
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
-    effective_min_vaf = min_vaf if min_vaf is not None else config.min_vaf
-    effective_min_depth = min_depth if min_depth is not None else config.min_depth
-
-    if mode == "coverage":
-        data = await asyncio.wait_for(
-            asyncio.to_thread(
-                fetch_coverage_only,
-                file_path,
-                region,
-                reference,
-                config.min_mapq,
-                config.min_baseq,
-                index_path,
-            ),
-            timeout=BAM_PARSE_TIMEOUT_SECONDS,
-        )
-    elif mode == "variants" and reference:
-        data = await asyncio.wait_for(
-            asyncio.to_thread(
-                fetch_candidate_variants_only,
-                file_path,
-                region,
-                reference,
-                config.min_mapq,
-                config.min_baseq,
-                index_path,
-                effective_min_vaf,
-                effective_min_depth,
-            ),
-            timeout=BAM_PARSE_TIMEOUT_SECONDS,
-        )
-    else:
-        data = await asyncio.wait_for(
-            asyncio.to_thread(
-                fetch_region,
-                file_path,
-                region,
-                reference,
-                config.max_reads,
-                config.min_mapq,
-                config.min_baseq,
-                index_path,
-                effective_min_vaf,
-                effective_min_depth,
-            ),
-            timeout=BAM_PARSE_TIMEOUT_SECONDS,
-        )
+    data = await _compute_region_data(
+        file_path, region, reference, config, mode, min_vaf, min_depth, index_path
+    )
 
     if vcf_path:
         vcf_variants = await asyncio.wait_for(
@@ -439,9 +537,7 @@ async def _fetch_region_with_timeout(
             v for v in vcf_variants if (v["position"], v["ref"], v["alt"]) not in seen
         )
 
-    return _set_cached_region(
-        region_cache, key, data, min(config.cache_ttl, DEFAULT_CACHE_TTL_SECONDS)
-    )
+    return _set_cached_region(region_cache, key, data, ttl)
 
 
 # -- Tool Handlers -----------------------------------------------------------

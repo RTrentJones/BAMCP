@@ -1214,7 +1214,9 @@ class TestMediumRoadmapCoverage:
             "sample.bam", "chr1:10-20", None, cfg, mode="coverage"
         )
 
-        assert first is second
+        # Readless queries are tile-cached and sliced per call, so the objects
+        # differ but the underlying tile is computed only once.
+        assert first.coverage == second.coverage
         assert call_count == 1
 
     @pytest.mark.unit
@@ -1264,6 +1266,89 @@ class TestMediumRoadmapCoverage:
 
         assert coverage.reads == []
         assert len(full.reads) == 1
+
+    @pytest.mark.unit
+    def test_tile_bounds_snap_outward(self):
+        from bamcp.core.tools import _tile_bounds
+
+        assert _tile_bounds(100, 200, 4096) == (0, 4096)
+        assert _tile_bounds(0, 4096, 4096) == (0, 4096)
+        assert _tile_bounds(4096, 4100, 4096) == (4096, 8192)
+        assert _tile_bounds(4095, 4097, 4096) == (0, 8192)
+
+    @pytest.mark.unit
+    def test_slice_readless_region_data(self):
+        from bamcp.core.tools import _slice_readless_region_data
+
+        data = RegionData(
+            "chr1",
+            0,
+            10,
+            reads=[],
+            coverage=list(range(10)),
+            variants=[
+                {"position": 2, "ref": "A", "alt": "T"},
+                {"position": 7, "ref": "C", "alt": "G"},
+                {"position": 9, "ref": "A", "alt": "C"},
+            ],
+            reference_sequence="ACGTACGTAC",
+        )
+        sliced = _slice_readless_region_data(data, 2, 8)
+        assert (sliced.start, sliced.end) == (2, 8)
+        assert sliced.coverage == [2, 3, 4, 5, 6, 7]
+        assert sliced.reference_sequence == "GTACGT"  # ref[2:8]
+        assert [v["position"] for v in sliced.variants] == [2, 7]  # 2 <= pos < 8
+        assert sliced.reads == []
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_readless_tile_reused_across_overlapping_regions(self, monkeypatch):
+        """Two sub-regions in the same tile compute once and slice correctly."""
+        from bamcp.core import tools as tools_module
+
+        call_count = 0
+
+        async def mock_ensure_cached_index(file_path, cfg):
+            return None
+
+        def mock_fetch_coverage_only(*args):
+            nonlocal call_count
+            call_count += 1
+            # Tile region is chr1:0-4096 -> coverage indexed by absolute position.
+            return RegionData("chr1", 0, 4096, reads=[], coverage=list(range(4096)), variants=[])
+
+        monkeypatch.setattr(tools_module, "_ensure_cached_index", mock_ensure_cached_index)
+        monkeypatch.setattr(tools_module, "fetch_coverage_only", mock_fetch_coverage_only)
+
+        cfg = BAMCPConfig(cache_ttl=60)
+        a = await tools_module._fetch_region_with_timeout(
+            "sample.bam", "chr1:100-200", None, cfg, mode="coverage"
+        )
+        b = await tools_module._fetch_region_with_timeout(
+            "sample.bam", "chr1:300-400", None, cfg, mode="coverage"
+        )
+
+        assert call_count == 1  # one tile served both sub-regions
+        assert (a.start, a.end) == (100, 200)
+        assert a.coverage == list(range(100, 200))
+        assert b.coverage == list(range(300, 400))
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_tiled_coverage_matches_direct_fetch(self, small_bam_path, config):
+        """Tiled+sliced coverage must equal a direct exact fetch of the same region."""
+        from bamcp.core.parsers import fetch_coverage_only
+        from bamcp.core.tools import _fetch_region_with_timeout
+
+        region = "chr1:100-160"
+        tiled = await _fetch_region_with_timeout(
+            small_bam_path, region, None, config, mode="coverage"
+        )
+        direct = fetch_coverage_only(
+            small_bam_path, region, None, config.min_mapq, config.min_baseq, None
+        )
+        assert (tiled.start, tiled.end) == (100, 160)
+        assert tiled.coverage == direct.coverage
 
     @pytest.mark.unit
     @pytest.mark.asyncio

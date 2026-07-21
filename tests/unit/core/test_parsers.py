@@ -4,9 +4,11 @@ import pysam
 import pytest
 
 from bamcp.core.parsers import (
+    PILEUP_MAX_DEPTH,
     AlignedRead,
     RegionData,
     SoftClip,
+    annotate_vcf_snv_support,
     detect_indels,
     detect_variants,
     extract_soft_clips,
@@ -822,3 +824,92 @@ class TestScanVariantsChunked:
             small_bam_path, "chr1", ref_fasta_path, min_depth=10
         )
         assert len(strict_variants) <= len(all_variants)
+
+
+class TestAnnotateVcfSnvSupport:
+    """Read-level support counting for VCF SNVs via per-site pileup."""
+
+    @staticmethod
+    def _bam_with_alt(path, *, alt_qual: str, ref_start: int = 100) -> str:
+        """Two reads (fwd+rev) carrying alt 'T' at ``ref_start``; the reverse read's
+        alt base gets ``alt_qual`` (phred char), the forward read's stays high (Q40)."""
+        bam_path = str(path / "vcf_support.bam")
+        header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": "chr1", "LN": 1000}]}
+        with pysam.AlignmentFile(bam_path, "wb", header=header) as outf:
+            for name, flag, q0 in (("hi", 0, "I"), ("lo", 16, alt_qual)):
+                a = pysam.AlignedSegment()
+                a.query_name = name
+                a.query_sequence = "TACGTACGTA"  # 'T' at offset 0
+                a.flag = flag
+                a.reference_id = 0
+                a.reference_start = ref_start
+                a.mapping_quality = 60
+                a.cigartuples = [(0, 10)]  # 10M
+                a.query_qualities = pysam.qualitystring_to_array(q0 + "I" * 9)
+                outf.write(a)
+        pysam.index(bam_path)
+        return bam_path
+
+    def _snv(self, position: int = 100) -> list[dict]:
+        return [
+            {
+                "contig": "chr1",
+                "position": position,
+                "ref": "A",
+                "alt": "T",
+                "source": "vcf",
+            }
+        ]
+
+    @pytest.mark.unit
+    def test_min_baseq_excludes_low_quality_support(self, tmp_path):
+        """A base below min_baseq is dropped from both depth and alt support."""
+        bam = self._bam_with_alt(tmp_path, alt_qual="#")  # '#' == Q2
+
+        # min_baseq=0: both reads count.
+        v = self._snv()[0]
+        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=0)
+        assert v["read_depth"] == 2
+        assert v["strand_forward"] == 1 and v["strand_reverse"] == 1
+
+        # min_baseq=30: the Q2 reverse-strand base is excluded from depth AND support,
+        # matching count_coverage(quality_threshold=min_baseq) used elsewhere.
+        v = self._snv()[0]
+        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=30)
+        assert v["read_depth"] == 1
+        assert v["strand_forward"] == 1 and v["strand_reverse"] == 0
+        assert v["_alt_qualities"] == [40]  # only the surviving high-quality base
+
+    @pytest.mark.unit
+    def test_pileup_uses_unbounded_max_depth(self, tmp_path, monkeypatch):
+        """The support pileup lifts pysam's 8000 default so deep sites aren't truncated."""
+        from bamcp.core import parsers as parsers_mod
+
+        bam = self._bam_with_alt(tmp_path, alt_qual="I")
+        captured: dict = {}
+        real_open = parsers_mod._open_alignment
+
+        class _Spy:
+            """Wraps the real AlignmentFile, recording pileup kwargs (pysam's type
+            is immutable, so we can't patch its method directly)."""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __enter__(self):
+                self._inner.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+            def pileup(self, *args, **kwargs):
+                captured.update(kwargs)
+                return self._inner.pileup(*args, **kwargs)
+
+        monkeypatch.setattr(
+            parsers_mod, "_open_alignment", lambda *a, **k: _Spy(real_open(*a, **k))
+        )
+        annotate_vcf_snv_support(bam, "chr1:90-110", None, self._snv())
+        assert captured.get("max_depth") == PILEUP_MAX_DEPTH
+        assert PILEUP_MAX_DEPTH >= 1_000_000_000

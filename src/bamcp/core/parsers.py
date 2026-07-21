@@ -57,6 +57,12 @@ class RegionData:
 # Maximum region size to prevent DoS via unbounded memory allocation
 MAX_REGION_SIZE = 1_000_000  # 1 Mbp
 
+# pysam.pileup defaults to max_depth=8000, which silently truncates high-depth
+# (amplicon/targeted) sites. The count_coverage path this replaces was uncapped, so
+# lift the ceiling to effectively unbounded for the VCF-support pileup — a genomic
+# region is already capped at MAX_REGION_SIZE, and htslib allocates per-column lazily.
+PILEUP_MAX_DEPTH = 1_000_000_000
+
 # CIGAR operation codes
 CIGAR_SOFT_CLIP = 4  # S operation
 
@@ -350,8 +356,17 @@ def annotate_vcf_snv_support(
         by_pos.setdefault(v["position"], []).append(v)
 
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
+        # stepper="nofilter" leaves us to apply the base-quality threshold ourselves
+        # (below), so pileup's own min_base_quality is a no-op here; max_depth is lifted
+        # off pysam's 8000 default so high-depth sites aren't silently truncated.
         for column in samfile.pileup(
-            contig, start, end, truncate=True, min_base_quality=min_baseq, stepper="nofilter"
+            contig,
+            start,
+            end,
+            truncate=True,
+            min_base_quality=0,
+            stepper="nofilter",
+            max_depth=PILEUP_MAX_DEPTH,
         ):
             targets = by_pos.get(column.reference_pos)
             if not targets:
@@ -371,6 +386,17 @@ def annotate_vcf_snv_support(
                 seq = aln.query_sequence
                 if qpos is None or seq is None:
                     continue
+                quals = aln.query_qualities
+                # Honor min_baseq for both depth and support so VCF-primary VAF/confidence
+                # agrees with count_coverage(quality_threshold=min_baseq) used elsewhere.
+                # A read with no stored qualities (QUAL "*") passes, matching htslib.
+                if (
+                    min_baseq
+                    and quals is not None
+                    and qpos < len(quals)
+                    and quals[qpos] < min_baseq
+                ):
+                    continue
                 depth += 1
                 support = acc.get(seq[qpos].upper())
                 if support is None:
@@ -379,7 +405,6 @@ def annotate_vcf_snv_support(
                     support["rev"] += 1
                 else:
                     support["fwd"] += 1
-                quals = aln.query_qualities
                 if quals is not None and qpos < len(quals):
                     support["quals"].append(int(quals[qpos]))
                     support["positions"].append(min(qpos, len(quals) - qpos - 1))

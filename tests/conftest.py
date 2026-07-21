@@ -10,15 +10,10 @@ FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
 @pytest.fixture(autouse=True)
-def _reset_client_singletons():
-    """Reset module-level client singletons between tests."""
+def _reset_service_registry():
+    """Drop per-config services (cache + clients + region cache) between tests."""
     yield
-    _tools_module._clinvar_client = None
-    _tools_module._gnomad_client = None
-    _tools_module._gene_client = None
-    _tools_module._cache_instance = None
-    _tools_module._region_cache.clear()
-    _tools_module._index_download_locks.clear()
+    _tools_module._services_registry.clear()
 
 
 @pytest.fixture

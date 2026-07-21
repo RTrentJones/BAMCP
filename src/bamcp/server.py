@@ -311,7 +311,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         """
         cache = get_cache(config)
         removed = cache.cleanup_session()
-        await close_external_clients()
+        await close_external_clients(config)
         return f"Removed {removed} cached index files from session {cache.session_id}"
 
     # -- Resources -----------------------------------------------------------

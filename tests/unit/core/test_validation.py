@@ -118,6 +118,14 @@ class TestValidatePath:
         f.touch()
         validate_path(str(f), config)
 
+    @pytest.mark.unit
+    def test_missing_local_file_raises_file_not_found(self, tmp_path):
+        """A valid-extension local path that doesn't exist gives a clean error."""
+        config = BAMCPConfig()
+        missing = tmp_path / "absent.bam"  # never created
+        with pytest.raises(FileNotFoundError, match="File not found"):
+            validate_path(str(missing), config)
+
 
 class TestValidateVariantFilePath:
     """Tests for VCF/BCF overlay path validation."""
@@ -230,6 +238,16 @@ class TestSSRFPrevention:
             allowed_remote_hosts=["example.com"],
         )
         # Should not raise
+        validate_remote_url("https://example.com/file.bam", config)
+
+    @pytest.mark.unit
+    def test_allowed_remote_hosts_case_insensitive(self):
+        """A mixed-case allow-list entry must still permit the lower-cased host."""
+        config = BAMCPConfig(
+            allow_remote_files=True,
+            allowed_remote_hosts=["Example.COM"],
+        )
+        # Should not raise on the allow-list check (host normalized to lower-case).
         validate_remote_url("https://example.com/file.bam", config)
 
     @pytest.mark.unit

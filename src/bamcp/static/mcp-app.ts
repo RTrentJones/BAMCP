@@ -459,7 +459,9 @@ class BAMCPViewer {
     }
 
     private pan(dxPixels: number): void {
-        const width = this.readsCanvas.width;
+        // CSS-pixel width (matches the mouse delta units); readsCanvas.width is the
+        // devicePixelRatio-scaled backing store, which would slow panning on HiDPI.
+        const width = this.readsCanvas.clientWidth;
         const regionSpan = this.state.viewport.end - this.state.viewport.start;
         const scale = width / regionSpan;
         const bpDelta = dxPixels / scale;
@@ -510,7 +512,9 @@ class BAMCPViewer {
             return;
         }
 
-        const width = this.readsCanvas.width;
+        // CSS-pixel width so the base-level zoom threshold is compared on the same
+        // scale the renderer draws at, not the DPR-scaled backing store.
+        const width = this.readsCanvas.clientWidth;
         const viewportSpan = this.state.viewport.end - this.state.viewport.start;
         const scale = width / viewportSpan;
 
@@ -803,7 +807,6 @@ class BAMCPViewer {
                 this.showVariantEvidence(v);
 
                 // Jump to variant
-                const width = this.readsCanvas.width;
                 const span = 100;
                 this.state.viewport.start = v.position - span / 2;
                 this.state.viewport.end = v.position + span / 2;

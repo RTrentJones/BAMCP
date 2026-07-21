@@ -456,6 +456,8 @@ class TestVariantSource:
         # BAMCP read-level support (from count_coverage) is attached and reflects read3.
         assert "strand_forward" in v and "read_depth" in v and "read_support_vaf" in v
         assert v["strand_forward"] + v["strand_reverse"] >= 1
+        # get_variants honors the same read-level curation contract as the viewer.
+        assert v["confidence"] in ("high", "medium", "low") and "artifact_risk" in v
 
     @pytest.mark.unit
     @pytest.mark.asyncio

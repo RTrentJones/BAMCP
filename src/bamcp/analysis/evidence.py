@@ -415,6 +415,26 @@ def _vcf_evidence(
     return enhanced, evidence
 
 
+def enhance_vcf_variants(
+    variants: list[dict], reference_sequence: str | None, region_start: int
+) -> list[dict]:
+    """Attach the read-support evidence record to VCF SNVs only, leaving others as-is.
+
+    Used by ``get_variants`` (which is readless, so BAMCP candidates must stay raw
+    rather than be zero-scored from an empty read list) to give VCF-primary SNVs the
+    same ``confidence``/``artifact_risk`` contract the viewer path produces. VCF
+    indels/SVs and BAMCP candidates pass through unchanged.
+    """
+    out: list[dict] = []
+    for v in variants:
+        if v.get("source") == "vcf" and len(v["ref"]) == 1 == len(v["alt"]):
+            enhanced, _ = _vcf_evidence(v, reference_sequence, region_start)
+            out.append(enhanced)
+        else:
+            out.append(v)
+    return out
+
+
 def enhance_variants_with_evidence(
     variants: list[dict],
     reads: list[AlignedRead],

@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import pysam
 
+from ..analysis.evidence import enhance_vcf_variants
 from ..clients.clinvar import ClinVarClient
 from ..clients.genes import GeneClient
 from ..clients.gnomad import GnomadClient
@@ -670,9 +671,12 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         vcf_primary=vcf_primary,
     )
 
+    # Give VCF SNVs the same confidence/artifact contract as the viewer so callers
+    # get read-level curation outside the UI (BAMCP candidates stay raw — readless).
+    detected = enhance_vcf_variants(data.variants, data.reference_sequence, data.start)
     variants = [
         _one_based(v)
-        for v in data.variants
+        for v in detected
         if v.get("source") == "vcf" or (v["vaf"] >= min_vaf and v["depth"] >= min_depth)
     ]
 

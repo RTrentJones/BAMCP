@@ -133,6 +133,8 @@ export interface RegionData {
     reference_sequence?: string;
     variant_evidence?: Record<string, VariantEvidence>;
     file_path?: string;  // For client-side re-queries
+    vcf_path?: string;  // Preserved across refetches so VCF sourcing sticks
+    variant_source?: string;  // 'auto' | 'vcf' | 'bamcp'
 }
 
 export interface ToolResultParams {

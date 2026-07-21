@@ -18,6 +18,14 @@ export class DataStore {
     private variants = new Map<string, Variant>();
     private evidence = new Map<string, VariantEvidence>();
     private currentContig: string | null = null;
+    // Identity of the current variant sourcing (variant_source + vcf_path). Cached
+    // tiles/variants from a different source are not authoritative, so a change
+    // resets the store just like a contig change.
+    private currentSource: string | null = null;
+
+    private static sourceKey(data: RegionData): string {
+        return `${data.variant_source ?? "auto"}|${data.vcf_path ?? ""}`;
+    }
 
     static readonly MAX_TILES = 20;
     private static readonly OVERLAP_REPLACE_THRESHOLD = 0.9;
@@ -36,11 +44,18 @@ export class DataStore {
      * Clears everything if contig changes.
      */
     public ingest(data: RegionData): void {
-        // Contig change — full reset
-        if (this.currentContig !== null && data.contig !== this.currentContig) {
+        // Contig change OR variant-source change — full reset. Tiles/variants from
+        // another source (e.g. an earlier BAMCP/auto view) must not leak into a
+        // VCF-authoritative view on the same contig.
+        const source = DataStore.sourceKey(data);
+        if (
+            (this.currentContig !== null && data.contig !== this.currentContig) ||
+            (this.currentSource !== null && source !== this.currentSource)
+        ) {
             this.clear();
         }
         this.currentContig = data.contig;
+        this.currentSource = source;
 
         const key = DataStore.tileKey(data.contig, data.start, data.end);
 
@@ -132,6 +147,7 @@ export class DataStore {
         this.variants.clear();
         this.evidence.clear();
         this.currentContig = null;
+        this.currentSource = null;
     }
 
     /**

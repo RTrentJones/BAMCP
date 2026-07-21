@@ -135,55 +135,35 @@ def build_mismatch_index(
     return index
 
 
-def compute_variant_evidence(
-    index: dict[tuple[int, str], list[tuple[AlignedRead, dict]]],
-    variant: dict,
-) -> dict:
-    """Compute variant evidence using pre-built mismatch index.
+def _aggregate_read_evidence(supporting: list[tuple[AlignedRead, int | None]]) -> dict:
+    """Aggregate ``(read, query_position)`` support tuples into an evidence dict.
 
-    This is O(k) where k is the number of reads supporting the variant,
-    rather than O(n*m) when iterating all reads for each variant.
-
-    Returns evidence including histogram distributions for curation.
+    Shared by the mismatch-index path (BAMCP candidates) and the base-scan path
+    (VCF SNVs); ``query_position`` may be None when the site isn't aligned in a read.
     """
-    pos = variant["position"]
-    alt = variant["alt"]
-
-    matches = index.get((pos, alt), [])
-
     forward_count = 0
     reverse_count = 0
     qualities: list[int] = []
     positions_in_read: list[int] = []
     mapq_values: list[int] = []
 
-    for read, mm in matches:
+    for read, query_pos in supporting:
         if read.is_reverse:
             reverse_count += 1
         else:
             forward_count += 1
 
-        # Get quality at mismatch position
-        query_pos = get_query_position(read, mm["pos"])
         if query_pos is not None and query_pos < len(read.qualities):
             qualities.append(read.qualities[query_pos])
-
-            # Compute position relative to nearest read end
+            # Position relative to the nearest read end.
             read_length = len(read.qualities)
-            dist_from_end = min(query_pos, read_length - query_pos - 1)
-            positions_in_read.append(dist_from_end)
+            positions_in_read.append(min(query_pos, read_length - query_pos - 1))
 
-        # Collect MAPQ for all reads
         mapq_values.append(read.mapping_quality)
 
     # Strand bias: 0 = balanced, 1 = all one strand
     total = forward_count + reverse_count
     strand_bias = abs(forward_count - reverse_count) / max(total, 1)
-
-    # Compute histogram distributions
-    quality_histogram = bin_values(qualities, QUALITY_HISTOGRAM_BINS)
-    position_histogram = bin_values(positions_in_read, POSITION_HISTOGRAM_BINS)
-    mapq_histogram = bin_values(mapq_values, MAPQ_HISTOGRAM_BINS)
 
     return {
         "forward_count": forward_count,
@@ -191,10 +171,25 @@ def compute_variant_evidence(
         "strand_bias": round(strand_bias, 3),
         "mean_quality": round(sum(qualities) / len(qualities), 1) if qualities else 0,
         "median_quality": sorted(qualities)[len(qualities) // 2] if qualities else 0,
-        "quality_histogram": quality_histogram,
-        "position_histogram": position_histogram,
-        "mapq_histogram": mapq_histogram,
+        "quality_histogram": bin_values(qualities, QUALITY_HISTOGRAM_BINS),
+        "position_histogram": bin_values(positions_in_read, POSITION_HISTOGRAM_BINS),
+        "mapq_histogram": bin_values(mapq_values, MAPQ_HISTOGRAM_BINS),
     }
+
+
+def compute_variant_evidence(
+    index: dict[tuple[int, str], list[tuple[AlignedRead, dict]]],
+    variant: dict,
+) -> dict:
+    """Compute variant evidence using a pre-built mismatch index.
+
+    This is O(k) where k is the number of reads supporting the variant, rather
+    than O(n*m) when iterating all reads for each variant. Returns evidence
+    including histogram distributions for curation.
+    """
+    matches = index.get((variant["position"], variant["alt"]), [])
+    supporting = [(read, get_query_position(read, mm["pos"])) for read, mm in matches]
+    return _aggregate_read_evidence(supporting)
 
 
 def compute_artifact_risk(
@@ -360,3 +355,140 @@ def compute_confidence(
         confidence = "medium"
 
     return confidence
+
+
+def _vcf_evidence(
+    variant: dict, reference_sequence: str | None, region_start: int
+) -> tuple[dict, dict]:
+    """Build an evidence record for a VCF variant from its count_coverage support.
+
+    :func:`bamcp.core.parsers.annotate_vcf_snv_support` attaches
+    ``strand_forward``/``strand_reverse``/``read_depth``/``read_support_vaf``. Turn
+    those into the same evidence shape as BAMCP candidates so the viewer has a
+    confidence and evidence entry to render and filter on. count_coverage carries no
+    per-base quality, so quality/position/mapq histograms are empty and confidence
+    is derived from read support (depth/VAF/strand balance) rather than quality.
+    """
+    fwd = int(variant.get("strand_forward", 0))
+    rev = int(variant.get("strand_reverse", 0))
+    depth = int(variant.get("read_depth", 0))
+    vaf = float(variant.get("read_support_vaf", 0.0))
+    strand_bias = round(abs(fwd - rev) / max(fwd + rev, 1), 3)
+
+    evidence = {
+        "forward_count": fwd,
+        "reverse_count": rev,
+        "strand_bias": strand_bias,
+        "mean_quality": 0,  # count_coverage does not measure per-base quality
+        "median_quality": 0,
+        "quality_histogram": [],
+        "position_histogram": [],
+        "mapq_histogram": [],
+    }
+    # Only depth/homopolymer/strand-bias risks apply; the empty histograms make the
+    # quality/position/mapq risks skip cleanly.
+    artifact_risk = compute_artifact_risk(
+        {**variant, "depth": depth}, evidence, reference_sequence, region_start
+    )
+    evidence["artifact_risk"] = artifact_risk
+
+    if vaf >= 0.2 and depth >= 20 and strand_bias <= 0.7:
+        confidence = "high"
+    elif (
+        vaf >= LOW_CONFIDENCE_MIN_VAF
+        and depth >= LOW_CONFIDENCE_MIN_DEPTH
+        and strand_bias <= LOW_CONFIDENCE_MAX_STRAND_BIAS
+    ):
+        confidence = "medium"
+    else:
+        confidence = "low"
+    if artifact_risk["artifact_likelihood"] == "high":
+        confidence = "low"
+    elif artifact_risk["artifact_likelihood"] == "medium" and confidence == "high":
+        confidence = "medium"
+
+    enhanced = dict(variant)
+    enhanced["strand_bias"] = strand_bias
+    enhanced["artifact_risk"] = artifact_risk
+    enhanced["confidence"] = confidence
+    enhanced["is_low_confidence"] = confidence == "low"
+    return enhanced, evidence
+
+
+def enhance_vcf_variants(
+    variants: list[dict], reference_sequence: str | None, region_start: int
+) -> list[dict]:
+    """Attach the read-support evidence record to VCF SNVs only, leaving others as-is.
+
+    Used by ``get_variants`` (which is readless, so BAMCP candidates must stay raw
+    rather than be zero-scored from an empty read list) to give VCF-primary SNVs the
+    same ``confidence``/``artifact_risk`` contract the viewer path produces. VCF
+    indels/SVs and BAMCP candidates pass through unchanged.
+    """
+    out: list[dict] = []
+    for v in variants:
+        if v.get("source") == "vcf" and len(v["ref"]) == 1 == len(v["alt"]):
+            enhanced, _ = _vcf_evidence(v, reference_sequence, region_start)
+            out.append(enhanced)
+        else:
+            out.append(v)
+    return out
+
+
+def enhance_variants_with_evidence(
+    variants: list[dict],
+    reads: list[AlignedRead],
+    reference_sequence: str | None,
+    region_start: int,
+) -> tuple[list[dict], dict]:
+    """Attach BAMCP read-level evidence to BAMCP-candidate variants.
+
+    For each BAMCP candidate, computes strand/quality/position evidence from the
+    reads (via a mismatch index), an artifact-risk assessment, and a confidence
+    level, returning the enhanced variants plus a keyed evidence map for the viewer.
+
+    VCF-sourced variants are passed through unchanged: their read-level support is
+    attached upstream by :func:`bamcp.core.parsers.annotate_vcf_snv_support`, which
+    uses count_coverage over all reads at each site and so isn't limited by the
+    ``max_reads`` read cap that bounds ``reads`` here.
+    """
+    mismatch_index = build_mismatch_index(reads)
+    variant_evidence: dict = {}
+    enhanced_variants: list[dict] = []
+
+    for variant in variants:
+        key = f"{variant['position']}:{variant['ref']}>{variant['alt']}"
+
+        if variant.get("source") == "vcf":
+            if len(variant["ref"]) == 1 == len(variant["alt"]):
+                # Annotated SNV: build an evidence record from the count_coverage
+                # support so the viewer has a confidence + evidence entry to filter on.
+                enhanced, evidence = _vcf_evidence(variant, reference_sequence, region_start)
+                variant_evidence[key] = evidence
+                enhanced_variants.append(enhanced)
+            else:
+                # Indel/SV: BAMCP can't count single-base support, so pass the trusted
+                # VCF record through unscored rather than zero-scoring it to low
+                # confidence (which the viewer's high-confidence filter would hide).
+                enhanced_variants.append(dict(variant))
+            continue
+
+        evidence = compute_variant_evidence(mismatch_index, variant)
+        artifact_risk = compute_artifact_risk(variant, evidence, reference_sequence, region_start)
+        evidence["artifact_risk"] = artifact_risk
+        variant_evidence[key] = evidence
+
+        enhanced = dict(variant)
+        enhanced["strand_forward"] = evidence["forward_count"]
+        enhanced["strand_reverse"] = evidence["reverse_count"]
+        enhanced["mean_quality"] = evidence["mean_quality"]
+        enhanced["artifact_risk"] = artifact_risk
+
+        confidence = compute_confidence(variant, evidence, artifact_risk)
+        enhanced["confidence"] = confidence
+        # Keep is_low_confidence for backwards compatibility
+        enhanced["is_low_confidence"] = confidence == "low"
+
+        enhanced_variants.append(enhanced)
+
+    return enhanced_variants, variant_evidence

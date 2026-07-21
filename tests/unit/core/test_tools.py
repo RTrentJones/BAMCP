@@ -361,6 +361,434 @@ class TestHandleGetVariants:
         assert "not found" not in text.lower(), text[:200]
 
 
+class TestVariantSource:
+    """Tests for VCF-as-primary variant sourcing + read-level evidence enrichment."""
+
+    @staticmethod
+    def _vcf(tmp_path) -> str:
+        p = tmp_path / "calls.vcf.gz"
+        p.touch()
+        return str(p)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_invalid_source_raises(self, small_bam_path, config):
+        with pytest.raises(ValueError, match="variant_source must be one of"):
+            await handle_get_variants(
+                {"file_path": small_bam_path, "region": "chr1:90-200", "variant_source": "bogus"},
+                config,
+            )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_vcf_source_requires_vcf_path(self, small_bam_path, config):
+        with pytest.raises(ValueError, match="requires a vcf_path"):
+            await handle_get_variants(
+                {"file_path": small_bam_path, "region": "chr1:90-200", "variant_source": "vcf"},
+                config,
+            )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_bamcp_source_ignores_vcf(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        from bamcp.core import tools as tools_module
+
+        def boom(*a):
+            raise AssertionError("load_vcf_variants must not run for variant_source='bamcp'")
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", boom)
+        result = await handle_get_variants(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:490-600",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "bamcp",
+                "min_vaf": 0.05,
+                "min_depth": 1,
+            },
+            config_with_ref,
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["variant_source"] == "bamcp"
+        assert all(v.get("source") != "vcf" for v in payload["variants"])
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_vcf_primary_authoritative_and_enriched(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        from bamcp.core import tools as tools_module
+
+        # small.bam read3 carries a T->G mismatch at ref 133; a VCF variant there
+        # should be corroborated by BAMCP's read-level evidence.
+        def fake_load(vcf_path, region):
+            return [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                }
+            ]
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", fake_load)
+        result = await handle_get_variants(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["variant_source"] == "vcf"
+        # VCF is authoritative: every returned variant is VCF-sourced (no local mix-in).
+        assert payload["variants"] and all(v["source"] == "vcf" for v in payload["variants"])
+        v = next(v for v in payload["variants"] if v["position"] == 134)  # 133 -> 1-based
+        # BAMCP read-level support (from count_coverage) is attached and reflects read3.
+        assert "strand_forward" in v and "read_depth" in v and "read_support_vaf" in v
+        assert v["strand_forward"] + v["strand_reverse"] >= 1
+        # get_variants honors the same read-level curation contract as the viewer.
+        assert v["confidence"] in ("high", "medium", "low") and "artifact_risk" in v
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_vcf_evidence_computed_without_reference(
+        self, small_bam_path, config, tmp_path, monkeypatch
+    ):
+        """VCF SNV support is scored from read bases, so it works with no reference."""
+        from bamcp.core import tools as tools_module
+
+        def fake_load(vcf_path, region):
+            return [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                }
+            ]
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", fake_load)
+        # `config` has no reference configured — the mismatch-index path would be
+        # empty here, but the base-scan path still finds read3's G at 133.
+        result = await handle_get_variants(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config,
+        )
+        payload = json.loads(result["content"][0]["text"])
+        v = next(v for v in payload["variants"] if v["position"] == 134)
+        assert v["strand_forward"] + v["strand_reverse"] >= 1
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_visualize_payload_preserves_vcf_source(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """visualize_region echoes vcf_path/variant_source so viewer refetches keep them."""
+        from bamcp.core import tools as tools_module
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", lambda vcf, region: [])
+        result = await handle_visualize_region(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,
+        )
+        payload = result["_meta"]["ui/init"]
+        assert payload["variant_source"] == "vcf"
+        assert payload["vcf_path"].endswith("calls.vcf.gz")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_viewer_vcf_variant_has_confidence_and_evidence(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """Viewer VCF variants get a confidence + evidence entry (filter/panel need them)."""
+        from bamcp.core import tools as tools_module
+
+        def fake_load(vcf_path, region):
+            return [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                }
+            ]
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", fake_load)
+        result = await handle_visualize_region(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,
+        )
+        payload = result["_meta"]["ui/init"]
+        v = next(v for v in payload["variants"] if v["position"] == 133)  # viewer is 0-based
+        assert v["confidence"] in ("high", "medium", "low")
+        assert "artifact_risk" in v
+        assert "133:T>G" in payload["variant_evidence"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_vcf_snv_uses_counted_support_when_dp_af_missing(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """A VCF SNV with no INFO DP/AF shows BAMCP's counted depth/VAF, not 0."""
+        from bamcp.core import tools as tools_module
+
+        def fake_load(vcf_path, region):
+            return [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.0,
+                    "depth": 0,
+                    "alt_count": 0,
+                    "source": "vcf",
+                }
+            ]
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", fake_load)
+        result = await handle_get_variants(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,
+        )
+        payload = json.loads(result["content"][0]["text"])
+        v = next(v for v in payload["variants"] if v["position"] == 134)
+        assert v["depth"] > 0  # counted from the BAM, not the missing VCF DP
+        assert v["depth"] == v["read_depth"]
+        # alt_count also adopts the counted support (no nonzero-VAF / 0-alt mismatch).
+        assert v["alt_count"] == v["strand_forward"] + v["strand_reverse"]
+        assert v["alt_count"] > 0
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_vcf_indel_passed_through_not_hidden(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """A trusted VCF indel isn't zero-scored to low confidence (which would hide it)."""
+        from bamcp.core import tools as tools_module
+
+        def fake_load(vcf_path, region):
+            return [
+                {
+                    "contig": "chr1",
+                    "position": 150,
+                    "ref": "A",
+                    "alt": "ATG",
+                    "variant_kind": "indel",
+                    "indel_type": "ins",
+                    "vaf": 0.4,
+                    "depth": 30,
+                    "alt_count": 12,
+                    "source": "vcf",
+                }
+            ]
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", fake_load)
+        result = await handle_visualize_region(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,
+        )
+        payload = result["_meta"]["ui/init"]
+        v = next(v for v in payload["variants"] if v["position"] == 150)
+        # Passed through unscored: no forced low-confidence flag to hide it, VCF fields intact.
+        assert v.get("is_low_confidence") is not True
+        assert (v["ref"], v["alt"], v["depth"]) == ("A", "ATG", 30)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_vcf_primary_variants_skips_local_detection(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """vcf_primary get_variants short-circuits — no BAMCP candidate detection with a ref."""
+        from bamcp.core import tools as tools_module
+
+        def boom(*a, **k):
+            raise AssertionError("vcf_primary must not run local candidate detection")
+
+        monkeypatch.setattr(tools_module, "fetch_candidate_variants_only", boom)
+        monkeypatch.setattr(
+            tools_module,
+            "load_vcf_variants",
+            lambda vcf, region: [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                }
+            ],
+        )
+        result = await handle_get_variants(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,  # has a reference — old path would have scanned candidates
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["variants"] and all(v["source"] == "vcf" for v in payload["variants"])
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_vcf_primary_visualize_skips_variant_detection(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """vcf_primary visualize fetches reads/coverage but passes detect=False to fetch_region."""
+        from bamcp.core import tools as tools_module
+
+        recorded = {}
+        real_fetch = tools_module.fetch_region
+
+        def spy_fetch_region(*args):
+            recorded["detect"] = args[-1]  # detect is the last positional arg
+            return real_fetch(*args)
+
+        monkeypatch.setattr(tools_module, "fetch_region", spy_fetch_region)
+        monkeypatch.setattr(tools_module, "load_vcf_variants", lambda vcf, region: [])
+        await handle_visualize_region(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,
+        )
+        assert recorded["detect"] is False
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_vcf_primary_shortcut_loads_reference(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """The VCF-primary variants short-circuit keeps the reference slice so downstream
+        artifact scoring (homopolymer context) matches the full/viewer path."""
+        from bamcp.core import tools as tools_module
+
+        monkeypatch.setattr(
+            tools_module,
+            "load_vcf_variants",
+            lambda vcf, region: [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                }
+            ],
+        )
+        data = await tools_module._fetch_region_with_timeout(
+            small_bam_path,
+            "chr1:90-200",
+            config_with_ref.reference,
+            config_with_ref,
+            mode="variants",
+            vcf_path=self._vcf(tmp_path),
+            vcf_primary=True,
+        )
+        assert data.reference_sequence is not None
+        assert len(data.reference_sequence) == 110  # chr1:90-200
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_vcf_support_is_unaffected_by_max_reads(
+        self, small_bam_path, ref_fasta_path, tmp_path, monkeypatch
+    ):
+        """VCF support comes from count_coverage (all reads), so max_reads can't blank it."""
+        from bamcp.core import tools as tools_module
+
+        def fake_load(vcf_path, region):
+            return [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                },
+            ]
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", fake_load)
+        # A tiny read cap would truncate a serialized read list, but count_coverage
+        # still tallies read3's G at 133 regardless of the cap.
+        cfg = BAMCPConfig(reference=ref_fasta_path, max_reads=1)
+        result = await handle_get_variants(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-400",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            cfg,
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert "reads_truncated" not in payload  # no longer a read-list concern
+        v = next(v for v in payload["variants"] if v["position"] == 134)
+        assert v["strand_forward"] + v["strand_reverse"] >= 1
+
+
 class TestHandleGetCoverage:
     """Tests for handle_get_coverage tool handler."""
 
@@ -1479,6 +1907,8 @@ class TestMediumRoadmapCoverage:
         monkeypatch.setattr(tools_module, "_ensure_cached_index", mock_ensure_cached_index)
         monkeypatch.setattr(tools_module, "fetch_region", mock_fetch_region)
         monkeypatch.setattr(tools_module, "load_vcf_variants", mock_load_vcf_variants)
+        # Overlay/dedup is what's under test; skip the BAM-touching support scoring.
+        monkeypatch.setattr(tools_module, "annotate_vcf_snv_support", lambda *a, **k: None)
 
         data = await tools_module._fetch_region_with_timeout(
             "sample.bam", "chr1:10-20", None, config, vcf_path=str(vcf_path)

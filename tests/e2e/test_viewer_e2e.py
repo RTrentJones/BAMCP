@@ -112,6 +112,43 @@ COLUMNAR_DATA = {
 }
 
 
+class TestVariantSourcePartitioning:
+    """E2E: switching variant_source on the same contig resets the tile store."""
+
+    @pytest.mark.e2e
+    def test_store_resets_on_variant_source_change(self, viewer_page: Page):
+        # An auto/BAMCP view first (SAMPLE_DATA has no variant_source -> "auto").
+        send_init_data(viewer_page, {**SAMPLE_DATA, "variant_source": "auto"})
+        # Then a VCF-authoritative view on the SAME contig with a different variant.
+        vcf_data = {
+            **SAMPLE_DATA,
+            "variant_source": "vcf",
+            "vcf_path": "/calls.vcf.gz",
+            "variants": [
+                {
+                    "contig": "chr1",
+                    "position": 175,
+                    "ref": "A",
+                    "alt": "T",
+                    "vaf": 0.9,
+                    "depth": 50,
+                    "alt_count": 45,
+                    "source": "vcf",
+                }
+            ],
+        }
+        send_init_data(viewer_page, vcf_data)
+        result = viewer_page.evaluate(
+            """() => {
+                const vs = viewer.state.store.getAllVariants();
+                return { count: vs.length, sources: vs.map(v => v.source) };
+            }"""
+        )
+        # Non-authoritative auto variants were cleared; only the VCF variant remains.
+        assert result["count"] == 1
+        assert result["sources"] == ["vcf"]
+
+
 class TestColumnarReads:
     """E2E: the viewer decodes columnar reads (parallel arrays) into read objects."""
 

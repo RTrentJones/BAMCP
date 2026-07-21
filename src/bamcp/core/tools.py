@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import pysam
 
+from ..analysis.evidence import enhance_vcf_variants
 from ..clients.clinvar import ClinVarClient
 from ..clients.genes import GeneClient
 from ..clients.gnomad import GnomadClient
@@ -34,8 +35,10 @@ from .cache import BAMIndexCache
 from .parsers import (
     MAX_REGION_SIZE,
     RegionData,
+    annotate_vcf_snv_support,
     fetch_candidate_variants_only,
     fetch_coverage_only,
+    fetch_reference_sequence,
     fetch_region,
     load_vcf_variants,
     parse_region,
@@ -176,6 +179,9 @@ _CANDIDATE_VARIANT_DISCLAIMER = (
 _INTERNAL_COORDINATE_SYSTEM = "0-based-half-open"
 _LLM_COORDINATE_SYSTEM = "1-based-inclusive"
 
+# Where get_variants sources its variants from (see handle_get_variants).
+_VARIANT_SOURCES = ("auto", "vcf", "bamcp")
+
 
 def _cache_key(
     file_path: str,
@@ -186,6 +192,7 @@ def _cache_key(
     min_vaf: float | None,
     min_depth: int | None,
     vcf_path: str | None,
+    vcf_primary: bool = False,
 ) -> tuple:
     return (
         mode,
@@ -193,6 +200,7 @@ def _cache_key(
         region,
         reference,
         vcf_path,
+        vcf_primary,
         config.max_reads,
         config.min_mapq,
         config.min_baseq,
@@ -369,8 +377,13 @@ async def _compute_region_data(
     min_vaf: float | None,
     min_depth: int | None,
     index_path: str | None,
+    detect: bool = True,
 ) -> RegionData:
-    """Run the mode-appropriate parser for an exact region under the parse timeout."""
+    """Run the mode-appropriate parser for an exact region under the parse timeout.
+
+    ``detect=False`` skips candidate detection in the full-read path (used by the
+    VCF-primary fetch, whose local candidates would be discarded anyway).
+    """
     effective_min_vaf = min_vaf if min_vaf is not None else config.min_vaf
     effective_min_depth = min_depth if min_depth is not None else config.min_depth
 
@@ -414,6 +427,7 @@ async def _compute_region_data(
             index_path,
             effective_min_vaf,
             effective_min_depth,
+            detect,
         ),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
     )
@@ -464,6 +478,35 @@ async def _fetch_readless_tiled(
     return _slice_readless_region_data(tile_data, r_start, r_end)
 
 
+def _has_vcf_snv(variants: list[dict]) -> bool:
+    """Whether any variant is a VCF single-nucleotide site (needs read-support scoring)."""
+    return any(v.get("source") == "vcf" and len(v["ref"]) == 1 == len(v["alt"]) for v in variants)
+
+
+async def _annotate_vcf_support(
+    file_path: str,
+    region: str,
+    reference: str | None,
+    variants: list[dict],
+    config: BAMCPConfig,
+    index_path: str | None,
+) -> None:
+    """Attach truncation-free read-level support to VCF SNVs (off the event loop)."""
+    await asyncio.wait_for(
+        asyncio.to_thread(
+            annotate_vcf_snv_support,
+            file_path,
+            region,
+            reference,
+            variants,
+            config.min_mapq,
+            config.min_baseq,
+            index_path,
+        ),
+        timeout=BAM_PARSE_TIMEOUT_SECONDS,
+    )
+
+
 async def _fetch_region_with_timeout(
     file_path: str,
     region: str,
@@ -473,6 +516,7 @@ async def _fetch_region_with_timeout(
     min_depth: int | None = None,
     mode: str = "full",
     vcf_path: str | None = None,
+    vcf_primary: bool = False,
 ) -> RegionData:
     """Fetch region data from BAM/CRAM file with timeout protection.
 
@@ -504,16 +548,34 @@ async def _fetch_region_with_timeout(
             file_path, region, reference, config, mode, min_vaf, min_depth, region_cache, ttl
         )
 
-    key = _cache_key(file_path, region, reference, config, mode, min_vaf, min_depth, vcf_path)
+    key = _cache_key(
+        file_path, region, reference, config, mode, min_vaf, min_depth, vcf_path, vcf_primary
+    )
     if cached := _get_cached_region(region_cache, key, ttl):
         return cached
 
-    if mode == "variants" and vcf_path and not reference:
+    # Readless VCF-only shortcut: skip local candidate detection when the VCF is
+    # authoritative (vcf_primary) or when there's no reference to detect against.
+    if mode == "variants" and vcf_path and (vcf_primary or not reference):
         contig, start, end = parse_region(region)
         vcf_variants = await asyncio.wait_for(
             asyncio.to_thread(load_vcf_variants, vcf_path, region),
             timeout=BAM_PARSE_TIMEOUT_SECONDS,
         )
+        # Only touch the BAM when there's an SNV whose support we can actually count.
+        if _has_vcf_snv(vcf_variants):
+            index_path = await _ensure_cached_index(file_path, config)
+            await _annotate_vcf_support(
+                file_path, region, reference, vcf_variants, config, index_path
+            )
+        # Keep the reference slice so downstream artifact scoring (homopolymer
+        # context) matches the full/viewer path for VCF-primary SNVs.
+        ref_seq = None
+        if reference:
+            ref_seq = await asyncio.wait_for(
+                asyncio.to_thread(fetch_reference_sequence, reference, region),
+                timeout=BAM_PARSE_TIMEOUT_SECONDS,
+            )
         return _set_cached_region(
             region_cache,
             key,
@@ -524,14 +586,24 @@ async def _fetch_region_with_timeout(
                 reads=[],
                 coverage=[],
                 variants=vcf_variants,
+                reference_sequence=ref_seq,
             ),
             ttl,
         )
 
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
+    # VCF-primary discards local candidates, so skip detecting them (full-read path).
     data = await _compute_region_data(
-        file_path, region, reference, config, mode, min_vaf, min_depth, index_path
+        file_path,
+        region,
+        reference,
+        config,
+        mode,
+        min_vaf,
+        min_depth,
+        index_path,
+        detect=not vcf_primary,
     )
 
     if vcf_path:
@@ -539,10 +611,17 @@ async def _fetch_region_with_timeout(
             asyncio.to_thread(load_vcf_variants, vcf_path, region),
             timeout=BAM_PARSE_TIMEOUT_SECONDS,
         )
-        seen = {(v["position"], v["ref"], v["alt"]) for v in data.variants}
-        data.variants.extend(
-            v for v in vcf_variants if (v["position"], v["ref"], v["alt"]) not in seen
-        )
+        if vcf_primary:
+            # VCF is the authoritative variant set — drop BAMCP's local candidates,
+            # but keep the reads/coverage so BAMCP can show evidence at each site.
+            data.variants = vcf_variants
+        else:
+            # auto: overlay VCF on the local candidates, de-duplicating exact matches.
+            seen = {(v["position"], v["ref"], v["alt"]) for v in data.variants}
+            data.variants.extend(
+                v for v in vcf_variants if (v["position"], v["ref"], v["alt"]) not in seen
+            )
+        await _annotate_vcf_support(file_path, region, reference, data.variants, config, index_path)
 
     return _set_cached_region(region_cache, key, data, ttl)
 
@@ -564,18 +643,49 @@ def _one_based(variant: dict[str, Any]) -> dict[str, Any]:
     return {**variant, "position": variant["position"] + 1}
 
 
+def _resolve_variant_source(variant_source: str, vcf_path: str | None) -> tuple[str | None, bool]:
+    """Validate ``variant_source`` and return the effective ``(vcf_path, vcf_primary)``.
+
+    - ``"auto"``: overlay a VCF (if given) on BAMCP candidates -> (vcf_path, False).
+    - ``"vcf"``: the VCF is authoritative -> (vcf_path, True); requires vcf_path.
+    - ``"bamcp"``: ignore any VCF -> (None, False).
+    """
+    if variant_source not in _VARIANT_SOURCES:
+        raise ValueError(
+            f"variant_source must be one of {_VARIANT_SOURCES}, got '{variant_source}'"
+        )
+    if variant_source == "vcf" and not vcf_path:
+        raise ValueError("variant_source='vcf' requires a vcf_path")
+    if variant_source == "bamcp":
+        return None, False
+    return vcf_path, variant_source == "vcf"
+
+
 @telemetry_wrapper("get_variants")
 async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict:
-    """Return variants without UI. Positions are 1-based (VCF/dbSNP convention)."""
+    """Return variants without UI. Positions are 1-based (VCF/dbSNP convention).
+
+    ``variant_source`` selects where variants come from:
+      - ``"auto"`` (default): BAMCP's read-level candidates, with a VCF overlaid
+        (de-duplicated) when ``vcf_path`` is given.
+      - ``"vcf"``: the caller's VCF is the authoritative variant set — BAMCP does
+        not add its own candidates but still reads the BAM to attach read-level
+        evidence at each VCF site. Requires ``vcf_path``.
+      - ``"bamcp"``: BAMCP's read-level candidates only; any ``vcf_path`` is ignored.
+    """
     file_path = args["file_path"]
     validate_path(file_path, config)
     region = args["region"]
     validate_region(region)
     reference = args.get("reference", config.reference)
-    vcf_path = args.get("vcf_path")
+    variant_source = args.get("variant_source", "auto")
+    effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
 
+    # Readless: BAMCP candidates come from count_coverage, and VCF sites get their
+    # read-level support attached by the fetch (annotate_vcf_snv_support), which
+    # counts all reads at each site and so isn't affected by the max_reads read cap.
     data = await _fetch_region_with_timeout(
         file_path,
         region,
@@ -584,31 +694,29 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         min_vaf=min_vaf,
         min_depth=min_depth,
         mode="variants",
-        vcf_path=vcf_path,
+        vcf_path=effective_vcf,
+        vcf_primary=vcf_primary,
     )
 
+    # Give VCF SNVs the same confidence/artifact contract as the viewer so callers
+    # get read-level curation outside the UI (BAMCP candidates stay raw — readless).
+    detected = enhance_vcf_variants(data.variants, data.reference_sequence, data.start)
     variants = [
         _one_based(v)
-        for v in data.variants
+        for v in detected
         if v.get("source") == "vcf" or (v["vaf"] >= min_vaf and v["depth"] >= min_depth)
     ]
 
-    return {
-        "content": [
-            {
-                "type": "text",
-                "text": json.dumps(
-                    {
-                        "variants": variants,
-                        "count": len(variants),
-                        "coordinate_system": _LLM_COORDINATE_SYSTEM,
-                        "variant_type": "candidate",
-                        "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
-                    }
-                ),
-            }
-        ]
+    payload: dict[str, Any] = {
+        "variants": variants,
+        "count": len(variants),
+        "variant_source": variant_source,
+        "coordinate_system": _LLM_COORDINATE_SYSTEM,
+        "variant_type": "candidate",
+        "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
     }
+
+    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 
 
 @telemetry_wrapper("get_coverage")
@@ -706,18 +814,25 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     contig = args.get("contig", DEFAULT_CONTIG)
     window = args.get("window", config.default_window)
     reference = args.get("reference", config.reference)
-    vcf_path = args.get("vcf_path")
+    variant_source = args.get("variant_source", "auto")
+    effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
     start = max(0, position - window // 2)
     end = position + window // 2
     region = f"{contig}:{start}-{end}"
 
-    data = await _fetch_region_with_timeout(file_path, region, reference, config, vcf_path=vcf_path)
+    data = await _fetch_region_with_timeout(
+        file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
+    )
     payload = serialize_region_data(data)
     payload["coordinate_system"] = _INTERNAL_COORDINATE_SYSTEM
     payload["variant_type"] = "candidate"
     payload["disclaimer"] = _CANDIDATE_VARIANT_DISCLAIMER
     payload["file_path"] = file_path  # For client-side re-queries
+    # Preserve the variant sourcing so the viewer's pan/zoom refetches keep it.
+    payload["variant_source"] = variant_source
+    if effective_vcf is not None:
+        payload["vcf_path"] = effective_vcf
 
     # Return summary text in content (for LLM context), full data only in _meta
     reads_count = len(data.reads)
@@ -746,14 +861,21 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     region = args["region"]
     validate_region(region)
     reference = args.get("reference", config.reference)
-    vcf_path = args.get("vcf_path")
+    variant_source = args.get("variant_source", "auto")
+    effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
-    data = await _fetch_region_with_timeout(file_path, region, reference, config, vcf_path=vcf_path)
+    data = await _fetch_region_with_timeout(
+        file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
+    )
     payload = serialize_region_data(data)
     payload["coordinate_system"] = _INTERNAL_COORDINATE_SYSTEM
     payload["variant_type"] = "candidate"
     payload["disclaimer"] = _CANDIDATE_VARIANT_DISCLAIMER
     payload["file_path"] = file_path  # For client-side re-queries
+    # Preserve the variant sourcing so the viewer's pan/zoom refetches keep it.
+    payload["variant_source"] = variant_source
+    if effective_vcf is not None:
+        payload["vcf_path"] = effective_vcf
 
     # Return summary text in content (for LLM context), full data only in _meta
     reads_count = len(data.reads)
@@ -782,9 +904,12 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     region = args["region"]
     validate_region(region)
     reference = args.get("reference", config.reference)
-    vcf_path = args.get("vcf_path")
+    variant_source = args.get("variant_source", "auto")
+    effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
-    data = await _fetch_region_with_timeout(file_path, region, reference, config, vcf_path=vcf_path)
+    data = await _fetch_region_with_timeout(
+        file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
+    )
 
     coverage = data.coverage
     mean_cov = round(sum(coverage) / len(coverage), 2) if coverage else 0

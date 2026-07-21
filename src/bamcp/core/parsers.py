@@ -179,6 +179,13 @@ def _open_alignment(
     )
 
 
+def fetch_reference_sequence(reference_path: str, region: str) -> str:
+    """Fetch the reference sequence for a region (0-based half-open)."""
+    contig, start, end = parse_region(region)
+    with pysam.FastaFile(reference_path) as fasta:
+        return fasta.fetch(contig, start, end)
+
+
 def count_coverage_arrays(
     bam_path: str,
     region: str,
@@ -312,6 +319,75 @@ def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
     return variants
 
 
+_BASE_INDEX = {"A": 0, "C": 1, "G": 2, "T": 3}
+
+
+def annotate_vcf_snv_support(
+    bam_path: str,
+    region: str,
+    reference_path: str | None,
+    variants: list[dict],
+    min_mapq: int = 0,
+    min_baseq: int = 0,
+    index_filename: str | None = None,
+) -> list[dict]:
+    """Attach truncation-free read-level support to VCF SNV variants (in place).
+
+    For each VCF single-nucleotide variant, counts forward/reverse reads carrying
+    the alt allele at that site using ``pysam.count_coverage`` — htslib counts every
+    read at each position, so this is immune to the ``max_reads`` cap that limits the
+    serialized read list (and to which alignments happen to be retained). Adds
+    ``strand_forward``/``strand_reverse``/``read_depth``/``read_support_vaf``. Indels
+    and SVs are left unchanged (single-base counts can't corroborate them).
+    """
+    snvs = [v for v in variants if v.get("source") == "vcf" and len(v["ref"]) == 1 == len(v["alt"])]
+    if not snvs:
+        return variants
+
+    contig, start, end = parse_region(region)
+    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
+        fwd = samfile.count_coverage(
+            contig,
+            start,
+            end,
+            quality_threshold=min_baseq,
+            read_callback=lambda r: read_passes_filters(r, min_mapq) and not r.is_reverse,
+        )
+        rev = samfile.count_coverage(
+            contig,
+            start,
+            end,
+            quality_threshold=min_baseq,
+            read_callback=lambda r: read_passes_filters(r, min_mapq) and r.is_reverse,
+        )
+
+    length = end - start
+    for v in snvs:
+        i = v["position"] - start
+        base = _BASE_INDEX.get(v["alt"].upper())
+        if base is None or not (0 <= i < length):
+            continue
+        f = int(fwd[base][i])
+        r = int(rev[base][i])
+        depth = sum(int(fwd[b][i]) + int(rev[b][i]) for b in range(4))
+        support_vaf = round((f + r) / depth, 3) if depth else 0.0
+        v["strand_forward"] = f
+        v["strand_reverse"] = r
+        v["read_depth"] = depth
+        v["read_support_vaf"] = support_vaf
+        # If the VCF omitted INFO DP/AF, show BAMCP's counted support in the
+        # depth/VAF/alt-reads the viewer and summaries render, rather than a
+        # misleading 0 (and keep the three mutually consistent).
+        if not v.get("depth"):
+            v["depth"] = depth
+        if not v.get("vaf"):
+            v["vaf"] = support_vaf
+        if not v.get("alt_count"):
+            v["alt_count"] = f + r
+
+    return variants
+
+
 def fetch_region(
     bam_path: str,
     region: str,
@@ -322,6 +398,7 @@ def fetch_region(
     index_filename: str | None = None,
     min_vaf: float = 0.1,
     min_depth: int = 3,
+    detect: bool = True,
 ) -> RegionData:
     """
     Fetch reads from a BAM/CRAM file for a given region.
@@ -449,21 +526,25 @@ def fetch_region(
 
     # Context manager ensures samfile is closed before we continue
 
-    indels, gap_depth = _detect_indels_if_small(
-        bam_path,
-        region,
-        reference_path,
-        ref_seq,
-        min_mapq,
-        min_baseq,
-        index_filename,
-        min_vaf,
-        min_depth,
-    )
-    variants = detect_variants(
-        (cov_A, cov_C, cov_G, cov_T), ref_seq, contig, start, min_vaf, min_depth, gap_depth
-    )
-    variants.extend(indels)
+    # Candidate detection can be skipped (e.g. VCF-primary, where local candidates
+    # would be discarded) to avoid scanning a broad region for nothing.
+    variants: list[dict] = []
+    if detect:
+        indels, gap_depth = _detect_indels_if_small(
+            bam_path,
+            region,
+            reference_path,
+            ref_seq,
+            min_mapq,
+            min_baseq,
+            index_filename,
+            min_vaf,
+            min_depth,
+        )
+        variants = detect_variants(
+            (cov_A, cov_C, cov_G, cov_T), ref_seq, contig, start, min_vaf, min_depth, gap_depth
+        )
+        variants.extend(indels)
 
     return RegionData(
         contig=contig,

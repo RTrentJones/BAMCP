@@ -565,7 +565,10 @@ class BAMCPViewer {
                 }
             }, BAMCPViewer.SEQUENCE_FETCH_TIMEOUT_MS);
 
-            this.client.fetchRegionDirect(filePath, region).then(data => {
+            this.client.fetchRegionDirect(
+                filePath, region, undefined,
+                this.state.data?.vcf_path, this.state.data?.variant_source,
+            ).then(data => {
                 this.pendingSequenceRequest = false;
                 if (this.sequenceFallbackTimer) {
                     clearTimeout(this.sequenceFallbackTimer);
@@ -610,7 +613,10 @@ class BAMCPViewer {
         this.sequenceNotice.classList.add('loading');
 
         if (filePath) {
-            this.client.fetchRegionDirect(filePath, region).then(data => {
+            this.client.fetchRegionDirect(
+                filePath, region, undefined,
+                this.state.data?.vcf_path, this.state.data?.variant_source,
+            ).then(data => {
                 this.pendingSequenceRequest = false;
                 this.sequenceNotice.classList.add('hidden');
                 this.sequenceNotice.classList.remove('loading');
@@ -692,7 +698,9 @@ class BAMCPViewer {
             const fetchEnd = Math.ceil(ve + padding);
             const region = `${d.contig}:${fetchStart}-${fetchEnd}`;
 
-            const data = await this.client.fetchRegionDirect(d.file_path, region);
+            const data = await this.client.fetchRegionDirect(
+                d.file_path, region, undefined, d.vcf_path, d.variant_source,
+            );
             if (data) {
                 this.state.loadTile(data);
                 this.renderVariantTable();

@@ -27,6 +27,12 @@ export class Renderer {
     private coverageCtx: CanvasRenderingContext2D;
     private readsCtx: CanvasRenderingContext2D;
 
+    // Logical (CSS-pixel) canvas dimensions. Backing stores are scaled up by
+    // devicePixelRatio for crisp HiDPI rendering, so draw code must lay out in
+    // these logical units rather than reading the (denser) canvas.width/height.
+    private logicalWidth = 0;
+    private logicalReadsHeight = 0;
+
     private state: StateManager;
 
     constructor(state: StateManager) {
@@ -124,21 +130,34 @@ export class Renderer {
         return position >= this.state.viewport.start && position <= this.state.viewport.end;
     }
 
+    /**
+     * Size a canvas for crisp rendering on HiDPI displays: the backing store is
+     * devicePixelRatio times the CSS size, the CSS box stays at logical size, and
+     * the context is scaled so all draw code can work in logical (CSS) pixels.
+     * setTransform (not scale) makes this idempotent across repeated resize calls.
+     */
+    private setupCanvas(
+        canvas: HTMLCanvasElement,
+        ctx: CanvasRenderingContext2D,
+        cssWidth: number,
+        cssHeight: number,
+    ): void {
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.round(cssWidth * dpr);
+        canvas.height = Math.round(cssHeight * dpr);
+        canvas.style.width = `${cssWidth}px`;
+        canvas.style.height = `${cssHeight}px`;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
     public resize(): void {
         const container = document.getElementById('viewer')!;
         const width = Math.max(container.clientWidth, 300);
+        this.logicalWidth = width;
 
-        // Ruler canvas
-        this.rulerCanvas.width = width;
-        this.rulerCanvas.height = RULER_HEIGHT;
-
-        // Reference canvas
-        this.referenceCanvas.width = width;
-        this.referenceCanvas.height = REFERENCE_HEIGHT;
-
-        // Coverage canvas
-        this.coverageCanvas.width = width;
-        this.coverageCanvas.height = COVERAGE_HEIGHT;
+        this.setupCanvas(this.rulerCanvas, this.rulerCtx, width, RULER_HEIGHT);
+        this.setupCanvas(this.referenceCanvas, this.referenceCtx, width, REFERENCE_HEIGHT);
+        this.setupCanvas(this.coverageCanvas, this.coverageCtx, width, COVERAGE_HEIGHT);
 
         // Calculate height needed for actual reads content
         let readsHeight = 200; // Minimum height
@@ -148,8 +167,8 @@ export class Renderer {
         }
 
         // Reads canvas - size to content
-        this.readsCanvas.width = width;
-        this.readsCanvas.height = readsHeight;
+        this.logicalReadsHeight = readsHeight;
+        this.setupCanvas(this.readsCanvas, this.readsCtx, width, readsHeight);
 
         this.render();
     }
@@ -162,15 +181,15 @@ export class Renderer {
     }
 
     private getScale(): number {
-        return this.readsCanvas.width / (this.state.viewport.end - this.state.viewport.start);
+        return this.logicalWidth / (this.state.viewport.end - this.state.viewport.start);
     }
 
     // ==================== RULER TRACK ====================
 
     private renderRuler(): void {
         const ctx = this.rulerCtx;
-        const width = this.rulerCanvas.width;
-        const height = this.rulerCanvas.height;
+        const width = this.logicalWidth;
+        const height = RULER_HEIGHT;
         const data = this.state.data;
 
         ctx.clearRect(0, 0, width, height);
@@ -244,8 +263,8 @@ export class Renderer {
 
     private renderReference(): void {
         const ctx = this.referenceCtx;
-        const width = this.referenceCanvas.width;
-        const height = this.referenceCanvas.height;
+        const width = this.logicalWidth;
+        const height = REFERENCE_HEIGHT;
         const data = this.state.data;
 
         ctx.clearRect(0, 0, width, height);
@@ -372,8 +391,8 @@ export class Renderer {
 
     private renderCoverage(): void {
         const ctx = this.coverageCtx;
-        const width = this.coverageCanvas.width;
-        const height = this.coverageCanvas.height;
+        const width = this.logicalWidth;
+        const height = COVERAGE_HEIGHT;
         const data = this.state.data;
 
         ctx.clearRect(0, 0, width, height);
@@ -473,8 +492,8 @@ export class Renderer {
 
     private renderReads(): void {
         const ctx = this.readsCtx;
-        const width = this.readsCanvas.width;
-        const height = this.readsCanvas.height;
+        const width = this.logicalWidth;
+        const height = this.logicalReadsHeight;
         const scale = this.getScale();
         const data = this.state.data;
         const { height: READ_HEIGHT, gap: READ_GAP, showLabels } = this.getReadDimensions();
@@ -749,7 +768,7 @@ export class Renderer {
         // Draw circles on each read that has a variant mismatch
         for (let rowIdx = 0; rowIdx < this.state.packedRows.length; rowIdx++) {
             const y = rowIdx * (READ_HEIGHT + READ_GAP);
-            if (y > ctx.canvas.height) break;
+            if (y > this.logicalReadsHeight) break;
 
             for (const read of this.state.packedRows[rowIdx]) {
                 for (const mm of read.mismatches) {
@@ -915,7 +934,7 @@ export class Renderer {
             const xi = x1 + i * scale;
             const refPos = read.position + i;
             if (xi + baseW < 0) continue;
-            if (xi > this.readsCanvas.width) break;
+            if (xi > this.logicalWidth) break;
 
             const base = (read.sequence && i < read.sequence.length) ? read.sequence[i].toUpperCase() : 'N';
             const qual = (read.qualities && i < read.qualities.length) ? read.qualities[i] : 0;
@@ -978,7 +997,7 @@ export class Renderer {
             const xi = x1 + i * scale;
             const refPos = read.position + i;
             if (xi + baseW < 0) continue;
-            if (xi > this.readsCanvas.width) break;
+            if (xi > this.logicalWidth) break;
 
             const base = (read.sequence && i < read.sequence.length) ? read.sequence[i].toUpperCase() : 'N';
             const qual = (read.qualities && i < read.qualities.length) ? read.qualities[i] : 0;

@@ -235,7 +235,19 @@ def fetch_candidate_variants_only(
     coverage = (np.array(cov_A) + np.array(cov_C) + np.array(cov_G) + np.array(cov_T)).tolist()
     with pysam.FastaFile(reference_path) as fasta:
         ref_seq = fasta.fetch(contig, start, end)
-    variants = detect_variants(counts, ref_seq, contig, start, min_vaf, min_depth)
+    indels, gap_depth = _detect_indels_if_small(
+        bam_path,
+        region,
+        reference_path,
+        ref_seq,
+        min_mapq,
+        min_baseq,
+        index_filename,
+        min_vaf,
+        min_depth,
+    )
+    variants = detect_variants(counts, ref_seq, contig, start, min_vaf, min_depth, gap_depth)
+    variants.extend(indels)
     return RegionData(
         contig=contig,
         start=start,
@@ -437,9 +449,21 @@ def fetch_region(
 
     # Context manager ensures samfile is closed before we continue
 
-    variants = detect_variants(
-        (cov_A, cov_C, cov_G, cov_T), ref_seq, contig, start, min_vaf, min_depth
+    indels, gap_depth = _detect_indels_if_small(
+        bam_path,
+        region,
+        reference_path,
+        ref_seq,
+        min_mapq,
+        min_baseq,
+        index_filename,
+        min_vaf,
+        min_depth,
     )
+    variants = detect_variants(
+        (cov_A, cov_C, cov_G, cov_T), ref_seq, contig, start, min_vaf, min_depth, gap_depth
+    )
+    variants.extend(indels)
 
     return RegionData(
         contig=contig,
@@ -459,9 +483,10 @@ def detect_variants(
     start: int,
     min_vaf: float = 0.1,
     min_depth: int = 10,
+    gap_depth: Sequence[int] | None = None,
 ) -> list[dict]:
     """
-    Detect variants from coverage counts (A, C, G, T).
+    Detect candidate SNVs from coverage counts (A, C, G, T).
 
     Args:
         coverage_counts: Tuple of 4 arrays (A, C, G, T) from count_coverage.
@@ -470,9 +495,15 @@ def detect_variants(
         start: Start position of the region.
         min_vaf: Minimum variant allele frequency threshold.
         min_depth: Minimum read depth to consider.
+        gap_depth: Optional per-position count of reads carrying a deletion or
+            reference-skip at each column (from :func:`detect_indels`). count_coverage
+            only tallies A/C/G/T, so at deletion-heavy loci the naive ``sum(A,C,G,T)``
+            denominator understates depth and inflates VAF. Adding gap_depth restores
+            the true spanning depth.
 
     Returns:
-        List of variant dicts with contig, position, ref, alt, vaf, depth, alt_count.
+        List of candidate variant dicts (contig, position, ref, alt, vaf, depth,
+        alt_count, variant_kind="snv", source="bamcp").
     """
     variants: list[dict] = []
 
@@ -483,9 +514,10 @@ def detect_variants(
 
     # Iterate over positions
     for i in range(len(cov_A)):
-        # Total depth at this position (excluding N/Del)
+        # True spanning depth: matched bases (A/C/G/T) plus reads deleted/skipped here.
         counts = {"A": cov_A[i], "C": cov_C[i], "G": cov_G[i], "T": cov_T[i]}
-        total = sum(counts.values())
+        gap = gap_depth[i] if gap_depth is not None and i < len(gap_depth) else 0
+        total = sum(counts.values()) + gap
 
         if total < min_depth:
             continue
@@ -514,10 +546,179 @@ def detect_variants(
                         "vaf": round(vaf, 3),
                         "depth": total,
                         "alt_count": count,
+                        "variant_kind": "snv",
+                        "source": "bamcp",
                     }
                 )
 
     return variants
+
+
+def detect_indels(
+    bam_path: str,
+    region: str,
+    reference_path: str | None = None,
+    ref_seq: str | None = None,
+    min_mapq: int = 0,
+    min_baseq: int = 0,
+    index_filename: str | None = None,
+    min_vaf: float = 0.1,
+    min_depth: int = 3,
+) -> tuple[list[dict], list[int]]:
+    """Detect candidate insertions/deletions via a pysam pileup pass.
+
+    count_coverage (used for SNVs/coverage) only tallies A/C/G/T, so it can neither
+    surface indels nor account for reads spanning a deletion. This pileup pass fills
+    both gaps in one traversal.
+
+    Returns a ``(indels, gap_depth)`` tuple where:
+      - ``indels`` are candidate records (``variant_kind="indel"``, ``indel_type``
+        of ``"ins"``/``"del"``) in VCF-style anchored representation (ref/alt share a
+        leading anchor base), 0-based ``position`` like :func:`detect_variants`.
+      - ``gap_depth`` is a per-position count of reads carrying a deletion or
+        reference-skip at each column, fed back into :func:`detect_variants` to
+        correct the SNV depth denominator.
+
+    ``gap_depth`` always has length ``end - start``. Without ``ref_seq`` no alleles can
+    be built, so ``indels`` is empty (SNV detection also no-ops without a reference).
+    """
+    contig, start, end = parse_region(region)
+    length = max(end - start, 0)
+    gap_depth = [0] * length
+    indels: list[dict] = []
+
+    if not ref_seq or length == 0:
+        return indels, gap_depth
+
+    ref_len = len(ref_seq)
+
+    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
+        # nofilter + explicit read_passes_filters mirrors count_coverage's read set
+        # (no BAQ, no mate-overlap dedup) so indel depth stays consistent with SNV depth.
+        for column in samfile.pileup(
+            contig,
+            start,
+            end,
+            truncate=True,
+            min_base_quality=min_baseq,
+            stepper="nofilter",
+        ):
+            idx = column.reference_pos - start
+            if not (0 <= idx < length):
+                continue
+
+            matched = 0
+            del_here = 0
+            del_events: dict[int, int] = {}
+            ins_events: dict[str, int] = {}
+
+            for pread in column.pileups:
+                aln = pread.alignment
+                if not read_passes_filters(aln, min_mapq):
+                    continue
+                if pread.is_refskip:
+                    del_here += 1
+                    continue
+                if pread.is_del:
+                    del_here += 1
+                    continue
+                matched += 1
+                # pread.indel is the indel BETWEEN this column and the next.
+                if pread.indel > 0:
+                    qpos = pread.query_position
+                    seq = aln.query_sequence
+                    if qpos is not None and seq is not None:
+                        ins_seq = seq[qpos + 1 : qpos + 1 + pread.indel].upper()
+                        if ins_seq:
+                            ins_events[ins_seq] = ins_events.get(ins_seq, 0) + 1
+                elif pread.indel < 0:
+                    del_len = -pread.indel
+                    del_events[del_len] = del_events.get(del_len, 0) + 1
+
+            gap_depth[idx] = del_here
+            depth = matched + del_here  # reads spanning this column
+            if depth < min_depth:
+                continue
+
+            anchor = ref_seq[idx].upper()
+
+            for del_len, support in del_events.items():
+                vaf = support / depth
+                if vaf < min_vaf:
+                    continue
+                # VCF-style: ref = anchor + deleted bases, alt = anchor.
+                del_end = idx + 1 + del_len
+                ref_allele = ref_seq[idx:del_end].upper() if del_end <= ref_len else anchor
+                indels.append(
+                    {
+                        "contig": contig,
+                        "position": column.reference_pos,
+                        "ref": ref_allele,
+                        "alt": anchor,
+                        "variant_kind": "indel",
+                        "indel_type": "del",
+                        "vaf": round(vaf, 3),
+                        "depth": depth,
+                        "alt_count": support,
+                        "source": "bamcp",
+                    }
+                )
+
+            for ins_seq, support in ins_events.items():
+                vaf = support / depth
+                if vaf < min_vaf:
+                    continue
+                # VCF-style: ref = anchor, alt = anchor + inserted bases.
+                indels.append(
+                    {
+                        "contig": contig,
+                        "position": column.reference_pos,
+                        "ref": anchor,
+                        "alt": anchor + ins_seq,
+                        "variant_kind": "indel",
+                        "indel_type": "ins",
+                        "vaf": round(vaf, 3),
+                        "depth": depth,
+                        "alt_count": support,
+                        "source": "bamcp",
+                    }
+                )
+
+    return indels, gap_depth
+
+
+def _detect_indels_if_small(
+    bam_path: str,
+    region: str,
+    reference_path: str | None,
+    ref_seq: str | None,
+    min_mapq: int,
+    min_baseq: int,
+    index_filename: str | None,
+    min_vaf: float,
+    min_depth: int,
+) -> tuple[list[dict], list[int] | None]:
+    """Run :func:`detect_indels` only when the region is small enough for a pileup.
+
+    Returns ``(indels, gap_depth)``. For oversized regions returns ``([], None)`` so
+    the SNV path keeps its fast count_coverage-only behavior and stays responsive.
+    """
+    from ..constants import INDEL_DETECTION_MAX_REGION
+
+    _, start, end = parse_region(region)
+    if (end - start) > INDEL_DETECTION_MAX_REGION:
+        return [], None
+    return detect_indels(
+        bam_path,
+        region,
+        reference_path,
+        ref_seq,
+        min_mapq,
+        min_baseq,
+        index_filename,
+        min_vaf,
+        min_depth,
+    )
 
 
 def scan_variants_chunked(

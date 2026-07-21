@@ -26,6 +26,11 @@ DEFAULT_MIN_MAPQ = 0
 DEFAULT_MIN_BASEQ = 0
 DEFAULT_CONTIG = "chr1"
 
+# Candidate indel detection runs a pysam pileup pass (costlier than count_coverage).
+# Skip it above this region size so large visualize_region requests stay responsive;
+# SNV/coverage detection (C-backed count_coverage) still runs at any size.
+INDEL_DETECTION_MAX_REGION = 100_000
+
 # Auth and integrations
 DEFAULT_TOKEN_EXPIRY_SECONDS = 3_600
 DEFAULT_GNOMAD_DATASET = "gnomad_r4"

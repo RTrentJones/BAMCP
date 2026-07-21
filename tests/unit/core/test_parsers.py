@@ -1,11 +1,13 @@
 """Unit tests for bamcp.parsers module."""
 
+import pysam
 import pytest
 
 from bamcp.core.parsers import (
     AlignedRead,
     RegionData,
     SoftClip,
+    detect_indels,
     detect_variants,
     extract_soft_clips,
     fetch_region,
@@ -193,6 +195,103 @@ class TestDetectVariants:
         assert variants[0]["position"] == 501
         assert variants[0]["ref"] == "C"
         assert variants[0]["alt"] == "G"
+
+    @pytest.mark.unit
+    def test_snv_tagged_with_variant_kind(self):
+        """Detected SNVs carry variant_kind/source for schema parity with the VCF path."""
+        variants = detect_variants(
+            ([15], [0], [0], [5]), "A", "chr1", 100, min_vaf=0.1, min_depth=1
+        )
+        assert variants[0]["variant_kind"] == "snv"
+        assert variants[0]["source"] == "bamcp"
+
+    @pytest.mark.unit
+    def test_gap_depth_included_in_denominator(self):
+        """Reads deleted/skipped at a column must count toward depth so VAF isn't inflated."""
+        counts = ([15], [0], [0], [5])  # ref=A: 15 A + 5 T matched
+        # Without correction: depth=20, VAF(T)=0.25.
+        base = detect_variants(counts, "A", "chr1", 100, min_vaf=0.1, min_depth=1)
+        assert base[0]["depth"] == 20
+        assert base[0]["vaf"] == 0.25
+        # With 10 reads spanning a deletion here: depth=30, VAF(T)=5/30.
+        corrected = detect_variants(
+            counts, "A", "chr1", 100, min_vaf=0.1, min_depth=1, gap_depth=[10]
+        )
+        assert corrected[0]["depth"] == 30
+        assert corrected[0]["vaf"] == round(5 / 30, 3)
+
+
+class TestDetectIndels:
+    """Tests for pileup-based candidate indel detection."""
+
+    @staticmethod
+    def _ref(path: str, start: int, end: int) -> str:
+        with pysam.FastaFile(path) as fa:
+            return fa.fetch("chr1", start, end)
+
+    @pytest.mark.unit
+    def test_insertion_candidate(self, small_bam_path, ref_fasta_path):
+        # small.bam read4 is 10M2I40M from ref 200 -> insertion anchored at 209 ("TT").
+        ref_seq = self._ref(ref_fasta_path, 200, 260)
+        indels, _ = detect_indels(
+            small_bam_path, "chr1:200-260", ref_fasta_path, ref_seq, min_vaf=0.1, min_depth=1
+        )
+        ins = [v for v in indels if v["indel_type"] == "ins"]
+        assert len(ins) == 1
+        v = ins[0]
+        assert v["position"] == 209
+        assert v["ref"] == "C"  # ref[209] in "ACGTACGTAC"*100
+        assert v["alt"] == "CTT"  # anchor + inserted bases
+        assert v["variant_kind"] == "indel"
+        assert v["alt_count"] == 1
+        assert v["source"] == "bamcp"
+
+    @pytest.mark.unit
+    def test_deletion_candidate_and_gap_depth(self, small_bam_path, ref_fasta_path):
+        # small.bam read5 is 25M3D25M from ref 300 -> deletion anchored at 324,
+        # deleting ref positions 325..327.
+        start = 300
+        ref_seq = self._ref(ref_fasta_path, start, 360)
+        indels, gap_depth = detect_indels(
+            small_bam_path, "chr1:300-360", ref_fasta_path, ref_seq, min_vaf=0.1, min_depth=1
+        )
+        dels = [v for v in indels if v["indel_type"] == "del"]
+        assert len(dels) == 1
+        v = dels[0]
+        assert v["position"] == 324
+        assert v["ref"] == "ACGT"  # anchor + 3 deleted bases
+        assert v["alt"] == "A"
+        assert v["variant_kind"] == "indel"
+        # The 3 deleted columns are marked so detect_variants can correct depth there.
+        assert gap_depth[325 - start] == 1
+        assert gap_depth[326 - start] == 1
+        assert gap_depth[327 - start] == 1
+
+    @pytest.mark.unit
+    def test_no_ref_seq_returns_empty_with_sized_gap_depth(self, small_bam_path, ref_fasta_path):
+        indels, gap_depth = detect_indels(
+            small_bam_path, "chr1:300-360", ref_fasta_path, None, min_vaf=0.1, min_depth=1
+        )
+        assert indels == []
+        assert gap_depth == [0] * 60
+
+    @pytest.mark.unit
+    def test_min_depth_filters_singleton_indels(self, small_bam_path, ref_fasta_path):
+        # Only read5 spans the deletion (depth 1); min_depth=2 drops it.
+        ref_seq = self._ref(ref_fasta_path, 300, 360)
+        indels, _ = detect_indels(
+            small_bam_path, "chr1:300-360", ref_fasta_path, ref_seq, min_vaf=0.1, min_depth=2
+        )
+        assert indels == []
+
+    @pytest.mark.unit
+    def test_fetch_region_surfaces_indels_after_snvs(self, small_bam_path, ref_fasta_path):
+        """fetch_region appends indel candidates so variants[0] stays an SNV when present."""
+        data = fetch_region(
+            small_bam_path, "chr1:300-360", ref_fasta_path, min_vaf=0.1, min_depth=1
+        )
+        indels = [v for v in data.variants if v.get("variant_kind") == "indel"]
+        assert any(v["indel_type"] == "del" and v["position"] == 324 for v in indels)
 
 
 class TestLoadVcfVariants:

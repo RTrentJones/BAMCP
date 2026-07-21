@@ -331,38 +331,49 @@ async def _fetch_region_with_timeout(
     effective_min_depth = min_depth if min_depth is not None else config.min_depth
 
     if mode == "coverage":
-        target = fetch_coverage_only
-        args = (file_path, region, reference, config.min_mapq, config.min_baseq, index_path)
+        data = await asyncio.wait_for(
+            asyncio.to_thread(
+                fetch_coverage_only,
+                file_path,
+                region,
+                reference,
+                config.min_mapq,
+                config.min_baseq,
+                index_path,
+            ),
+            timeout=BAM_PARSE_TIMEOUT_SECONDS,
+        )
     elif mode == "variants" and reference:
-        target = fetch_candidate_variants_only
-        args = (
-            file_path,
-            region,
-            reference,
-            config.min_mapq,
-            config.min_baseq,
-            index_path,
-            effective_min_vaf,
-            effective_min_depth,
+        data = await asyncio.wait_for(
+            asyncio.to_thread(
+                fetch_candidate_variants_only,
+                file_path,
+                region,
+                reference,
+                config.min_mapq,
+                config.min_baseq,
+                index_path,
+                effective_min_vaf,
+                effective_min_depth,
+            ),
+            timeout=BAM_PARSE_TIMEOUT_SECONDS,
         )
     else:
-        target = fetch_region
-        args = (
-            file_path,
-            region,
-            reference,
-            config.max_reads,
-            config.min_mapq,
-            config.min_baseq,
-            index_path,
-            effective_min_vaf,
-            effective_min_depth,
+        data = await asyncio.wait_for(
+            asyncio.to_thread(
+                fetch_region,
+                file_path,
+                region,
+                reference,
+                config.max_reads,
+                config.min_mapq,
+                config.min_baseq,
+                index_path,
+                effective_min_vaf,
+                effective_min_depth,
+            ),
+            timeout=BAM_PARSE_TIMEOUT_SECONDS,
         )
-
-    data = await asyncio.wait_for(
-        asyncio.to_thread(target, *args),
-        timeout=BAM_PARSE_TIMEOUT_SECONDS,
-    )
 
     if vcf_path:
         vcf_variants = await asyncio.wait_for(

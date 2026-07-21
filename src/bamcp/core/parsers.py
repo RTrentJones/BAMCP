@@ -376,11 +376,14 @@ def annotate_vcf_snv_support(
         v["read_depth"] = depth
         v["read_support_vaf"] = support_vaf
         # If the VCF omitted INFO DP/AF, show BAMCP's counted support in the
-        # depth/VAF the viewer and summaries render, rather than a misleading 0.
+        # depth/VAF/alt-reads the viewer and summaries render, rather than a
+        # misleading 0 (and keep the three mutually consistent).
         if not v.get("depth"):
             v["depth"] = depth
         if not v.get("vaf"):
             v["vaf"] = support_vaf
+        if not v.get("alt_count"):
+            v["alt_count"] = f + r
 
     return variants
 

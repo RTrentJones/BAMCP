@@ -596,6 +596,9 @@ class TestVariantSource:
         v = next(v for v in payload["variants"] if v["position"] == 134)
         assert v["depth"] > 0  # counted from the BAM, not the missing VCF DP
         assert v["depth"] == v["read_depth"]
+        # alt_count also adopts the counted support (no nonzero-VAF / 0-alt mismatch).
+        assert v["alt_count"] == v["strand_forward"] + v["strand_reverse"]
+        assert v["alt_count"] > 0
 
     @pytest.mark.unit
     @pytest.mark.asyncio

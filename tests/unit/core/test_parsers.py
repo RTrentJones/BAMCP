@@ -5,9 +5,11 @@ import pytest
 
 from bamcp.core.parsers import (
     PILEUP_MAX_DEPTH,
+    SNV_PILEUP_MERGE_GAP,
     AlignedRead,
     RegionData,
     SoftClip,
+    _merge_snv_intervals,
     annotate_vcf_snv_support,
     detect_indels,
     detect_variants,
@@ -963,3 +965,46 @@ class TestAnnotateVcfSnvSupport:
         annotate_vcf_snv_support(bam, "chr1:90-110", None, self._snv())
         assert captured.get("max_depth") == PILEUP_MAX_DEPTH
         assert PILEUP_MAX_DEPTH >= 1_000_000_000
+
+    @pytest.mark.unit
+    def test_pileup_restricted_to_snv_intervals(self, tmp_path, monkeypatch):
+        """The pileup covers only narrow intervals around the SNVs, never the whole
+        (potentially 1 Mb) request window."""
+        from bamcp.core import parsers as parsers_mod
+
+        bam = self._write_bam(tmp_path, [("hi", 0, "TACGTACGTA", "I" * 10)])
+        windows: list[tuple[int, int]] = []
+        real_open = parsers_mod._open_alignment
+
+        class _Spy:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __enter__(self):
+                self._inner.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+            def pileup(self, contig, iv_start, iv_stop, *args, **kwargs):
+                windows.append((iv_start, iv_stop))
+                return self._inner.pileup(contig, iv_start, iv_stop, *args, **kwargs)
+
+        monkeypatch.setattr(
+            parsers_mod, "_open_alignment", lambda *a, **k: _Spy(real_open(*a, **k))
+        )
+        # One SNV at 100 inside a 200 kb window: pileup must touch [100, 101), not the span.
+        annotate_vcf_snv_support(bam, "chr1:0-200000", None, self._snv(position=100))
+        assert windows == [(100, 101)]
+
+    @pytest.mark.unit
+    def test_merge_snv_intervals(self):
+        """Sparse positions stay narrow; positions within the gap merge into one interval."""
+        assert _merge_snv_intervals([], SNV_PILEUP_MERGE_GAP) == []
+        assert _merge_snv_intervals([500], SNV_PILEUP_MERGE_GAP) == [(500, 501)]
+        # 100 and 200 are within the gap -> one interval; 50_000 is far -> its own.
+        assert _merge_snv_intervals([200, 100, 50_000], SNV_PILEUP_MERGE_GAP) == [
+            (100, 201),
+            (50_000, 50_001),
+        ]

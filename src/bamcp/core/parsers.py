@@ -63,6 +63,12 @@ MAX_REGION_SIZE = 1_000_000  # 1 Mbp
 # region is already capped at MAX_REGION_SIZE, and htslib allocates per-column lazily.
 PILEUP_MAX_DEPTH = 1_000_000_000
 
+# The VCF-support pileup runs a Python per-read loop, so it must not walk the whole
+# request window (up to MAX_REGION_SIZE) when only a few SNVs are present. SNV positions
+# within this many bases are grouped into one pileup interval — small enough to skip the
+# empty coverage between sparse sites, wide enough that clustered sites share a pass.
+SNV_PILEUP_MERGE_GAP = 1000
+
 # CIGAR operation codes
 CIGAR_SOFT_CLIP = 4  # S operation
 
@@ -325,6 +331,22 @@ def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
     return variants
 
 
+def _merge_snv_intervals(positions: list[int], gap: int) -> list[tuple[int, int]]:
+    """Merge SNV positions into half-open ``[start, stop)`` pileup intervals.
+
+    A position within ``gap`` bases of the current interval's end is folded into it, so
+    clustered SNVs share one pileup pass while sparse SNVs stay narrow — keeping the
+    per-read pileup loop off the unrelated coverage between distant sites.
+    """
+    intervals: list[tuple[int, int]] = []
+    for p in sorted(positions):
+        if intervals and p - intervals[-1][1] <= gap:
+            intervals[-1] = (intervals[-1][0], p + 1)
+        else:
+            intervals.append((p, p + 1))
+    return intervals
+
+
 def annotate_vcf_snv_support(
     bam_path: str,
     region: str,
@@ -349,7 +371,7 @@ def annotate_vcf_snv_support(
     if not snvs:
         return variants
 
-    contig, start, end = parse_region(region)
+    contig = parse_region(region)[0]
     # A position may host several alt alleles, so index the targets by position.
     by_pos: dict[int, list[dict]] = {}
     for v in snvs:
@@ -366,19 +388,28 @@ def annotate_vcf_snv_support(
         v["_alt_positions"] = []
         v["_alt_mapqs"] = []
 
+    # Pileup only short intervals around the SNVs — not the whole request window, which
+    # (up to MAX_REGION_SIZE) would make this Python per-read loop walk unrelated coverage.
+    intervals = _merge_snv_intervals(list(by_pos), SNV_PILEUP_MERGE_GAP)
+
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
         # stepper="nofilter" leaves us to apply the base-quality threshold ourselves
         # (below), so pileup's own min_base_quality is a no-op here; max_depth is lifted
         # off pysam's 8000 default so high-depth sites aren't silently truncated.
-        for column in samfile.pileup(
-            contig,
-            start,
-            end,
-            truncate=True,
-            min_base_quality=0,
-            stepper="nofilter",
-            max_depth=PILEUP_MAX_DEPTH,
-        ):
+        columns = (
+            column
+            for iv_start, iv_stop in intervals
+            for column in samfile.pileup(
+                contig,
+                iv_start,
+                iv_stop,
+                truncate=True,
+                min_base_quality=0,
+                stepper="nofilter",
+                max_depth=PILEUP_MAX_DEPTH,
+            )
+        )
+        for column in columns:
             targets = by_pos.get(column.reference_pos)
             if not targets:
                 continue

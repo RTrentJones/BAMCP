@@ -9,6 +9,8 @@ import {
     INSERT_SIZE_THRESHOLDS,
     SOFT_CLIP_STYLE,
     displayPos,
+    svColor,
+    svTypeLabel,
 } from "./constants";
 
 // Layout constants
@@ -758,7 +760,121 @@ export class Renderer {
 
         ctx.restore(); // Remove data-range clip
 
+        // Structural variants span position→sv_end and carry no per-read mismatch, so
+        // they render as overlay bands (outside the data-range clip, clamped to width).
+        this.renderSvSpans(ctx, scale, width);
+
         this.drawRowClipIndicator(ctx);
+    }
+
+    /**
+     * Render structural variants as overlay span bands across the reads track.
+     *
+     * An SV spans ``position``→``sv_end`` (0-based; ``sv_end`` = VCF END is the 0-based
+     * exclusive right edge). Each renders as a labeled top bar over its visible extent,
+     * a faint full-height tint, and dashed breakpoint lines at any in-view boundary;
+     * a boundary off the viewport gets an edge chevron instead. Bars are packed into
+     * lanes so overlapping SVs don't collide. Zero-span events (INS/BND with
+     * ``sv_end`` ≤ ``position``) render as a single breakpoint marker.
+     */
+    private renderSvSpans(ctx: CanvasRenderingContext2D, scale: number, width: number): void {
+        const data = this.state.data;
+        if (!data) return;
+        const svs = data.variants.filter(v => v.variant_kind === 'sv');
+        if (!svs.length) return;
+
+        const vpStart = this.state.viewport.start;
+        const vpEnd = this.state.viewport.end;
+        const height = this.logicalReadsHeight;
+        const barH = 15;
+        const laneEnds: number[] = []; // right-edge x per lane, for greedy packing
+
+        ctx.save();
+        ctx.font = '10px system-ui, -apple-system, sans-serif';
+        ctx.textBaseline = 'middle';
+
+        for (const sv of svs) {
+            const start = sv.position;
+            const hasSpan = sv.sv_end != null && sv.sv_end > start;
+            const end = hasSpan ? (sv.sv_end as number) : start + 1;
+
+            // Skip SVs whose span doesn't intersect the viewport at all.
+            if (end < vpStart || start > vpEnd) continue;
+
+            const color = svColor(svTypeLabel(sv.sv_type, sv.alt));
+            const xStartRaw = (start - vpStart) * scale;
+            const xEndRaw = (end - vpStart) * scale;
+            const xStart = Math.max(0, xStartRaw);
+            const xEnd = Math.min(width, xEndRaw);
+            const barW = Math.max(xEnd - xStart, 2);
+
+            // Greedy lane assignment: first lane whose last bar ended before this one.
+            let lane = laneEnds.findIndex(e => e <= xStart - 4);
+            if (lane === -1) lane = laneEnds.length;
+            laneEnds[lane] = xEnd;
+            const y = lane * (barH + 2);
+
+            // Faint full-height tint marking the affected region.
+            ctx.globalAlpha = 0.06;
+            ctx.fillStyle = color;
+            ctx.fillRect(xStart, 0, barW, height);
+
+            // Solid label bar at the top.
+            ctx.globalAlpha = 0.9;
+            ctx.fillRect(xStart, y, barW, barH);
+            ctx.globalAlpha = 1;
+
+            const label = svTypeLabel(sv.sv_type, sv.alt) +
+                (hasSpan ? ` ${(end - start).toLocaleString()} bp` : '');
+            if (barW > 26) {
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(xStart, y, barW, barH);
+                ctx.clip();
+                ctx.fillStyle = '#fff';
+                ctx.fillText(label, xStart + 4, y + barH / 2 + 0.5);
+                ctx.restore();
+            }
+
+            // Breakpoint lines (dashed) at in-view boundaries; chevrons where a boundary
+            // lies off-screen so the reader knows the event continues.
+            ctx.strokeStyle = color;
+            ctx.fillStyle = color;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 2]);
+            const startInView = start >= vpStart && start <= vpEnd;
+            const endInView = hasSpan && end >= vpStart && end <= vpEnd;
+            if (startInView) {
+                ctx.beginPath();
+                ctx.moveTo(xStartRaw, y + barH);
+                ctx.lineTo(xStartRaw, height);
+                ctx.stroke();
+            } else if (xStartRaw < 0) {
+                this.drawChevron(ctx, 2, y + barH / 2, -1);
+            }
+            if (endInView) {
+                ctx.beginPath();
+                ctx.moveTo(xEndRaw, y + barH);
+                ctx.lineTo(xEndRaw, height);
+                ctx.stroke();
+            } else if (hasSpan && xEndRaw > width) {
+                this.drawChevron(ctx, width - 2, y + barH / 2, 1);
+            }
+            ctx.setLineDash([]);
+        }
+
+        ctx.restore();
+    }
+
+    /** Small solid triangle pointing left (dir=-1) or right (dir=1); marks an off-view SV edge. */
+    private drawChevron(ctx: CanvasRenderingContext2D, x: number, y: number, dir: number): void {
+        const s = 5;
+        ctx.beginPath();
+        ctx.moveTo(x, y - s);
+        ctx.lineTo(x + dir * s, y);
+        ctx.lineTo(x, y + s);
+        ctx.closePath();
+        ctx.fill();
     }
 
     /**

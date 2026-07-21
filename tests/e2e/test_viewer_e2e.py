@@ -337,6 +337,65 @@ class TestMultiSampleAndSvViews:
         assert hidden is True
 
 
+class TestSvSpanRendering:
+    """E2E: structural variants render as overlay span bands on the reads canvas."""
+
+    # reads=[] keeps the top band clean so pixel assertions aren't confounded by reads.
+    def _sv_data(self, *, position, sv_end, sv_type="DEL"):
+        return {
+            "contig": "chr1",
+            "start": 100,
+            "end": 600,
+            "reads": [],
+            "coverage": [0] * 500,
+            "variants": [
+                {
+                    "contig": "chr1",
+                    "position": position,
+                    "ref": "N",
+                    "alt": f"<{sv_type}>",
+                    "variant_kind": "sv",
+                    "vaf": 0.0,
+                    "depth": 0,
+                    "source": "vcf",
+                    "sv_type": sv_type,
+                    "sv_end": sv_end,
+                    "sv_len": sv_end - position,
+                }
+            ],
+            "reference_sequence": "ACGTACGTAC" * 50,
+            "variant_evidence": {},
+        }
+
+    @pytest.mark.e2e
+    def test_sv_span_renders_colored_bar(self, viewer_page: Page):
+        """A DEL spanning 200–400 paints a red band there and nothing past its end."""
+        send_init_data(viewer_page, self._sv_data(position=200, sv_end=400))
+        # Mid-span, inside the top label band (y=7): DEL red (#ef4444) dominant + opaque.
+        inside = sample_pixel_at_genomic(viewer_page, "reads-canvas", 300, 7)
+        assert inside["a"] > 100
+        assert inside["r"] > 150 and inside["r"] > inside["g"] and inside["r"] > inside["b"]
+        # Past the SV end (genomic 500), the band is not painted (no reads either).
+        outside = sample_pixel_at_genomic(viewer_page, "reads-canvas", 500, 7)
+        assert outside["a"] == 0
+
+    @pytest.mark.e2e
+    def test_sv_type_drives_band_color(self, viewer_page: Page):
+        """A DUP renders blue where a DEL renders red — colors are type-specific."""
+        send_init_data(viewer_page, self._sv_data(position=200, sv_end=400, sv_type="DUP"))
+        px = sample_pixel_at_genomic(viewer_page, "reads-canvas", 300, 7)
+        assert px["a"] > 100
+        assert px["b"] > 150 and px["b"] > px["r"]  # DUP blue (#3b82f6)
+
+    @pytest.mark.e2e
+    def test_out_of_view_sv_not_rendered(self, viewer_page: Page):
+        """An SV whose span lies entirely outside the viewport paints nothing."""
+        # Viewport is 100–600; this SV sits at 700–900.
+        send_init_data(viewer_page, self._sv_data(position=700, sv_end=900))
+        painted = count_opaque_pixels(viewer_page, "reads-canvas", 0, 0, 400, 20)
+        assert painted == 0
+
+
 class TestColumnarReads:
     """E2E: the viewer decodes columnar reads (parallel arrays) into read objects."""
 

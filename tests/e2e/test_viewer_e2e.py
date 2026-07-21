@@ -210,18 +210,27 @@ class TestEvidencePanelClear:
             "() => document.getElementById('artifact-risk-list').innerHTML.length"
         )
         assert populated > 0  # SNV populated the artifact-risk list
+        # The SNV also fills the strand stat + (potentially) the warning.
+        strand_before = viewer_page.evaluate(
+            "() => document.getElementById('strand-ratio').textContent"
+        )
+        assert "Fwd:" in strand_before
         viewer_page.evaluate("() => viewer.showVariantEvidence(viewer.state.data.variants[1])")
         result = viewer_page.evaluate(
             """() => ({
                 meter: document.getElementById('artifact-risk-meter').textContent,
                 list: document.getElementById('artifact-risk-list').innerHTML,
                 qstats: document.getElementById('quality-stats').textContent,
+                strand: document.getElementById('strand-ratio').textContent,
+                warning: document.getElementById('strand-warning').style.display,
                 title: document.getElementById('evidence-title').textContent,
             })"""
         )
         assert "No BAMCP read-level evidence" in result["meter"]
         assert result["list"] == ""  # cleared, not stale from the SNV
         assert result["qstats"] == ""
+        assert result["strand"] == ""  # strand stat cleared, not stale Fwd/Rev counts
+        assert result["warning"] == "none"  # strand-bias warning reset
         assert "ATG" in result["title"]  # panel reflects the selected indel
 
 

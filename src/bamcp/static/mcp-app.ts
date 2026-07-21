@@ -917,10 +917,12 @@ class BAMCPViewer {
             const ctx = canvas?.getContext('2d');
             if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
         }
-        for (const id of ['quality-stats', 'position-stats']) {
+        for (const id of ['strand-ratio', 'quality-stats', 'position-stats']) {
             const el = document.getElementById(id);
             if (el) el.textContent = '';
         }
+        const warning = document.getElementById('strand-warning');
+        if (warning) warning.style.display = 'none';
         const list = document.getElementById('artifact-risk-list');
         if (list) list.innerHTML = '';
     }

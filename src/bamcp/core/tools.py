@@ -472,9 +472,7 @@ async def _fetch_readless_tiled(
 
 def _has_vcf_snv(variants: list[dict]) -> bool:
     """Whether any variant is a VCF single-nucleotide site (needs read-support scoring)."""
-    return any(
-        v.get("source") == "vcf" and len(v["ref"]) == 1 == len(v["alt"]) for v in variants
-    )
+    return any(v.get("source") == "vcf" and len(v["ref"]) == 1 == len(v["alt"]) for v in variants)
 
 
 async def _annotate_vcf_support(

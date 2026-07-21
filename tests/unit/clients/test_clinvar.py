@@ -10,7 +10,9 @@ from bamcp.clients.clinvar import (
     ClinVarClient,
     ClinVarResult,
     _build_search_term,
-    _parse_summary,
+    _parse_entry,
+    _select_entry,
+    _spdi_matches,
 )
 
 # -- Sample API response fixtures -------------------------------------------
@@ -18,7 +20,7 @@ from bamcp.clients.clinvar import (
 ESEARCH_RESPONSE = {
     "esearchresult": {
         "count": "1",
-        "retmax": "5",
+        "retmax": "20",
         "idlist": ["12345"],
     }
 }
@@ -26,28 +28,48 @@ ESEARCH_RESPONSE = {
 ESEARCH_EMPTY = {
     "esearchresult": {
         "count": "0",
-        "retmax": "5",
+        "retmax": "20",
         "idlist": [],
     }
 }
 
-ESUMMARY_RESPONSE = {
-    "result": {
-        "uids": ["12345"],
-        "12345": {
-            "uid": "12345",
-            "title": "NM_000546.6(TP53):c.743G>A (p.Arg248Gln)",
-            "clinical_significance": {
-                "description": "Pathogenic",
-            },
-            "review_status": "criteria provided, multiple submitters, no conflicts",
-            "genes": [{"symbol": "TP53"}],
-            "trait_set": [
-                {"trait_name": "Li-Fraumeni syndrome"},
-                {"trait_name": "Hereditary cancer-predisposing syndrome"},
-            ],
+
+def _entry(
+    uid,
+    spdi,
+    *,
+    description="Pathogenic",
+    review="criteria provided, multiple submitters, no conflicts",
+    gene="TP53",
+    traits=("Li-Fraumeni syndrome", "Hereditary cancer-predisposing syndrome"),
+    title="NM_000546.6(TP53):c.743G>A (p.Arg248Gln)",
+):
+    """Build an esummary entry in ClinVar's current (germline_classification) schema."""
+    return {
+        "uid": uid,
+        "title": title,
+        "germline_classification": {
+            "description": description,
+            "review_status": review,
+            "trait_set": [{"trait_name": t} for t in traits],
             "last_evaluated": "2023-01-15",
         },
+        "genes": [{"symbol": gene}] if gene else [],
+        "variation_set": [{"canonical_spdi": spdi, "variant_type": "snv"}],
+    }
+
+
+# TP53 c.743G>A at GRCh38 chr17:7674220 → SPDI 0-based 7674219.
+ESUMMARY_RESPONSE = {
+    "result": {"uids": ["12345"], "12345": _entry("12345", "NC_000017.11:7674219:G:A")}
+}
+
+# A position search returning an overlapping non-matching record plus the exact SNV.
+ESUMMARY_MULTI = {
+    "result": {
+        "uids": ["111", "222"],
+        "111": _entry("111", "NC_000017.11:7674218:GG:AA", description="Benign", title="delins"),
+        "222": _entry("222", "NC_000017.11:7674219:G:A", description="Pathogenic"),
     }
 }
 
@@ -59,35 +81,76 @@ ESUMMARY_EMPTY = {
 
 
 class TestBuildSearchTerm:
-    """Tests for _build_search_term."""
+    """Tests for _build_search_term (position-only; allele resolved from SPDI)."""
 
     @pytest.mark.unit
     def test_basic_search_term(self):
-        term = _build_search_term("chr17", 7674220, "G", "A")
-        assert "17" in term
-        assert "7674220" in term
-        assert "G>A" in term
-        assert "[Chromosome]" in term
-        assert "[Base Position]" in term
+        term = _build_search_term("chr17", 7674220)
+        assert term == "17[Chromosome] AND 7674220[Base Position]"
+
+    @pytest.mark.unit
+    def test_no_variant_name_clause(self):
+        # ClinVar's [Variant name] is HGVS, not REF>ALT; a ref>alt clause matches nothing.
+        assert "[Variant name]" not in _build_search_term("17", 100)
 
     @pytest.mark.unit
     def test_strips_chr_prefix(self):
-        term = _build_search_term("chr1", 100, "A", "T")
-        # Should not have "chr" in the chromosome part
-        assert term.startswith("1[")
+        assert _build_search_term("chr1", 100).startswith("1[")
 
     @pytest.mark.unit
     def test_numeric_chrom(self):
-        term = _build_search_term("17", 100, "A", "T")
-        assert term.startswith("17[")
+        assert _build_search_term("17", 100).startswith("17[")
 
 
-class TestParseSummary:
-    """Tests for _parse_summary."""
+class TestSpdiMatching:
+    """Tests for _spdi_matches (canonical SPDI seq:0based_pos:del:ins)."""
 
     @pytest.mark.unit
-    def test_parse_valid_response(self):
-        result = _parse_summary(ESUMMARY_RESPONSE)
+    def test_snv_matches_at_1based_pos(self):
+        assert _spdi_matches("NC_000017.11:7674219:G:A", 7674220, "G", "A")
+
+    @pytest.mark.unit
+    def test_position_off_by_one_does_not_match(self):
+        assert not _spdi_matches("NC_000017.11:7674219:G:A", 7674219, "G", "A")
+
+    @pytest.mark.unit
+    def test_allele_mismatch_does_not_match(self):
+        assert not _spdi_matches("NC_000017.11:7674219:G:A", 7674220, "G", "T")
+
+    @pytest.mark.unit
+    def test_case_insensitive(self):
+        assert _spdi_matches("NC_000017.11:7674219:g:a", 7674220, "G", "A")
+
+    @pytest.mark.unit
+    def test_malformed_spdi(self):
+        assert not _spdi_matches("not-an-spdi", 7674220, "G", "A")
+        assert not _spdi_matches("NC:x:G:A", 7674220, "G", "A")
+
+
+class TestSelectEntry:
+    """Tests for _select_entry (disambiguate the exact allele among position hits)."""
+
+    @pytest.mark.unit
+    def test_selects_allele_matching_record(self):
+        entry = _select_entry(ESUMMARY_MULTI["result"], 7674220, "G", "A")
+        assert entry is not None
+        assert entry["uid"] == "222"  # the exact SNV, not the overlapping delins
+
+    @pytest.mark.unit
+    def test_none_when_no_allele_matches(self):
+        assert _select_entry(ESUMMARY_MULTI["result"], 7674220, "G", "C") is None
+
+    @pytest.mark.unit
+    def test_none_for_empty_result(self):
+        assert _select_entry(ESUMMARY_EMPTY["result"], 7674220, "G", "A") is None
+
+
+class TestParseEntry:
+    """Tests for _parse_entry (current + legacy esummary schema)."""
+
+    @pytest.mark.unit
+    def test_parse_germline_classification(self):
+        result = _parse_entry(_entry("12345", "NC_000017.11:7674219:G:A"))
         assert result is not None
         assert result.variation_id == 12345
         assert result.clinical_significance == "Pathogenic"
@@ -98,49 +161,47 @@ class TestParseSummary:
         assert result.variant_name == "NM_000546.6(TP53):c.743G>A (p.Arg248Gln)"
 
     @pytest.mark.unit
-    def test_parse_empty_response(self):
-        result = _parse_summary(ESUMMARY_EMPTY)
-        assert result is None
+    def test_parse_no_uid(self):
+        assert _parse_entry({"title": "x"}) is None
 
     @pytest.mark.unit
-    def test_parse_no_result_key(self):
-        result = _parse_summary({})
-        assert result is None
+    def test_parse_legacy_schema(self):
+        # Pre-2024 top-level clinical_significance / review_status / trait_set.
+        entry = {
+            "uid": "999",
+            "clinical_significance": {"description": "Pathogenic"},
+            "review_status": "reviewed by expert panel",
+            "genes": [{"symbol": "BRCA1"}],
+            "trait_set": [{"trait_name": "Breast cancer"}],
+        }
+        result = _parse_entry(entry)
+        assert result is not None
+        assert result.clinical_significance == "Pathogenic"
+        assert result.stars == 3
+        assert result.conditions == ["Breast cancer"]
 
     @pytest.mark.unit
     def test_parse_significance_as_string(self):
-        data = {
-            "result": {
-                "uids": ["999"],
-                "999": {
-                    "uid": "999",
-                    "clinical_significance": "Benign",
-                    "review_status": "no assertion criteria provided",
-                    "genes": [],
-                    "trait_set": [],
-                },
-            }
+        entry = {
+            "uid": "999",
+            "clinical_significance": "Benign",
+            "review_status": "no assertion criteria provided",
+            "genes": [],
+            "trait_set": [],
         }
-        result = _parse_summary(data)
+        result = _parse_entry(entry)
         assert result is not None
         assert result.clinical_significance == "Benign"
         assert result.stars == 0
 
     @pytest.mark.unit
     def test_parse_gene_as_string(self):
-        data = {
-            "result": {
-                "uids": ["100"],
-                "100": {
-                    "uid": "100",
-                    "clinical_significance": {"description": "VUS"},
-                    "review_status": "criteria provided, single submitter",
-                    "genes": ["BRCA1"],
-                    "trait_set": [],
-                },
-            }
+        entry = {
+            "uid": "100",
+            "germline_classification": {"description": "VUS", "review_status": "x"},
+            "genes": ["BRCA1"],
         }
-        result = _parse_summary(data)
+        result = _parse_entry(entry)
         assert result is not None
         assert result.gene == "BRCA1"
 
@@ -210,6 +271,30 @@ class TestClinVarClient:
 
         client = ClinVarClient()
         result = await client.lookup("chr99", 1, "A", "T")
+        assert result is None
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_lookup_selects_matching_allele(self, httpx_mock):
+        # Position search returns an overlapping delins + the exact SNV; pick the SNV.
+        httpx_mock.add_response(url=re.compile(r".*/esearch\.fcgi.*"), json=ESEARCH_RESPONSE)
+        httpx_mock.add_response(url=re.compile(r".*/esummary\.fcgi.*"), json=ESUMMARY_MULTI)
+
+        client = ClinVarClient()
+        result = await client.lookup("chr17", 7674220, "G", "A")
+        assert result is not None
+        assert result.variation_id == 222
+        assert result.clinical_significance == "Pathogenic"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_lookup_allele_mismatch_returns_none(self, httpx_mock):
+        # Records exist at the position but none match the requested allele.
+        httpx_mock.add_response(url=re.compile(r".*/esearch\.fcgi.*"), json=ESEARCH_RESPONSE)
+        httpx_mock.add_response(url=re.compile(r".*/esummary\.fcgi.*"), json=ESUMMARY_RESPONSE)
+
+        client = ClinVarClient()
+        result = await client.lookup("chr17", 7674220, "G", "C")  # G>C, but record is G>A
         assert result is None
 
     @pytest.mark.unit

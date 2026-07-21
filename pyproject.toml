@@ -100,6 +100,10 @@ warn_unused_configs = true
 # CI lint job to install [eval] + [telemetry].
 [[tool.mypy.overrides]]
 module = [
+    "anthropic",
+    "anthropic.*",
+    "openai",
+    "openai.*",
     "opentelemetry",
     "opentelemetry.*",
 ]

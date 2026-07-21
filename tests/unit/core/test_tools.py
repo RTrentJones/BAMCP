@@ -538,7 +538,7 @@ class TestHandleGetRegionSummary:
         assert "Region:" in text
         assert "Reads:" in text
         assert "Coverage:" in text
-        assert "Variants detected:" in text
+        assert "Candidate variants detected:" in text
 
     @pytest.mark.unit
     @pytest.mark.asyncio

@@ -646,9 +646,14 @@ def detect_indels(
                 vaf = support / depth
                 if vaf < min_vaf:
                     continue
-                # VCF-style: ref = anchor + deleted bases, alt = anchor.
+                # VCF-style: ref = anchor + deleted bases, alt = anchor. If the
+                # deletion runs past the fetched reference slice (anchor near the
+                # region edge) we can't build the real deleted allele, so skip it
+                # rather than emit a non-variant with ref == alt == anchor.
                 del_end = idx + 1 + del_len
-                ref_allele = ref_seq[idx:del_end].upper() if del_end <= ref_len else anchor
+                if del_end > ref_len:
+                    continue
+                ref_allele = ref_seq[idx:del_end].upper()
                 indels.append(
                     {
                         "contig": contig,

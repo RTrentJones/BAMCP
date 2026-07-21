@@ -285,6 +285,19 @@ class TestDetectIndels:
         assert indels == []
 
     @pytest.mark.unit
+    def test_deletion_past_region_edge_is_skipped(self, small_bam_path, ref_fasta_path):
+        """A deletion running past the fetched reference must not emit a ref==alt non-variant."""
+        # read5's deletion is anchored at 324 with 3 deleted bases (325-327); a
+        # window ending at 326 can't resolve the full deleted allele.
+        ref_seq = self._ref(ref_fasta_path, 310, 326)
+        indels, _ = detect_indels(
+            small_bam_path, "chr1:310-326", ref_fasta_path, ref_seq, min_vaf=0.1, min_depth=1
+        )
+        assert [v for v in indels if v["indel_type"] == "del"] == []
+        # No emitted candidate should ever have identical ref and alt.
+        assert all(v["ref"] != v["alt"] for v in indels)
+
+    @pytest.mark.unit
     def test_fetch_region_surfaces_indels_after_snvs(self, small_bam_path, ref_fasta_path):
         """fetch_region appends indel candidates so variants[0] stays an SNV when present."""
         data = fetch_region(

@@ -395,6 +395,20 @@ class TestSvSpanRendering:
         painted = count_opaque_pixels(viewer_page, "reads-canvas", 0, 0, 400, 20)
         assert painted == 0
 
+    @pytest.mark.e2e
+    def test_sv_span_rendered_in_deepvariant_mode(self, viewer_page: Page):
+        """SV spans still render after switching the reads track to a DeepVariant mode."""
+        send_init_data(viewer_page, self._sv_data(position=200, sv_end=400))
+        viewer_page.evaluate(
+            """() => {
+                viewer.state.settings.displayMode = 'dv-strips';
+                viewer.renderer.resize();
+            }"""
+        )
+        inside = sample_pixel_at_genomic(viewer_page, "reads-canvas", 300, 7)
+        assert inside["a"] > 100
+        assert inside["r"] > 150 and inside["r"] > inside["b"]  # DEL red band present
+
 
 class TestColumnarReads:
     """E2E: the viewer decodes columnar reads (parallel arrays) into read objects."""

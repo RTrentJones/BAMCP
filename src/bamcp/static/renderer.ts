@@ -530,6 +530,9 @@ export class Renderer {
         const mode = this.state.settings.displayMode;
         if (mode === 'dv-strips' || mode === 'dv-composite') {
             this.renderDeepVariantReads(mode, width, height, scale);
+            // SVs span the genomic axis and apply in every display mode, so overlay
+            // them here too — the DV path returns before the normal-mode call below.
+            this.renderSvSpans(ctx, scale, width);
             return;
         }
 

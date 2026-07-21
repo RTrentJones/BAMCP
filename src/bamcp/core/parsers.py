@@ -636,6 +636,11 @@ def detect_indels(
                     del_events[del_len] = del_events.get(del_len, 0) + 1
 
             gap_depth[idx] = del_here
+            # Guard against a reference shorter than the BAM contig (mismatched
+            # reference): pileup can yield a column past ref_seq, and detect_variants
+            # makes the same check with `i >= len(ref_seq)`.
+            if idx >= ref_len:
+                continue
             depth = matched + del_here  # reads spanning this column
             if depth < min_depth:
                 continue

@@ -285,6 +285,18 @@ class TestDetectIndels:
         assert indels == []
 
     @pytest.mark.unit
+    def test_reference_shorter_than_pileup_does_not_crash(self, small_bam_path, ref_fasta_path):
+        """A reference shorter than the BAM contig must skip uncovered columns, not crash."""
+        # read5 spans 300-352; give a ref_seq covering only the first 20 of the 60
+        # requested columns so later columns exercise the ref_len guard.
+        short_ref = "A" * 20
+        indels, gap_depth = detect_indels(
+            small_bam_path, "chr1:300-360", ref_fasta_path, short_ref, min_vaf=0.1, min_depth=1
+        )
+        assert len(gap_depth) == 60  # gap_depth always spans the full region
+        assert all(v["ref"] != v["alt"] for v in indels)
+
+    @pytest.mark.unit
     def test_deletion_past_region_edge_is_skipped(self, small_bam_path, ref_fasta_path):
         """A deletion running past the fetched reference must not emit a ref==alt non-variant."""
         # read5's deletion is anchored at 324 with 3 deleted bases (325-327); a

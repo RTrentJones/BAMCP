@@ -520,6 +520,45 @@ class TestVariantSource:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_viewer_vcf_variant_has_confidence_and_evidence(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """Viewer VCF variants get a confidence + evidence entry (filter/panel need them)."""
+        from bamcp.core import tools as tools_module
+
+        def fake_load(vcf_path, region):
+            return [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                }
+            ]
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", fake_load)
+        result = await handle_visualize_region(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,
+        )
+        payload = result["_meta"]["ui/init"]
+        v = next(v for v in payload["variants"] if v["position"] == 133)  # viewer is 0-based
+        assert v["confidence"] in ("high", "medium", "low")
+        assert "artifact_risk" in v
+        assert "133:T>G" in payload["variant_evidence"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_vcf_support_is_unaffected_by_max_reads(
         self, small_bam_path, ref_fasta_path, tmp_path, monkeypatch
     ):

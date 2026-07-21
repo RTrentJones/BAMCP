@@ -461,6 +461,49 @@ class TestVariantSource:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_vcf_snv_gets_real_quality_metrics(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """VCF SNVs carry real per-read quality/position/MAPQ metrics, not zero-fill."""
+        from bamcp.core import tools as tools_module
+
+        def fake_load(vcf_path, region):
+            return [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                }
+            ]
+
+        monkeypatch.setattr(tools_module, "load_vcf_variants", fake_load)
+        result = await handle_visualize_region(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,
+        )
+        payload = result["_meta"]["ui/init"]
+        ev = payload["variant_evidence"]["133:T>G"]
+        # read3's G at 133 has base quality 'I' (Q40) — real metrics, not zero-fill.
+        assert ev["mean_quality"] > 0
+        assert sum(ev["quality_histogram"]) >= 1
+        assert sum(ev["mapq_histogram"]) >= 1
+        # The transient per-read arrays must not leak into the serialized variant.
+        v = next(v for v in payload["variants"] if v["position"] == 133)
+        assert "_alt_qualities" not in v
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_vcf_evidence_computed_without_reference(
         self, small_bam_path, config, tmp_path, monkeypatch
     ):

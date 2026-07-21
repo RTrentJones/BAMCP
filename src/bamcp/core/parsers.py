@@ -57,6 +57,18 @@ class RegionData:
 # Maximum region size to prevent DoS via unbounded memory allocation
 MAX_REGION_SIZE = 1_000_000  # 1 Mbp
 
+# pysam.pileup defaults to max_depth=8000, which silently truncates high-depth
+# (amplicon/targeted) sites. The count_coverage path this replaces was uncapped, so
+# lift the ceiling to effectively unbounded for the VCF-support pileup — a genomic
+# region is already capped at MAX_REGION_SIZE, and htslib allocates per-column lazily.
+PILEUP_MAX_DEPTH = 1_000_000_000
+
+# The VCF-support pileup runs a Python per-read loop, so it must not walk the whole
+# request window (up to MAX_REGION_SIZE) when only a few SNVs are present. SNV positions
+# within this many bases are grouped into one pileup interval — small enough to skip the
+# empty coverage between sparse sites, wide enough that clustered sites share a pass.
+SNV_PILEUP_MERGE_GAP = 1000
+
 # CIGAR operation codes
 CIGAR_SOFT_CLIP = 4  # S operation
 
@@ -319,7 +331,20 @@ def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
     return variants
 
 
-_BASE_INDEX = {"A": 0, "C": 1, "G": 2, "T": 3}
+def _merge_snv_intervals(positions: list[int], gap: int) -> list[tuple[int, int]]:
+    """Merge SNV positions into half-open ``[start, stop)`` pileup intervals.
+
+    A position within ``gap`` bases of the current interval's end is folded into it, so
+    clustered SNVs share one pileup pass while sparse SNVs stay narrow — keeping the
+    per-read pileup loop off the unrelated coverage between distant sites.
+    """
+    intervals: list[tuple[int, int]] = []
+    for p in sorted(positions):
+        if intervals and p - intervals[-1][1] <= gap:
+            intervals[-1] = (intervals[-1][0], p + 1)
+        else:
+            intervals.append((p, p + 1))
+    return intervals
 
 
 def annotate_vcf_snv_support(
@@ -331,59 +356,127 @@ def annotate_vcf_snv_support(
     min_baseq: int = 0,
     index_filename: str | None = None,
 ) -> list[dict]:
-    """Attach truncation-free read-level support to VCF SNV variants (in place).
+    """Attach truncation-free read-level support + per-read metrics to VCF SNVs (in place).
 
-    For each VCF single-nucleotide variant, counts forward/reverse reads carrying
-    the alt allele at that site using ``pysam.count_coverage`` — htslib counts every
-    read at each position, so this is immune to the ``max_reads`` cap that limits the
-    serialized read list (and to which alignments happen to be retained). Adds
-    ``strand_forward``/``strand_reverse``/``read_depth``/``read_support_vaf``. Indels
-    and SVs are left unchanged (single-base counts can't corroborate them).
+    Pileups each VCF SNV site — htslib sees every read there, so this is immune to
+    the ``max_reads`` cap that limits the serialized read list — and, for reads
+    carrying the alt allele, collects strand, base quality, position-in-read, and
+    MAPQ. Adds ``strand_forward``/``strand_reverse``/``read_depth``/
+    ``read_support_vaf`` plus raw ``_alt_qualities``/``_alt_positions``/``_alt_mapqs``
+    arrays that :func:`bamcp.analysis.evidence._vcf_evidence` turns into the
+    quality/position/MAPQ histograms and mean quality. Indels/SVs are untouched
+    (single-base support can't corroborate them).
     """
     snvs = [v for v in variants if v.get("source") == "vcf" and len(v["ref"]) == 1 == len(v["alt"])]
     if not snvs:
         return variants
 
-    contig, start, end = parse_region(region)
-    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        fwd = samfile.count_coverage(
-            contig,
-            start,
-            end,
-            quality_threshold=min_baseq,
-            read_callback=lambda r: read_passes_filters(r, min_mapq) and not r.is_reverse,
-        )
-        rev = samfile.count_coverage(
-            contig,
-            start,
-            end,
-            quality_threshold=min_baseq,
-            read_callback=lambda r: read_passes_filters(r, min_mapq) and r.is_reverse,
-        )
-
-    length = end - start
+    contig = parse_region(region)[0]
+    # A position may host several alt alleles, so index the targets by position.
+    by_pos: dict[int, list[dict]] = {}
     for v in snvs:
-        i = v["position"] - start
-        base = _BASE_INDEX.get(v["alt"].upper())
-        if base is None or not (0 <= i < length):
-            continue
-        f = int(fwd[base][i])
-        r = int(rev[base][i])
-        depth = sum(int(fwd[b][i]) + int(rev[b][i]) for b in range(4))
-        support_vaf = round((f + r) / depth, 3) if depth else 0.0
-        v["strand_forward"] = f
-        v["strand_reverse"] = r
-        v["read_depth"] = depth
-        v["read_support_vaf"] = support_vaf
-        # If the VCF omitted INFO DP/AF, show BAMCP's counted support in the
-        # depth/VAF/alt-reads the viewer and summaries render, rather than a
-        # misleading 0 (and keep the three mutually consistent).
+        by_pos.setdefault(v["position"], []).append(v)
+        # Zero-init every in-region SNV up front. pileup() emits no column for a
+        # position with no overlapping reads, so covered columns overwrite these while
+        # uncovered SNVs keep explicit zeros — letting callers distinguish true zero
+        # BAM support from an unannotated variant (as the old count_coverage loop did).
+        v["strand_forward"] = 0
+        v["strand_reverse"] = 0
+        v["read_depth"] = 0
+        v["read_support_vaf"] = 0.0
+        v["_alt_qualities"] = []
+        v["_alt_positions"] = []
+        v["_alt_mapqs"] = []
+
+    # Pileup only short intervals around the SNVs — not the whole request window, which
+    # (up to MAX_REGION_SIZE) would make this Python per-read loop walk unrelated coverage.
+    intervals = _merge_snv_intervals(list(by_pos), SNV_PILEUP_MERGE_GAP)
+
+    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
+        # stepper="nofilter" leaves us to apply the base-quality threshold ourselves
+        # (below), so pileup's own min_base_quality is a no-op here; max_depth is lifted
+        # off pysam's 8000 default so high-depth sites aren't silently truncated.
+        columns = (
+            column
+            for iv_start, iv_stop in intervals
+            for column in samfile.pileup(
+                contig,
+                iv_start,
+                iv_stop,
+                truncate=True,
+                min_base_quality=0,
+                stepper="nofilter",
+                max_depth=PILEUP_MAX_DEPTH,
+            )
+        )
+        for column in columns:
+            targets = by_pos.get(column.reference_pos)
+            if not targets:
+                continue
+
+            depth = 0
+            # Per-alt accumulators for alt-supporting reads at this column.
+            acc: dict[str, dict] = {
+                v["alt"].upper(): {"fwd": 0, "rev": 0, "quals": [], "positions": [], "mapqs": []}
+                for v in targets
+            }
+            for pread in column.pileups:
+                aln = pread.alignment
+                if not read_passes_filters(aln, min_mapq) or pread.is_del or pread.is_refskip:
+                    continue
+                qpos = pread.query_position
+                seq = aln.query_sequence
+                if qpos is None or seq is None:
+                    continue
+                base = seq[qpos].upper()
+                # count_coverage's denominator sums only A/C/G/T, so N/no-call bases
+                # must not inflate the depth denominator here either.
+                if base not in "ACGT":
+                    continue
+                quals = aln.query_qualities
+                # Honor min_baseq for both depth and support so VCF-primary VAF/confidence
+                # agrees with count_coverage(quality_threshold=min_baseq) used elsewhere.
+                # count_coverage only counts a base when a stored quality meets the
+                # threshold, so under a positive min_baseq a no-QUAL ("*") read — or one
+                # whose quality array is too short — does NOT count.
+                if min_baseq and not (
+                    quals is not None and qpos < len(quals) and quals[qpos] >= min_baseq
+                ):
+                    continue
+                depth += 1
+                support = acc.get(base)
+                if support is None:
+                    continue
+                if aln.is_reverse:
+                    support["rev"] += 1
+                else:
+                    support["fwd"] += 1
+                if quals is not None and qpos < len(quals):
+                    support["quals"].append(int(quals[qpos]))
+                    support["positions"].append(min(qpos, len(quals) - qpos - 1))
+                support["mapqs"].append(aln.mapping_quality)
+
+            for v in targets:
+                support = acc[v["alt"].upper()]
+                v["strand_forward"] = support["fwd"]
+                v["strand_reverse"] = support["rev"]
+                v["read_depth"] = depth
+                v["read_support_vaf"] = (
+                    round((support["fwd"] + support["rev"]) / depth, 3) if depth else 0.0
+                )
+                v["_alt_qualities"] = support["quals"]
+                v["_alt_positions"] = support["positions"]
+                v["_alt_mapqs"] = support["mapqs"]
+
+    # Fill any DP/AF/alt_count the VCF omitted from the counted support, for every SNV
+    # (covered or not), keeping the displayed depth/VAF/alt-reads mutually consistent.
+    for v in snvs:
         if not v.get("depth"):
-            v["depth"] = depth
+            v["depth"] = v["read_depth"]
         if not v.get("vaf"):
-            v["vaf"] = support_vaf
+            v["vaf"] = v["read_support_vaf"]
         if not v.get("alt_count"):
-            v["alt_count"] = f + r
+            v["alt_count"] = v["strand_forward"] + v["strand_reverse"]
 
     return variants
 

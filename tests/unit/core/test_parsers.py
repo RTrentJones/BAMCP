@@ -4,9 +4,13 @@ import pysam
 import pytest
 
 from bamcp.core.parsers import (
+    PILEUP_MAX_DEPTH,
+    SNV_PILEUP_MERGE_GAP,
     AlignedRead,
     RegionData,
     SoftClip,
+    _merge_snv_intervals,
+    annotate_vcf_snv_support,
     detect_indels,
     detect_variants,
     extract_soft_clips,
@@ -822,3 +826,185 @@ class TestScanVariantsChunked:
             small_bam_path, "chr1", ref_fasta_path, min_depth=10
         )
         assert len(strict_variants) <= len(all_variants)
+
+
+class TestAnnotateVcfSnvSupport:
+    """Read-level support counting for VCF SNVs via per-site pileup."""
+
+    @staticmethod
+    def _write_bam(path, reads) -> str:
+        """Write a coordinate-sorted, indexed BAM from ``reads`` at reference_start=100.
+
+        ``reads`` is an iterable of ``(name, flag, seq, qualstr)`` — one 10M read each.
+        ``qualstr=None`` writes a no-QUAL ("*") read (``query_qualities is None``).
+        """
+        bam_path = str(path / "vcf_support.bam")
+        header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": "chr1", "LN": 1000}]}
+        with pysam.AlignmentFile(bam_path, "wb", header=header) as outf:
+            for name, flag, seq, qualstr in reads:
+                a = pysam.AlignedSegment()
+                a.query_name = name
+                a.query_sequence = seq
+                a.flag = flag
+                a.reference_id = 0
+                a.reference_start = 100
+                a.mapping_quality = 60
+                a.cigartuples = [(0, len(seq))]
+                if qualstr is not None:
+                    a.query_qualities = pysam.qualitystring_to_array(qualstr)
+                outf.write(a)
+        pysam.index(bam_path)
+        return bam_path
+
+    def _snv(self, position: int = 100) -> list[dict]:
+        return [
+            {
+                "contig": "chr1",
+                "position": position,
+                "ref": "A",
+                "alt": "T",
+                "source": "vcf",
+            }
+        ]
+
+    @pytest.mark.unit
+    def test_min_baseq_excludes_low_quality_support(self, tmp_path):
+        """A base below min_baseq is dropped from both depth and alt support."""
+        # Two reads carrying alt 'T' at pos 100; the reverse read's alt base is Q2 ('#').
+        bam = self._write_bam(
+            tmp_path,
+            [("hi", 0, "TACGTACGTA", "I" * 10), ("lo", 16, "TACGTACGTA", "#" + "I" * 9)],
+        )
+
+        # min_baseq=0: both reads count.
+        v = self._snv()[0]
+        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=0)
+        assert v["read_depth"] == 2
+        assert v["strand_forward"] == 1 and v["strand_reverse"] == 1
+
+        # min_baseq=30: the Q2 reverse-strand base is excluded from depth AND support,
+        # matching count_coverage(quality_threshold=min_baseq) used elsewhere.
+        v = self._snv()[0]
+        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=30)
+        assert v["read_depth"] == 1
+        assert v["strand_forward"] == 1 and v["strand_reverse"] == 0
+        assert v["_alt_qualities"] == [40]  # only the surviving high-quality base
+
+    @pytest.mark.unit
+    def test_non_acgt_bases_excluded_from_depth(self, tmp_path):
+        """An N no-call is not counted in the depth denominator (count_coverage parity)."""
+        bam = self._write_bam(
+            tmp_path,
+            [("alt", 0, "TACGTACGTA", "I" * 10), ("ncall", 0, "NACGTACGTA", "I" * 10)],
+        )
+        v = self._snv()[0]
+        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=0)
+        assert v["read_depth"] == 1  # the N read is excluded from the denominator
+        assert v["strand_forward"] == 1 and v["strand_reverse"] == 0
+        assert v["read_support_vaf"] == 1.0
+
+    @pytest.mark.unit
+    def test_missing_qual_rejected_when_min_baseq_set(self, tmp_path):
+        """A no-QUAL ('*') base counts with no threshold but is excluded once min_baseq>0,
+        matching count_coverage (which only counts a base whose stored quality passes)."""
+        bam = self._write_bam(tmp_path, [("noqual", 0, "TACGTACGTA", None)])
+
+        v = self._snv()[0]
+        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=0)
+        assert v["read_depth"] == 1  # no threshold requested -> counted
+
+        v = self._snv()[0]
+        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=20)
+        assert v["read_depth"] == 0  # no stored quality can't satisfy the threshold
+        assert v["strand_forward"] == 0 and v["strand_reverse"] == 0
+
+    @pytest.mark.unit
+    def test_uncovered_snv_gets_zero_support(self, tmp_path):
+        """A VCF SNV with no overlapping reads is annotated with explicit zero support,
+        distinguishing true zero BAM support from an unannotated variant."""
+        bam = self._write_bam(tmp_path, [("r", 0, "TACGTACGTA", "I" * 10)])  # covers 100-110
+        v = self._snv(position=200)[0]  # no reads at 200
+        annotate_vcf_snv_support(bam, "chr1:90-300", None, [v], min_baseq=0)
+        assert v["read_depth"] == 0
+        assert v["strand_forward"] == 0 and v["strand_reverse"] == 0
+        assert v["read_support_vaf"] == 0.0
+        assert v["_alt_qualities"] == [] and v["_alt_positions"] == [] and v["_alt_mapqs"] == []
+        # DP/AF fill-in still runs for uncovered SNVs (VCF omitted them here).
+        assert v["depth"] == 0 and v["vaf"] == 0.0 and v["alt_count"] == 0
+
+    @pytest.mark.unit
+    def test_pileup_uses_unbounded_max_depth(self, tmp_path, monkeypatch):
+        """The support pileup lifts pysam's 8000 default so deep sites aren't truncated."""
+        from bamcp.core import parsers as parsers_mod
+
+        bam = self._write_bam(tmp_path, [("hi", 0, "TACGTACGTA", "I" * 10)])
+        captured: dict = {}
+        real_open = parsers_mod._open_alignment
+
+        class _Spy:
+            """Wraps the real AlignmentFile, recording pileup kwargs (pysam's type
+            is immutable, so we can't patch its method directly)."""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __enter__(self):
+                self._inner.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+            def pileup(self, *args, **kwargs):
+                captured.update(kwargs)
+                return self._inner.pileup(*args, **kwargs)
+
+        monkeypatch.setattr(
+            parsers_mod, "_open_alignment", lambda *a, **k: _Spy(real_open(*a, **k))
+        )
+        annotate_vcf_snv_support(bam, "chr1:90-110", None, self._snv())
+        assert captured.get("max_depth") == PILEUP_MAX_DEPTH
+        assert PILEUP_MAX_DEPTH >= 1_000_000_000
+
+    @pytest.mark.unit
+    def test_pileup_restricted_to_snv_intervals(self, tmp_path, monkeypatch):
+        """The pileup covers only narrow intervals around the SNVs, never the whole
+        (potentially 1 Mb) request window."""
+        from bamcp.core import parsers as parsers_mod
+
+        bam = self._write_bam(tmp_path, [("hi", 0, "TACGTACGTA", "I" * 10)])
+        windows: list[tuple[int, int]] = []
+        real_open = parsers_mod._open_alignment
+
+        class _Spy:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __enter__(self):
+                self._inner.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+            def pileup(self, contig, iv_start, iv_stop, *args, **kwargs):
+                windows.append((iv_start, iv_stop))
+                return self._inner.pileup(contig, iv_start, iv_stop, *args, **kwargs)
+
+        monkeypatch.setattr(
+            parsers_mod, "_open_alignment", lambda *a, **k: _Spy(real_open(*a, **k))
+        )
+        # One SNV at 100 inside a 200 kb window: pileup must touch [100, 101), not the span.
+        annotate_vcf_snv_support(bam, "chr1:0-200000", None, self._snv(position=100))
+        assert windows == [(100, 101)]
+
+    @pytest.mark.unit
+    def test_merge_snv_intervals(self):
+        """Sparse positions stay narrow; positions within the gap merge into one interval."""
+        assert _merge_snv_intervals([], SNV_PILEUP_MERGE_GAP) == []
+        assert _merge_snv_intervals([500], SNV_PILEUP_MERGE_GAP) == [(500, 501)]
+        # 100 and 200 are within the gap -> one interval; 50_000 is far -> its own.
+        assert _merge_snv_intervals([200, 100, 50_000], SNV_PILEUP_MERGE_GAP) == [
+            (100, 201),
+            (50_000, 50_001),
+        ]

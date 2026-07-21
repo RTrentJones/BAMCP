@@ -1352,6 +1352,36 @@ class TestMediumRoadmapCoverage:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_variants_tile_falls_back_to_exact_below_indel_threshold(self, monkeypatch):
+        """A variants request under the indel threshold must not lose indel detection
+        just because tile rounding widens the region past that threshold."""
+        from bamcp.core import tools as tools_module
+
+        regions_seen = []
+
+        async def mock_ensure_cached_index(file_path, cfg):
+            return None
+
+        def mock_fetch_candidate_variants_only(*args):
+            regions_seen.append(args[1])  # (bam_path, region, reference, ...)
+            return RegionData("chr1", 100, 200, reads=[], coverage=[1] * 100, variants=[])
+
+        monkeypatch.setattr(tools_module, "_ensure_cached_index", mock_ensure_cached_index)
+        monkeypatch.setattr(
+            tools_module, "fetch_candidate_variants_only", mock_fetch_candidate_variants_only
+        )
+        # Threshold above the request (100bp) but below the tile (chr1:0-4096).
+        monkeypatch.setattr(tools_module, "INDEL_DETECTION_MAX_REGION", 150)
+
+        cfg = BAMCPConfig(cache_ttl=60)
+        await tools_module._fetch_region_with_timeout(
+            "sample.bam", "chr1:100-200", "ref.fa", cfg, mode="variants"
+        )
+        # Exact region used (no tile widening), so indel detection stays enabled.
+        assert regions_seen == ["chr1:100-200"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_fetch_region_overlays_vcf_and_deduplicates(self, config, monkeypatch, tmp_path):
         """VCF variants should be overlaid without duplicating matching candidate variants."""
         from bamcp.core import tools as tools_module

@@ -22,6 +22,7 @@ from ..constants import (
     BAM_PARSE_TIMEOUT_SECONDS,
     DEFAULT_CACHE_TTL_SECONDS,
     DEFAULT_CONTIG,
+    INDEL_DETECTION_MAX_REGION,
     REGION_TILE_SIZE,
     SCAN_VARIANTS_CHUNK_SIZE,
     SCAN_VARIANTS_MAX_REGION,
@@ -438,8 +439,14 @@ async def _fetch_readless_tiled(
     """
     contig, r_start, r_end = parse_region(region)
     t_start, t_end = _tile_bounds(r_start, r_end, REGION_TILE_SIZE)
-    # Never let the widened tile exceed the parser's max region size.
-    if (t_end - t_start) > MAX_REGION_SIZE:
+    tile_size = t_end - t_start
+    # Fall back to the exact region when widening to a tile would either exceed the
+    # parser's max region, or (variants mode) cross the indel-detection threshold
+    # the exact request stays under — otherwise the widened tile would make
+    # _detect_indels_if_small skip the pileup and silently drop indel candidates.
+    if tile_size > MAX_REGION_SIZE or (
+        mode == "variants" and tile_size > INDEL_DETECTION_MAX_REGION >= (r_end - r_start)
+    ):
         t_start, t_end = r_start, r_end
     tile_region = f"{contig}:{t_start}-{t_end}"
 

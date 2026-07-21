@@ -12,7 +12,7 @@
  */
 
 import { BAMCPClient, DebugInfo } from "./client";
-import { BASE_COLORS, displayPos } from "./constants";
+import { BASE_COLORS, displayPos, escapeHtml } from "./constants";
 import { Renderer } from "./renderer";
 import { StateManager, DEFAULT_SETTINGS } from "./state";
 import {
@@ -27,6 +27,28 @@ import {
 } from "./types";
 
 const CONTEXT_UPDATE_DEBOUNCE_MS = 300;
+
+/** Short SV type label: the VCF SVTYPE, else the symbolic alt (`<DEL>` → `DEL`), else `SV`. */
+function svTypeLabel(v: Variant): string {
+    if (v.sv_type) return v.sv_type;
+    if (v.alt?.startsWith('<')) return v.alt.replace(/[<>]/g, '');
+    return 'SV';
+}
+
+/** Render per-sample genotypes as `name=allele/allele` (missing alleles as `.`). */
+function formatGenotypes(samples?: Record<string, Record<string, unknown>>): string[] {
+    if (!samples) return [];
+    return Object.entries(samples).map(([name, data]) => {
+        const gt = (data as Record<string, unknown> | null)?.GT;
+        let gtStr = '.';
+        if (Array.isArray(gt)) {
+            gtStr = gt.map(a => (a == null ? '.' : String(a))).join('/');
+        } else if (gt != null) {
+            gtStr = String(gt);
+        }
+        return `${name}=${gtStr}`;
+    });
+}
 
 class BAMCPViewer {
     private client: BAMCPClient;
@@ -774,10 +796,28 @@ class BAMCPViewer {
                     ? `${v.strand_forward}F:${v.strand_reverse}R`
                     : '-';
 
+            // Structural variants carry a symbolic alt (<DEL>/<DUP>/…); render it as a
+            // typed badge and escape all VCF-derived text before injecting it as HTML.
+            let altCell: string;
+            if (v.variant_kind === 'sv') {
+                const svType = svTypeLabel(v);
+                const span = v.sv_end
+                    ? `${displayPos(v.position).toLocaleString()}–${Number(v.sv_end).toLocaleString()}`
+                    : '';
+                altCell = `<span class="sv-badge" title="${escapeHtml(v.alt)}${span ? ` (${span})` : ''}">${escapeHtml(svType)}</span>`;
+            } else {
+                altCell = `<span style="color:${BASE_COLORS[v.alt] || '#333'};font-weight:bold">${escapeHtml(v.alt)}</span>`;
+            }
+            // A multi-sample VCF gets a small sample-count marker on the position cell.
+            const sampleCount = v.sample_names?.length ?? 0;
+            const sampleMarker = sampleCount > 1
+                ? ` <span class="sample-count" title="${sampleCount} samples genotyped">×${sampleCount}</span>`
+                : '';
+
             tr.innerHTML = `
-                <td>${displayPos(v.position).toLocaleString()}</td>
-                <td>${v.ref}</td>
-                <td style="color:${BASE_COLORS[v.alt] || '#333'};font-weight:bold">${v.alt}</td>
+                <td>${displayPos(v.position).toLocaleString()}${sampleMarker}</td>
+                <td>${escapeHtml(v.ref)}</td>
+                <td>${altCell}</td>
                 <td style="color:${vafColor};font-weight:500">${(v.vaf * 100).toFixed(1)}%</td>
                 <td>${v.depth}</td>
                 <td>${strandDisplay}</td>
@@ -910,6 +950,43 @@ class BAMCPViewer {
         this.tooltip.style.top = top + 'px';
     }
 
+    /** Populate the SV-metadata + multi-sample-genotype details block, or hide it. */
+    private renderVariantDetails(variant: Variant): void {
+        const el = document.getElementById('variant-details');
+        if (!el) return;
+
+        const rows: string[] = [];
+        if (variant.variant_kind === 'sv') {
+            rows.push(
+                `<span class="detail-key">Type</span>` +
+                `<span class="sv-badge">${escapeHtml(svTypeLabel(variant))}</span>`
+            );
+            if (variant.sv_end) {
+                const span = `${displayPos(variant.position).toLocaleString()}` +
+                    `–${Number(variant.sv_end).toLocaleString()}`;
+                rows.push(`<span class="detail-key">Span</span>${escapeHtml(span)}`);
+            }
+            const svLen = Array.isArray(variant.sv_len) ? variant.sv_len[0] : variant.sv_len;
+            if (svLen != null) {
+                rows.push(`<span class="detail-key">Length</span>${escapeHtml(String(svLen))} bp`);
+            }
+        }
+
+        const genotypes = formatGenotypes(variant.samples);
+        if (genotypes.length) {
+            const items = genotypes.map(g => `<li>${escapeHtml(g)}</li>`).join('');
+            rows.push(`<span class="detail-key">Genotypes</span><ul class="genotype-list">${items}</ul>`);
+        }
+
+        if (rows.length) {
+            el.innerHTML = rows.map(r => `<div class="detail-row">${r}</div>`).join('');
+            el.classList.remove('hidden');
+        } else {
+            el.innerHTML = '';
+            el.classList.add('hidden');
+        }
+    }
+
     /** Blank every evidence chart/stat so a no-evidence variant shows nothing stale. */
     private clearEvidenceCharts(): void {
         for (const id of ['strand-chart', 'quality-chart', 'position-chart', 'mapq-chart']) {
@@ -934,6 +1011,10 @@ class BAMCPViewer {
         // Update Title
         document.getElementById('evidence-title')!.textContent =
             `Variant Evidence: ${variant.contig}:${displayPos(variant.position)} ${variant.ref}>${variant.alt}`;
+
+        // SV metadata + multi-sample genotypes render for every variant, independent of
+        // whether it has BAMCP read-level evidence (SVs/indels don't).
+        this.renderVariantDetails(variant);
 
         if (!evidence) {
             // No BAMCP read-level evidence for this variant (e.g. a pass-through VCF

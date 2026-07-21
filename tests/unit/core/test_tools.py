@@ -16,6 +16,8 @@ from bamcp.constants import (
 from bamcp.core.parsers import AlignedRead, RegionData
 from bamcp.core.serialization import serialize_region_data
 from bamcp.core.tools import (
+    _format_genotypes,
+    _format_variant_line,
     close_external_clients,
     handle_get_coverage,
     handle_get_region_summary,
@@ -39,6 +41,69 @@ def config():
 def config_with_ref(ref_fasta_path):
     """Config with reference path."""
     return BAMCPConfig(reference=ref_fasta_path)
+
+
+class TestVariantLineFormatting:
+    """Text-summary formatting for SV and multi-sample variants."""
+
+    @pytest.mark.unit
+    def test_snv_line_unchanged(self):
+        v = {"contig": "chr1", "position": 999, "ref": "A", "alt": "T", "vaf": 0.5, "depth": 20}
+        # 0-based 999 -> 1-based 1000.
+        assert _format_variant_line(v) == "  chr1:1000 A>T VAF=50.0% depth=20"
+
+    @pytest.mark.unit
+    def test_sv_line_describes_type_and_span(self):
+        v = {
+            "contig": "chr1",
+            "position": 999,
+            "ref": "N",
+            "alt": "<DEL>",
+            "variant_kind": "sv",
+            "vaf": 0.0,
+            "depth": 0,
+            "sv_type": "DEL",
+            "sv_end": 5000,
+            "sv_len": [-4000],
+        }
+        line = _format_variant_line(v)
+        assert line == "  chr1:1000 <DEL> span=1000-5000 len=-4000"
+
+    @pytest.mark.unit
+    def test_sv_type_falls_back_to_symbolic_alt(self):
+        v = {
+            "contig": "chr2",
+            "position": 0,
+            "ref": "N",
+            "alt": "<DUP>",
+            "variant_kind": "sv",
+            "vaf": 0.0,
+            "depth": 0,
+            "sv_type": None,
+            "sv_end": None,
+            "sv_len": None,
+        }
+        assert _format_variant_line(v) == "  chr2:1 <DUP>"
+
+    @pytest.mark.unit
+    def test_multisample_genotypes_appended(self):
+        v = {
+            "contig": "chr1",
+            "position": 99,
+            "ref": "A",
+            "alt": "G",
+            "vaf": 0.5,
+            "depth": 10,
+            "samples": {"NA12878": {"GT": [0, 1]}, "NA12891": {"GT": [1, 1]}},
+        }
+        line = _format_variant_line(v)
+        assert line.endswith("[NA12878=0/1 NA12891=1/1]")
+
+    @pytest.mark.unit
+    def test_format_genotypes_handles_missing_alleles(self):
+        assert _format_genotypes({"s": {"GT": [None, 1]}}) == ["s=./1"]
+        assert _format_genotypes({"s": {}}) == ["s=."]
+        assert _format_genotypes({}) == []
 
 
 class TestSerializeRegionData:

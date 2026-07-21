@@ -9,6 +9,8 @@ from bamcp.constants import (
     DEFAULT_CACHE_TTL_SECONDS,
     DEFAULT_HOST,
     DEFAULT_MAX_READS,
+    DEFAULT_MAX_REMOTE_INDEX_BYTES,
+    DEFAULT_MIN_BASEQ,
     DEFAULT_MIN_DEPTH,
     DEFAULT_MIN_MAPQ,
     DEFAULT_MIN_VAF,
@@ -31,11 +33,13 @@ class TestBAMCPConfig:
         assert config.min_vaf == DEFAULT_MIN_VAF
         assert config.min_depth == DEFAULT_MIN_DEPTH
         assert config.min_mapq == DEFAULT_MIN_MAPQ
+        assert config.min_baseq == DEFAULT_MIN_BASEQ
         assert config.transport == "stdio"
         assert config.host == DEFAULT_HOST
         assert config.port == DEFAULT_PORT
         assert config.auth_enabled is False
         assert config.token_expiry == DEFAULT_TOKEN_EXPIRY_SECONDS
+        assert config.max_remote_index_bytes == DEFAULT_MAX_REMOTE_INDEX_BYTES
 
     @pytest.mark.unit
     def test_custom_values(self):
@@ -47,6 +51,7 @@ class TestBAMCPConfig:
             min_vaf=0.05,
             min_depth=20,
             min_mapq=10,
+            min_baseq=15,
         )
         assert config.reference == "/path/to/ref.fa"
         assert config.max_reads == 5000
@@ -54,6 +59,7 @@ class TestBAMCPConfig:
         assert config.min_vaf == 0.05
         assert config.min_depth == 20
         assert config.min_mapq == 10
+        assert config.min_baseq == 15
 
     @pytest.mark.unit
     def test_from_env_defaults(self, monkeypatch):
@@ -70,6 +76,7 @@ class TestBAMCPConfig:
         assert config.min_vaf == DEFAULT_MIN_VAF
         assert config.min_depth == DEFAULT_MIN_DEPTH
         assert config.min_mapq == DEFAULT_MIN_MAPQ
+        assert config.min_baseq == DEFAULT_MIN_BASEQ
 
     @pytest.mark.unit
     def test_from_env_custom(self, monkeypatch):
@@ -80,6 +87,8 @@ class TestBAMCPConfig:
         monkeypatch.setenv("BAMCP_MIN_VAF", "0.05")
         monkeypatch.setenv("BAMCP_MIN_DEPTH", "20")
         monkeypatch.setenv("BAMCP_MIN_MAPQ", "30")
+        monkeypatch.setenv("BAMCP_MIN_BASEQ", "25")
+        monkeypatch.setenv("BAMCP_MAX_REMOTE_INDEX_BYTES", "1024")
 
         config = BAMCPConfig.from_env()
         assert config.reference == "/data/hg38.fa"
@@ -88,6 +97,8 @@ class TestBAMCPConfig:
         assert config.min_vaf == 0.05
         assert config.min_depth == 20
         assert config.min_mapq == 30
+        assert config.min_baseq == 25
+        assert config.max_remote_index_bytes == 1024
 
     @pytest.mark.unit
     def test_from_env_partial(self, monkeypatch):
@@ -263,6 +274,27 @@ class TestConfigValidation:
         assert config.min_mapq == 255
 
     @pytest.mark.unit
+    def test_min_baseq_negative(self):
+        """Negative min_baseq should raise ValueError."""
+        with pytest.raises(ValueError, match="min_baseq must be between 0 and 255"):
+            BAMCPConfig(min_baseq=-1)
+
+    @pytest.mark.unit
+    def test_min_baseq_too_high(self):
+        """min_baseq above 255 should raise ValueError."""
+        with pytest.raises(ValueError, match="min_baseq must be between 0 and 255"):
+            BAMCPConfig(min_baseq=256)
+
+    @pytest.mark.unit
+    def test_min_baseq_boundary_valid(self):
+        """min_baseq at boundaries (0 and 255) should be valid."""
+        config = BAMCPConfig(min_baseq=0)
+        assert config.min_baseq == 0
+
+        config = BAMCPConfig(min_baseq=255)
+        assert config.min_baseq == 255
+
+    @pytest.mark.unit
     def test_default_window_zero(self):
         """default_window of 0 should raise ValueError."""
         with pytest.raises(ValueError, match="default_window must be at least 1"):
@@ -325,3 +357,9 @@ class TestConfigValidation:
         """cache_ttl of 0 (disable caching) should be valid."""
         config = BAMCPConfig(cache_ttl=0)
         assert config.cache_ttl == 0
+
+    @pytest.mark.unit
+    def test_max_remote_index_bytes_must_be_positive(self):
+        """Remote index download cap must be positive."""
+        with pytest.raises(ValueError, match="max_remote_index_bytes must be at least 1"):
+            BAMCPConfig(max_remote_index_bytes=0)

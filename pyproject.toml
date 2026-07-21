@@ -63,6 +63,7 @@ packages = ["src/bamcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 asyncio_mode = "auto"
 # E2E tests use Playwright's sync API which conflicts with pytest-asyncio's
 # event loop. Run E2E separately: pytest tests/e2e/

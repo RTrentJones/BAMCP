@@ -388,6 +388,7 @@ def fetch_region(
     index_filename: str | None = None,
     min_vaf: float = 0.1,
     min_depth: int = 3,
+    detect: bool = True,
 ) -> RegionData:
     """
     Fetch reads from a BAM/CRAM file for a given region.
@@ -515,21 +516,25 @@ def fetch_region(
 
     # Context manager ensures samfile is closed before we continue
 
-    indels, gap_depth = _detect_indels_if_small(
-        bam_path,
-        region,
-        reference_path,
-        ref_seq,
-        min_mapq,
-        min_baseq,
-        index_filename,
-        min_vaf,
-        min_depth,
-    )
-    variants = detect_variants(
-        (cov_A, cov_C, cov_G, cov_T), ref_seq, contig, start, min_vaf, min_depth, gap_depth
-    )
-    variants.extend(indels)
+    # Candidate detection can be skipped (e.g. VCF-primary, where local candidates
+    # would be discarded) to avoid scanning a broad region for nothing.
+    variants: list[dict] = []
+    if detect:
+        indels, gap_depth = _detect_indels_if_small(
+            bam_path,
+            region,
+            reference_path,
+            ref_seq,
+            min_mapq,
+            min_baseq,
+            index_filename,
+            min_vaf,
+            min_depth,
+        )
+        variants = detect_variants(
+            (cov_A, cov_C, cov_G, cov_T), ref_seq, contig, start, min_vaf, min_depth, gap_depth
+        )
+        variants.extend(indels)
 
     return RegionData(
         contig=contig,

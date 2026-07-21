@@ -376,8 +376,13 @@ async def _compute_region_data(
     min_vaf: float | None,
     min_depth: int | None,
     index_path: str | None,
+    detect: bool = True,
 ) -> RegionData:
-    """Run the mode-appropriate parser for an exact region under the parse timeout."""
+    """Run the mode-appropriate parser for an exact region under the parse timeout.
+
+    ``detect=False`` skips candidate detection in the full-read path (used by the
+    VCF-primary fetch, whose local candidates would be discarded anyway).
+    """
     effective_min_vaf = min_vaf if min_vaf is not None else config.min_vaf
     effective_min_depth = min_depth if min_depth is not None else config.min_depth
 
@@ -421,6 +426,7 @@ async def _compute_region_data(
             index_path,
             effective_min_vaf,
             effective_min_depth,
+            detect,
         ),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
     )
@@ -547,7 +553,9 @@ async def _fetch_region_with_timeout(
     if cached := _get_cached_region(region_cache, key, ttl):
         return cached
 
-    if mode == "variants" and vcf_path and not reference:
+    # Readless VCF-only shortcut: skip local candidate detection when the VCF is
+    # authoritative (vcf_primary) or when there's no reference to detect against.
+    if mode == "variants" and vcf_path and (vcf_primary or not reference):
         contig, start, end = parse_region(region)
         vcf_variants = await asyncio.wait_for(
             asyncio.to_thread(load_vcf_variants, vcf_path, region),
@@ -575,8 +583,17 @@ async def _fetch_region_with_timeout(
 
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
+    # VCF-primary discards local candidates, so skip detecting them (full-read path).
     data = await _compute_region_data(
-        file_path, region, reference, config, mode, min_vaf, min_depth, index_path
+        file_path,
+        region,
+        reference,
+        config,
+        mode,
+        min_vaf,
+        min_depth,
+        index_path,
+        detect=not vcf_primary,
     )
 
     if vcf_path:

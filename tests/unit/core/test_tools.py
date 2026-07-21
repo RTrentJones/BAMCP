@@ -639,6 +639,75 @@ class TestVariantSource:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_vcf_primary_variants_skips_local_detection(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """vcf_primary get_variants short-circuits — no BAMCP candidate detection with a ref."""
+        from bamcp.core import tools as tools_module
+
+        def boom(*a, **k):
+            raise AssertionError("vcf_primary must not run local candidate detection")
+
+        monkeypatch.setattr(tools_module, "fetch_candidate_variants_only", boom)
+        monkeypatch.setattr(
+            tools_module,
+            "load_vcf_variants",
+            lambda vcf, region: [
+                {
+                    "contig": "chr1",
+                    "position": 133,
+                    "ref": "T",
+                    "alt": "G",
+                    "variant_kind": "snv",
+                    "vaf": 0.5,
+                    "depth": 10,
+                    "alt_count": 5,
+                    "source": "vcf",
+                }
+            ],
+        )
+        result = await handle_get_variants(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,  # has a reference — old path would have scanned candidates
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["variants"] and all(v["source"] == "vcf" for v in payload["variants"])
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_vcf_primary_visualize_skips_variant_detection(
+        self, small_bam_path, config_with_ref, tmp_path, monkeypatch
+    ):
+        """vcf_primary visualize fetches reads/coverage but passes detect=False to fetch_region."""
+        from bamcp.core import tools as tools_module
+
+        recorded = {}
+        real_fetch = tools_module.fetch_region
+
+        def spy_fetch_region(*args):
+            recorded["detect"] = args[-1]  # detect is the last positional arg
+            return real_fetch(*args)
+
+        monkeypatch.setattr(tools_module, "fetch_region", spy_fetch_region)
+        monkeypatch.setattr(tools_module, "load_vcf_variants", lambda vcf, region: [])
+        await handle_visualize_region(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "vcf_path": self._vcf(tmp_path),
+                "variant_source": "vcf",
+            },
+            config_with_ref,
+        )
+        assert recorded["detect"] is False
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_vcf_support_is_unaffected_by_max_reads(
         self, small_bam_path, ref_fasta_path, tmp_path, monkeypatch
     ):

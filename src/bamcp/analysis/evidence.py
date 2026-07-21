@@ -360,3 +360,47 @@ def compute_confidence(
         confidence = "medium"
 
     return confidence
+
+
+def enhance_variants_with_evidence(
+    variants: list[dict],
+    reads: list[AlignedRead],
+    reference_sequence: str | None,
+    region_start: int,
+) -> tuple[list[dict], dict]:
+    """Attach BAMCP read-level evidence to each variant.
+
+    For every variant, computes strand/quality/position evidence from the reads
+    (via a mismatch index), an artifact-risk assessment, and a confidence level,
+    returning the enhanced variants plus a keyed evidence map for the viewer.
+
+    Source-agnostic: works for BAMCP candidates and VCF-overlay variants alike, so
+    a caller's VCF variant gets BAMCP's read-level support at that site. Indels/SVs
+    that don't match a single-base read mismatch get zeroed read-level evidence,
+    which honestly reflects that BAMCP can't corroborate them from mismatches.
+    """
+    mismatch_index = build_mismatch_index(reads)
+    variant_evidence: dict = {}
+    enhanced_variants: list[dict] = []
+
+    for variant in variants:
+        key = f"{variant['position']}:{variant['ref']}>{variant['alt']}"
+        evidence = compute_variant_evidence(mismatch_index, variant)
+        artifact_risk = compute_artifact_risk(variant, evidence, reference_sequence, region_start)
+        evidence["artifact_risk"] = artifact_risk
+        variant_evidence[key] = evidence
+
+        enhanced = dict(variant)
+        enhanced["strand_forward"] = evidence["forward_count"]
+        enhanced["strand_reverse"] = evidence["reverse_count"]
+        enhanced["mean_quality"] = evidence["mean_quality"]
+        enhanced["artifact_risk"] = artifact_risk
+
+        confidence = compute_confidence(variant, evidence, artifact_risk)
+        enhanced["confidence"] = confidence
+        # Keep is_low_confidence for backwards compatibility
+        enhanced["is_low_confidence"] = confidence == "low"
+
+        enhanced_variants.append(enhanced)
+
+    return enhanced_variants, variant_evidence

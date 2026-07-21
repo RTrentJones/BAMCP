@@ -8,12 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..analysis.evidence import (
-    build_mismatch_index,
-    compute_artifact_risk,
-    compute_confidence,
-    compute_variant_evidence,
-)
+from ..analysis.evidence import enhance_variants_with_evidence
 from .parsers import AlignedRead, RegionData
 
 
@@ -85,37 +80,10 @@ def serialize_region_data(data: RegionData, compact: bool | None = None) -> dict
         region_size = data.end - data.start
         compact = region_size > 500
 
-    # Build mismatch index once for O(1) variant evidence lookups
-    mismatch_index = build_mismatch_index(data.reads)
-
-    # Compute variant evidence using index (O(k) per variant instead of O(n*m) total)
-    variant_evidence = {}
-    enhanced_variants = []
-
-    for variant in data.variants:
-        key = f"{variant['position']}:{variant['ref']}>{variant['alt']}"
-        evidence = compute_variant_evidence(mismatch_index, variant)
-
-        # Compute artifact risk
-        artifact_risk = compute_artifact_risk(
-            variant, evidence, data.reference_sequence, data.start
-        )
-        evidence["artifact_risk"] = artifact_risk
-        variant_evidence[key] = evidence
-
-        # Enhance variant with evidence data for table display
-        enhanced = dict(variant)
-        enhanced["strand_forward"] = evidence["forward_count"]
-        enhanced["strand_reverse"] = evidence["reverse_count"]
-        enhanced["mean_quality"] = evidence["mean_quality"]
-        enhanced["artifact_risk"] = artifact_risk
-
-        confidence = compute_confidence(variant, evidence, artifact_risk)
-        enhanced["confidence"] = confidence
-        # Keep is_low_confidence for backwards compatibility
-        enhanced["is_low_confidence"] = confidence == "low"
-
-        enhanced_variants.append(enhanced)
+    # Compute read-level evidence for every variant (shared with get_variants).
+    enhanced_variants, variant_evidence = enhance_variants_with_evidence(
+        data.variants, data.reads, data.reference_sequence, data.start
+    )
 
     # Serialize reads columnar - compact mode omits sequences for smaller payload
     reads_data = _serialize_reads_columnar(data.reads, include_sequence=not compact)

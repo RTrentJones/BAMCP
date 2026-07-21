@@ -253,12 +253,27 @@ Returns coverage statistics without visualization.
 
 | Tool | Description | Required Args | Optional Args |
 |------|-------------|---------------|---------------|
-| `visualize_region` | View aligned reads with interactive UI | `file_path`, `region` | `reference`, `vcf_path` |
-| `get_variants` | Detect and return candidate variants in a region | `file_path`, `region` | `reference`, `vcf_path`, `min_vaf`, `min_depth` |
+| `visualize_region` | View aligned reads with interactive UI | `file_path`, `region` | `reference`, `vcf_path`, `variant_source` |
+| `get_variants` | Detect and return candidate variants in a region | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_vaf`, `min_depth` |
 | `get_coverage` | Calculate depth statistics | `file_path`, `region` | `reference` |
 | `list_contigs` | List chromosomes and detect genome build | `file_path` | `reference` |
-| `jump_to` | Jump to a specific genomic position | `file_path`, `position` | `contig`, `window`, `reference`, `vcf_path` |
-| `get_region_summary` | Text summary for LLM reasoning (no UI) | `file_path`, `region` | `reference`, `vcf_path` |
+| `jump_to` | Jump to a specific genomic position | `file_path`, `position` | `contig`, `window`, `reference`, `vcf_path`, `variant_source` |
+| `get_region_summary` | Text summary for LLM reasoning (no UI) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source` |
+
+#### VCF as the primary variant source
+
+BAMCP is at its best as an **evidence viewer** for a trusted caller's variants rather than
+an ad-hoc caller of its own. Pass `vcf_path` (VCF/BCF) plus `variant_source` to control the
+relationship:
+
+- **`variant_source="vcf"`** — the VCF is the authoritative variant set. BAMCP does *not* add
+  its own candidates; it reads the BAM and attaches read-level evidence (strand balance, mean
+  quality, artifact risk, confidence) to each VCF site so you can review support. Requires `vcf_path`.
+- **`variant_source="auto"`** (default) — BAMCP's read-level candidates with the VCF overlaid and
+  de-duplicated.
+- **`variant_source="bamcp"`** — BAMCP's read-level candidates only; any `vcf_path` is ignored.
+
+Enrich further with `lookup_clinvar` / `lookup_gnomad` on the returned 1-based positions.
 | `lookup_clinvar` | Look up variant in ClinVar | `chrom`, `pos`, `ref`, `alt` | — |
 | `lookup_gnomad` | Look up variant in gnomAD | `chrom`, `pos`, `ref`, `alt` | — |
 | `get_variant_curation_summary` | Detailed curation with artifact risk | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference` |

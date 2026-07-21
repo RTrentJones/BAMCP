@@ -61,7 +61,7 @@ FastMCP server (server.py)
 | Tool | Description |
 |------|-------------|
 | `visualize_region` | View aligned reads with interactive MCP Apps visualization (returns UI + data). Auto-detects compact mode for large regions. |
-| `get_variants` | Detect and return variants in a region |
+| `get_variants` | Detect and return candidate variants in a region. `variant_source` (`auto`/`vcf`/`bamcp`) selects the source: `vcf` makes a caller's VCF authoritative and attaches BAMCP read-level evidence at each site; `auto` overlays a VCF on local candidates; `bamcp` is local-only. |
 | `get_coverage` | Calculate depth of coverage statistics |
 | `list_contigs` | List chromosomes/contigs and detect genome build (GRCh37/GRCh38) with suggested public reference URL |
 | `jump_to` | Jump to a specific genomic position with configurable window (returns UI + data) |

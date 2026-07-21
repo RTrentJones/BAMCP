@@ -54,16 +54,24 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     # Thin wrappers delegate to the existing handlers in tools.py.
     # FastMCP derives the JSON-Schema from the function signature.
 
-    @mcp.tool(description="Detect and return candidate variants in a genomic region")
+    @mcp.tool(
+        description=(
+            "Detect and return candidate variants in a genomic region. "
+            "variant_source: 'auto' (BAMCP candidates, VCF overlaid if given), "
+            "'vcf' (the VCF is authoritative — BAMCP attaches read-level evidence at "
+            "each site; requires vcf_path), or 'bamcp' (BAMCP candidates only)."
+        )
+    )
     async def get_variants(
         file_path: str,
         region: str,
         reference: str | None = None,
         vcf_path: str | None = None,
+        variant_source: str = "auto",
         min_vaf: float | None = None,
         min_depth: int | None = None,
     ) -> str:
-        args: dict = {"file_path": file_path, "region": region}
+        args: dict = {"file_path": file_path, "region": region, "variant_source": variant_source}
         if reference is not None:
             args["reference"] = reference
         if vcf_path is not None:
@@ -115,8 +123,13 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         window: int | None = None,
         reference: str | None = None,
         vcf_path: str | None = None,
+        variant_source: str = "auto",
     ) -> CallToolResult:
-        args: dict = {"file_path": file_path, "position": position}
+        args: dict = {
+            "file_path": file_path,
+            "position": position,
+            "variant_source": variant_source,
+        }
         if contig is not None:
             args["contig"] = contig
         if window is not None:
@@ -143,8 +156,9 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         region: str,
         reference: str | None = None,
         vcf_path: str | None = None,
+        variant_source: str = "auto",
     ) -> CallToolResult:
-        args: dict = {"file_path": file_path, "region": region}
+        args: dict = {"file_path": file_path, "region": region, "variant_source": variant_source}
         if reference is not None:
             args["reference"] = reference
         if vcf_path is not None:
@@ -167,8 +181,9 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         region: str,
         reference: str | None = None,
         vcf_path: str | None = None,
+        variant_source: str = "auto",
     ) -> str:
-        args: dict = {"file_path": file_path, "region": region}
+        args: dict = {"file_path": file_path, "region": region, "variant_source": variant_source}
         if reference is not None:
             args["reference"] = reference
         if vcf_path is not None:

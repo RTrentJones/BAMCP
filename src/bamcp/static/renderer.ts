@@ -16,6 +16,12 @@ const RULER_HEIGHT = 20;
 const REFERENCE_HEIGHT = 24;
 const COVERAGE_HEIGHT = 60;
 
+// Conservative per-dimension backing-store cap. Browsers reject canvases whose
+// width/height exceed a limit (~16384px on Safari, higher elsewhere); with the
+// devicePixelRatio scaling applied in setupCanvas a deep pileup can blow past it
+// and render nothing. Cap the reads canvas so deep regions degrade gracefully.
+const MAX_CANVAS_BACKING_PX = 16384;
+
 export class Renderer {
     private rulerCanvas: HTMLCanvasElement;
     private referenceCanvas: HTMLCanvasElement;
@@ -32,6 +38,8 @@ export class Renderer {
     // these logical units rather than reading the (denser) canvas.width/height.
     private logicalWidth = 0;
     private logicalReadsHeight = 0;
+    // Rows dropped when the pileup is taller than the canvas cap (see resize()).
+    private rowsHidden = 0;
 
     private state: StateManager;
 
@@ -161,12 +169,26 @@ export class Renderer {
 
         // Calculate height needed for actual reads content
         let readsHeight = 200; // Minimum height
-        if (this.state.packedRows.length > 0) {
-            const { height, gap } = this.getReadDimensions();
-            readsHeight = Math.max(readsHeight, this.state.packedRows.length * (height + gap) + 20);
+        const rowCount = this.state.packedRows.length;
+        const { height: rowH, gap: rowGap } = this.getReadDimensions();
+        if (rowCount > 0) {
+            readsHeight = Math.max(readsHeight, rowCount * (rowH + rowGap) + 20);
         }
 
-        // Reads canvas - size to content
+        // Cap the backing store below the browser's max canvas dimension. Rows
+        // past the cap are dropped (a footer indicator invites zooming in), which
+        // keeps deep regions rendering instead of failing silently.
+        const dpr = window.devicePixelRatio || 1;
+        const maxReadsHeight = Math.max(200, Math.floor(MAX_CANVAS_BACKING_PX / dpr));
+        if (readsHeight > maxReadsHeight) {
+            readsHeight = maxReadsHeight;
+            const visibleRows = Math.floor(readsHeight / (rowH + rowGap));
+            this.rowsHidden = Math.max(0, rowCount - visibleRows);
+        } else {
+            this.rowsHidden = 0;
+        }
+
+        // Reads canvas - size to content (capped)
         this.logicalReadsHeight = readsHeight;
         this.setupCanvas(this.readsCanvas, this.readsCtx, width, readsHeight);
 
@@ -735,6 +757,30 @@ export class Renderer {
         this.renderVariantMarkers(ctx, scale, width);
 
         ctx.restore(); // Remove data-range clip
+
+        this.drawRowClipIndicator(ctx);
+    }
+
+    /**
+     * When the pileup is deeper than the canvas cap, draw a footer banner noting
+     * how many rows were dropped so the view never silently hides reads.
+     */
+    private drawRowClipIndicator(ctx: CanvasRenderingContext2D): void {
+        if (this.rowsHidden <= 0) return;
+        const barHeight = 18;
+        const y = this.logicalReadsHeight - barHeight;
+        ctx.save();
+        ctx.fillStyle = 'rgba(30, 41, 59, 0.88)';
+        ctx.fillRect(0, y, this.logicalWidth, barHeight);
+        ctx.fillStyle = '#e5e7eb';
+        ctx.font = '11px system-ui, -apple-system, sans-serif';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(
+            `▾ ${this.rowsHidden.toLocaleString()} more rows hidden — zoom in to see all reads`,
+            8,
+            y + barHeight / 2,
+        );
+        ctx.restore();
     }
 
     /**
@@ -908,6 +954,8 @@ export class Renderer {
         }
 
         ctx.restore();
+
+        this.drawRowClipIndicator(ctx);
     }
 
     /**

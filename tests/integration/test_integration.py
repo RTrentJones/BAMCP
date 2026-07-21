@@ -47,11 +47,11 @@ class TestBrowseRegionIntegration:
         assert payload["start"] == 90
         assert payload["end"] == 200
 
-        # Verify reads are present
-        assert len(payload["reads"]) > 0
+        # Reads are serialized columnar (parallel arrays), decoded by the viewer.
+        reads = payload["reads"]
+        assert reads["count"] > 0
 
-        # Verify read structure (compact mode is now default)
-        read = payload["reads"][0]
+        # Verify read structure — fields are the top-level columnar arrays.
         required_fields = {
             "name",
             "cigar",
@@ -61,12 +61,12 @@ class TestBrowseRegionIntegration:
             "is_reverse",
             "mismatches",
         }
+        assert required_fields.issubset(set(reads.keys()))
         # Region is 110bp (below 500bp), so non-compact mode: sequence and
         # qualities both present for the DeepVariant-style rendering channels.
-        assert required_fields.issubset(set(read.keys()))
-        assert "sequence" in read
-        assert "qualities" in read
-        assert len(read["qualities"]) == len(read["sequence"])
+        assert "sequence" in reads
+        assert "qualities" in reads
+        assert len(reads["qualities"][0]) == len(reads["sequence"][0])
 
         # Verify coverage length
         assert len(payload["coverage"]) == 110
@@ -126,7 +126,7 @@ class TestCoverageIntegration:
         cov_payload = json.loads(coverage_result["content"][0]["text"])
 
         # If there are reads, coverage should be non-zero
-        if len(browse_payload["reads"]) > 0:
+        if browse_payload["reads"]["count"] > 0:
             assert cov_payload["max"] > 0
             assert cov_payload["bases_covered"] > 0
 
@@ -190,7 +190,7 @@ class TestMultiToolWorkflow:
         )
         # browse_region payload is now in _meta.ui/init
         browse_data = browse["_meta"]["ui/init"]
-        assert len(browse_data["reads"]) > 0
+        assert browse_data["reads"]["count"] > 0
 
         # Step 3: Get coverage for same region
         coverage = await handle_get_coverage(
@@ -256,4 +256,4 @@ class TestJumpToIntegration:
         browse_payload = browse_result["_meta"]["ui/init"]
 
         # Same region should yield same number of reads
-        assert len(jump_payload["reads"]) == len(browse_payload["reads"])
+        assert jump_payload["reads"]["count"] == browse_payload["reads"]["count"]

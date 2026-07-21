@@ -17,43 +17,56 @@ from ..analysis.evidence import (
 from .parsers import AlignedRead, RegionData
 
 
-def _serialize_read(r: AlignedRead, include_sequence: bool) -> dict:
-    """Serialize a read, omitting null paired-end fields to reduce payload."""
-    d: dict[str, Any] = {
-        "name": r.name,
-        "cigar": r.cigar,
-        "position": r.position,
-        "end_position": r.end_position,
-        "mapping_quality": r.mapping_quality,
-        "is_reverse": r.is_reverse,
-        "mismatches": r.mismatches,
+def _serialize_reads_columnar(reads: list[AlignedRead], include_sequence: bool) -> dict[str, Any]:
+    """Serialize reads as parallel arrays (columnar) to shrink the payload.
+
+    A per-read object repeats every JSON key for every read; columnar layout stores
+    each field once as a position-aligned array. The viewer decodes this back into
+    individual read objects on ingestion, so nothing downstream of that decode
+    changes. Optional groups (sequence/qualities, paired-end, soft clips) are
+    emitted only when at least one read needs them, and are position-aligned with
+    ``None`` where a given read doesn't carry that field.
+    """
+    cols: dict[str, Any] = {
+        "count": len(reads),
+        "name": [r.name for r in reads],
+        "cigar": [r.cigar for r in reads],
+        "position": [r.position for r in reads],
+        "end_position": [r.end_position for r in reads],
+        "mapping_quality": [r.mapping_quality for r in reads],
+        "is_reverse": [r.is_reverse for r in reads],
+        "mismatches": [r.mismatches for r in reads],
     }
+
     if include_sequence:
-        d["sequence"] = r.sequence
-        # Base qualities ride along with the sequence — they're only useful
-        # at base-level zoom and they enable the DeepVariant-style channels.
-        if r.qualities:
-            d["qualities"] = list(r.qualities)
-    # Only include paired-end fields if the read is actually paired
-    if r.is_paired:
-        d["mate_position"] = r.mate_position
-        d["mate_contig"] = r.mate_contig
-        d["insert_size"] = r.insert_size
-        d["is_proper_pair"] = r.is_proper_pair
-        d["is_read1"] = r.is_read1
-        d["is_paired"] = True
-    # Include soft clips if present
-    if r.soft_clips:
-        d["soft_clips"] = [
-            {
-                "position": sc.position,
-                "length": sc.length,
-                "sequence": sc.sequence,
-                "side": sc.side,
-            }
-            for sc in r.soft_clips
+        cols["sequence"] = [r.sequence for r in reads]
+        # Base qualities ride along with the sequence — only useful at base-level
+        # zoom, and they enable the DeepVariant-style channels.
+        cols["qualities"] = [list(r.qualities) if r.qualities else None for r in reads]
+
+    if any(r.is_paired for r in reads):
+        cols["is_paired"] = [r.is_paired for r in reads]
+        cols["mate_position"] = [r.mate_position if r.is_paired else None for r in reads]
+        cols["mate_contig"] = [r.mate_contig if r.is_paired else None for r in reads]
+        cols["insert_size"] = [r.insert_size if r.is_paired else None for r in reads]
+        cols["is_proper_pair"] = [r.is_proper_pair if r.is_paired else None for r in reads]
+        cols["is_read1"] = [r.is_read1 if r.is_paired else None for r in reads]
+
+    if any(r.soft_clips for r in reads):
+        cols["soft_clips"] = [
+            [
+                {
+                    "position": sc.position,
+                    "length": sc.length,
+                    "sequence": sc.sequence,
+                    "side": sc.side,
+                }
+                for sc in r.soft_clips
+            ]
+            for r in reads
         ]
-    return d
+
+    return cols
 
 
 def serialize_region_data(data: RegionData, compact: bool | None = None) -> dict:
@@ -104,8 +117,8 @@ def serialize_region_data(data: RegionData, compact: bool | None = None) -> dict
 
         enhanced_variants.append(enhanced)
 
-    # Serialize reads - compact mode omits sequences for smaller payload
-    reads_data = [_serialize_read(r, include_sequence=not compact) for r in data.reads]
+    # Serialize reads columnar - compact mode omits sequences for smaller payload
+    reads_data = _serialize_reads_columnar(data.reads, include_sequence=not compact)
 
     return {
         "contig": data.contig,

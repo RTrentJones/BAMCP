@@ -834,6 +834,7 @@ class TestAnnotateVcfSnvSupport:
         """Write a coordinate-sorted, indexed BAM from ``reads`` at reference_start=100.
 
         ``reads`` is an iterable of ``(name, flag, seq, qualstr)`` — one 10M read each.
+        ``qualstr=None`` writes a no-QUAL ("*") read (``query_qualities is None``).
         """
         bam_path = str(path / "vcf_support.bam")
         header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": "chr1", "LN": 1000}]}
@@ -847,7 +848,8 @@ class TestAnnotateVcfSnvSupport:
                 a.reference_start = 100
                 a.mapping_quality = 60
                 a.cigartuples = [(0, len(seq))]
-                a.query_qualities = pysam.qualitystring_to_array(qualstr)
+                if qualstr is not None:
+                    a.query_qualities = pysam.qualitystring_to_array(qualstr)
                 outf.write(a)
         pysam.index(bam_path)
         return bam_path
@@ -898,6 +900,35 @@ class TestAnnotateVcfSnvSupport:
         assert v["read_depth"] == 1  # the N read is excluded from the denominator
         assert v["strand_forward"] == 1 and v["strand_reverse"] == 0
         assert v["read_support_vaf"] == 1.0
+
+    @pytest.mark.unit
+    def test_missing_qual_rejected_when_min_baseq_set(self, tmp_path):
+        """A no-QUAL ('*') base counts with no threshold but is excluded once min_baseq>0,
+        matching count_coverage (which only counts a base whose stored quality passes)."""
+        bam = self._write_bam(tmp_path, [("noqual", 0, "TACGTACGTA", None)])
+
+        v = self._snv()[0]
+        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=0)
+        assert v["read_depth"] == 1  # no threshold requested -> counted
+
+        v = self._snv()[0]
+        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=20)
+        assert v["read_depth"] == 0  # no stored quality can't satisfy the threshold
+        assert v["strand_forward"] == 0 and v["strand_reverse"] == 0
+
+    @pytest.mark.unit
+    def test_uncovered_snv_gets_zero_support(self, tmp_path):
+        """A VCF SNV with no overlapping reads is annotated with explicit zero support,
+        distinguishing true zero BAM support from an unannotated variant."""
+        bam = self._write_bam(tmp_path, [("r", 0, "TACGTACGTA", "I" * 10)])  # covers 100-110
+        v = self._snv(position=200)[0]  # no reads at 200
+        annotate_vcf_snv_support(bam, "chr1:90-300", None, [v], min_baseq=0)
+        assert v["read_depth"] == 0
+        assert v["strand_forward"] == 0 and v["strand_reverse"] == 0
+        assert v["read_support_vaf"] == 0.0
+        assert v["_alt_qualities"] == [] and v["_alt_positions"] == [] and v["_alt_mapqs"] == []
+        # DP/AF fill-in still runs for uncovered SNVs (VCF omitted them here).
+        assert v["depth"] == 0 and v["vaf"] == 0.0 and v["alt_count"] == 0
 
     @pytest.mark.unit
     def test_pileup_uses_unbounded_max_depth(self, tmp_path, monkeypatch):

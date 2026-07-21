@@ -354,6 +354,17 @@ def annotate_vcf_snv_support(
     by_pos: dict[int, list[dict]] = {}
     for v in snvs:
         by_pos.setdefault(v["position"], []).append(v)
+        # Zero-init every in-region SNV up front. pileup() emits no column for a
+        # position with no overlapping reads, so covered columns overwrite these while
+        # uncovered SNVs keep explicit zeros — letting callers distinguish true zero
+        # BAM support from an unannotated variant (as the old count_coverage loop did).
+        v["strand_forward"] = 0
+        v["strand_reverse"] = 0
+        v["read_depth"] = 0
+        v["read_support_vaf"] = 0.0
+        v["_alt_qualities"] = []
+        v["_alt_positions"] = []
+        v["_alt_mapqs"] = []
 
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
         # stepper="nofilter" leaves us to apply the base-quality threshold ourselves
@@ -394,12 +405,11 @@ def annotate_vcf_snv_support(
                 quals = aln.query_qualities
                 # Honor min_baseq for both depth and support so VCF-primary VAF/confidence
                 # agrees with count_coverage(quality_threshold=min_baseq) used elsewhere.
-                # A read with no stored qualities (QUAL "*") passes, matching htslib.
-                if (
-                    min_baseq
-                    and quals is not None
-                    and qpos < len(quals)
-                    and quals[qpos] < min_baseq
+                # count_coverage only counts a base when a stored quality meets the
+                # threshold, so under a positive min_baseq a no-QUAL ("*") read — or one
+                # whose quality array is too short — does NOT count.
+                if min_baseq and not (
+                    quals is not None and qpos < len(quals) and quals[qpos] >= min_baseq
                 ):
                     continue
                 depth += 1
@@ -417,22 +427,25 @@ def annotate_vcf_snv_support(
 
             for v in targets:
                 support = acc[v["alt"].upper()]
-                alt = support["fwd"] + support["rev"]
                 v["strand_forward"] = support["fwd"]
                 v["strand_reverse"] = support["rev"]
                 v["read_depth"] = depth
-                v["read_support_vaf"] = round(alt / depth, 3) if depth else 0.0
+                v["read_support_vaf"] = (
+                    round((support["fwd"] + support["rev"]) / depth, 3) if depth else 0.0
+                )
                 v["_alt_qualities"] = support["quals"]
                 v["_alt_positions"] = support["positions"]
                 v["_alt_mapqs"] = support["mapqs"]
-                # Fill any DP/AF/alt_count the VCF omitted from the counted support,
-                # keeping the displayed depth/VAF/alt-reads mutually consistent.
-                if not v.get("depth"):
-                    v["depth"] = depth
-                if not v.get("vaf"):
-                    v["vaf"] = v["read_support_vaf"]
-                if not v.get("alt_count"):
-                    v["alt_count"] = alt
+
+    # Fill any DP/AF/alt_count the VCF omitted from the counted support, for every SNV
+    # (covered or not), keeping the displayed depth/VAF/alt-reads mutually consistent.
+    for v in snvs:
+        if not v.get("depth"):
+            v["depth"] = v["read_depth"]
+        if not v.get("vaf"):
+            v["vaf"] = v["read_support_vaf"]
+        if not v.get("alt_count"):
+            v["alt_count"] = v["strand_forward"] + v["strand_reverse"]
 
     return variants
 

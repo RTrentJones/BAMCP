@@ -96,6 +96,33 @@ export interface VariantEvidence {
     artifact_risk?: ArtifactAssessment;
 }
 
+/**
+ * Columnar wire encoding of reads: each field is stored once as a position-aligned
+ * array instead of repeating every key per read, which shrinks the payload for
+ * large regions. Decoded back into Read[] on ingestion (see decodeReads), so the
+ * rest of the viewer never sees this shape. Optional groups (sequence/qualities,
+ * paired-end, soft clips) are present only when at least one read needs them.
+ */
+export interface ColumnarReads {
+    count: number;
+    name: string[];
+    cigar: string[];
+    position: number[];
+    end_position: number[];
+    mapping_quality: number[];
+    is_reverse: boolean[];
+    mismatches: Array<Array<{ pos: number; ref: string; alt: string }>>;
+    sequence?: (string | null)[];
+    qualities?: (number[] | null)[];
+    soft_clips?: SoftClip[][];
+    is_paired?: boolean[];
+    mate_position?: (number | null)[];
+    mate_contig?: (string | null)[];
+    insert_size?: (number | null)[];
+    is_proper_pair?: (boolean | null)[];
+    is_read1?: (boolean | null)[];
+}
+
 export interface RegionData {
     contig: string;
     start: number;

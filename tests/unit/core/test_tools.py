@@ -53,7 +53,8 @@ class TestSerializeRegionData:
         assert result["contig"] == "chr1"
         assert result["start"] == 100
         assert result["end"] == 200
-        assert result["reads"] == []
+        assert result["reads"]["count"] == 0
+        assert result["reads"]["name"] == []
         assert len(result["coverage"]) == 100
         assert result["variants"] == []
         assert result["reference_sequence"] is None
@@ -79,19 +80,21 @@ class TestSerializeRegionData:
             coverage=[1] * 100,
             variants=[],
         )
-        # Default is compact=False, which includes sequence for zoomed views
+        # Default is compact=False, which includes sequence for zoomed views.
+        # Reads are serialized columnar (parallel arrays), decoded by the viewer.
         result = serialize_region_data(data)
-        assert len(result["reads"]) == 1
-        r = result["reads"][0]
-        assert r["name"] == "r1"
-        assert r["sequence"] == "ACGT"  # Default includes sequence
-        assert r["cigar"] == "4M"
-        assert r["position"] == 100
-        assert r["end_position"] == 104
-        assert r["mapping_quality"] == 60
-        assert r["qualities"] == [30, 30, 30, 30]  # Qualities ride with sequence
-        assert r["is_reverse"] is False
-        assert len(r["mismatches"]) == 1
+        reads = result["reads"]
+        assert reads["count"] == 1
+        assert reads["name"][0] == "r1"
+        assert reads["sequence"][0] == "ACGT"  # Default includes sequence
+        assert reads["cigar"][0] == "4M"
+        assert reads["position"][0] == 100
+        assert reads["end_position"][0] == 104
+        assert reads["mapping_quality"][0] == 60
+        assert reads["qualities"][0] == [30, 30, 30, 30]  # Qualities ride with sequence
+        assert reads["is_reverse"][0] is False
+        assert len(reads["mismatches"][0]) == 1
+        assert "is_paired" not in reads  # unpaired read -> no paired-end arrays
 
     @pytest.mark.unit
     def test_compact_mode_omits_sequence_and_qualities(self):
@@ -116,9 +119,44 @@ class TestSerializeRegionData:
             variants=[],
         )
         result = serialize_region_data(data, compact=True)
-        r = result["reads"][0]
-        assert "sequence" not in r  # Compact omits sequence
-        assert "qualities" not in r  # And the matching qualities
+        reads = result["reads"]
+        assert reads["count"] == 1
+        assert "sequence" not in reads  # Compact omits the sequence array
+        assert "qualities" not in reads  # And the matching qualities array
+
+    @pytest.mark.unit
+    def test_columnar_payload_smaller_than_per_object(self):
+        """Columnar encoding shrinks the reads payload vs. repeating keys per read."""
+        reads = [
+            AlignedRead(
+                name=f"read_{i}_with_a_realistic_longish_name",
+                sequence="",
+                qualities=[],
+                cigar="100M",
+                position=1000 + i,
+                end_position=1100 + i,
+                mapping_quality=60,
+                is_reverse=bool(i % 2),
+                mismatches=[],
+            )
+            for i in range(500)
+        ]
+        data = RegionData("chr1", 1000, 2000, reads=reads, coverage=[0] * 1000, variants=[])
+        columnar = serialize_region_data(data, compact=True)["reads"]
+        # The pre-columnar shape: one object per read, keys repeated every time.
+        per_object = [
+            {
+                "name": r.name,
+                "cigar": r.cigar,
+                "position": r.position,
+                "end_position": r.end_position,
+                "mapping_quality": r.mapping_quality,
+                "is_reverse": r.is_reverse,
+                "mismatches": r.mismatches,
+            }
+            for r in reads
+        ]
+        assert len(json.dumps(columnar)) < len(json.dumps(per_object))
 
     @pytest.mark.unit
     def test_serialization_is_json_compatible(self):
@@ -489,7 +527,7 @@ class TestHandleJumpTo:
         # Payload is in _meta.ui/init
         payload = result["_meta"]["ui/init"]
         assert "reads" in payload
-        assert len(payload["reads"]) > 0
+        assert payload["reads"]["count"] > 0
 
 
 class TestHandleVisualizeRegion:

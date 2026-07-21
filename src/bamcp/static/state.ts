@@ -1,5 +1,51 @@
 import { DataStore } from "./data-store";
-import { Read, RegionData, Variant, ViewerSettings } from "./types";
+import { ColumnarReads, Read, RegionData, Variant, ViewerSettings } from "./types";
+
+/**
+ * Decode columnar reads (parallel arrays) back into individual Read objects.
+ * An already-decoded Read[] is returned unchanged, so direct callers and tests
+ * that pass the object form keep working.
+ */
+export function decodeReads(raw: ColumnarReads | Read[] | null | undefined): Read[] {
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw;
+    const c = raw;
+    const reads: Read[] = new Array(c.count);
+    for (let i = 0; i < c.count; i++) {
+        const read: Read = {
+            name: c.name[i],
+            cigar: c.cigar[i],
+            position: c.position[i],
+            end_position: c.end_position[i],
+            mapping_quality: c.mapping_quality[i],
+            is_reverse: c.is_reverse[i],
+            mismatches: c.mismatches[i] ?? [],
+        };
+        const seq = c.sequence?.[i];
+        if (seq != null) read.sequence = seq;
+        const quals = c.qualities?.[i];
+        if (quals != null) read.qualities = quals;
+        const softClips = c.soft_clips?.[i];
+        if (softClips && softClips.length) read.soft_clips = softClips;
+        if (c.is_paired?.[i]) {
+            read.is_paired = true;
+            read.mate_position = c.mate_position?.[i] ?? null;
+            read.mate_contig = c.mate_contig?.[i] ?? null;
+            read.insert_size = c.insert_size?.[i] ?? null;
+            read.is_proper_pair = c.is_proper_pair?.[i] ?? false;
+            read.is_read1 = c.is_read1?.[i] ?? false;
+        }
+        reads[i] = read;
+    }
+    return reads;
+}
+
+/** Return a RegionData whose reads are decoded to Read[] (columnar or already-array). */
+export function decodeRegionData(data: RegionData): RegionData {
+    const raw = data.reads as unknown as ColumnarReads | Read[];
+    const reads = decodeReads(raw);
+    return reads === raw ? data : { ...data, reads };
+}
 
 // Default viewer settings
 export const DEFAULT_SETTINGS: ViewerSettings = {
@@ -40,6 +86,7 @@ export class StateManager {
 
     /** Load new data from host (ontoolresult) — resets viewport. */
     public loadData(data: RegionData): void {
+        data = decodeRegionData(data);
         this.store.ingest(data);
         this.data = data;
         this.viewport = { start: data.start, end: data.end };
@@ -50,6 +97,7 @@ export class StateManager {
 
     /** Load a tile from viewport refetch — preserves current viewport. */
     public loadTile(data: RegionData): void {
+        data = decodeRegionData(data);
         this.store.ingest(data);
         this.data = data;
 
@@ -59,7 +107,7 @@ export class StateManager {
 
     /** Activate an already-cached tile without fetching. */
     public activateTile(data: RegionData): void {
-        this.data = data;
+        this.data = decodeRegionData(data);
         this.buildMateIndex();
         this.packReads();
     }

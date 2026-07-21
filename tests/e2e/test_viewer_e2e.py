@@ -82,6 +82,71 @@ for i in range(500):
         SAMPLE_DATA["coverage"][i] = 1
 
 
+# Columnar-encoded reads (parallel arrays) — the on-the-wire shape the server now
+# emits. read0 is paired, read1 is not, exercising the optional paired-end group.
+COLUMNAR_DATA = {
+    "contig": "chr1",
+    "start": 100,
+    "end": 300,
+    "reads": {
+        "count": 2,
+        "name": ["r1", "r2"],
+        "cigar": ["50M", "50M"],
+        "position": [100, 120],
+        "end_position": [150, 170],
+        "mapping_quality": [60, 30],
+        "is_reverse": [False, True],
+        "mismatches": [[], [{"pos": 130, "ref": "A", "alt": "T"}]],
+        "sequence": ["ACGTACGTAC" * 5, "ACGTACGTAC" * 5],
+        "qualities": [[30] * 50, [30] * 50],
+        "is_paired": [True, False],
+        "mate_position": [400, None],
+        "mate_contig": ["chr1", None],
+        "insert_size": [300, None],
+        "is_proper_pair": [True, None],
+        "is_read1": [True, None],
+    },
+    "coverage": [1] * 200,
+    "variants": [],
+    "reference_sequence": "ACGTACGTAC" * 20,
+}
+
+
+class TestColumnarReads:
+    """E2E: the viewer decodes columnar reads (parallel arrays) into read objects."""
+
+    @pytest.mark.e2e
+    def test_columnar_reads_decoded(self, viewer_page: Page):
+        send_init_data(viewer_page, COLUMNAR_DATA)
+        result = viewer_page.evaluate(
+            """() => {
+                const reads = viewer.state.data.reads;
+                return {
+                    isArray: Array.isArray(reads),
+                    length: reads.length,
+                    r0name: reads[0].name,
+                    r0pos: reads[0].position,
+                    r0seqLen: reads[0].sequence ? reads[0].sequence.length : 0,
+                    r0paired: reads[0].is_paired === true,
+                    r0mate: reads[0].mate_position,
+                    r1reverse: reads[1].is_reverse,
+                    r1mismatches: reads[1].mismatches.length,
+                    r1paired: !!reads[1].is_paired,
+                };
+            }"""
+        )
+        assert result["isArray"] is True
+        assert result["length"] == 2
+        assert result["r0name"] == "r1"
+        assert result["r0pos"] == 100
+        assert result["r0seqLen"] == 50
+        assert result["r0paired"] is True
+        assert result["r0mate"] == 400
+        assert result["r1reverse"] is True
+        assert result["r1mismatches"] == 1
+        assert result["r1paired"] is False
+
+
 @pytest.fixture
 def viewer_page(page: Page):
     """Load the viewer HTML into a Playwright page."""

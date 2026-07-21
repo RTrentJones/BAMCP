@@ -830,22 +830,24 @@ class TestAnnotateVcfSnvSupport:
     """Read-level support counting for VCF SNVs via per-site pileup."""
 
     @staticmethod
-    def _bam_with_alt(path, *, alt_qual: str, ref_start: int = 100) -> str:
-        """Two reads (fwd+rev) carrying alt 'T' at ``ref_start``; the reverse read's
-        alt base gets ``alt_qual`` (phred char), the forward read's stays high (Q40)."""
+    def _write_bam(path, reads) -> str:
+        """Write a coordinate-sorted, indexed BAM from ``reads`` at reference_start=100.
+
+        ``reads`` is an iterable of ``(name, flag, seq, qualstr)`` — one 10M read each.
+        """
         bam_path = str(path / "vcf_support.bam")
         header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": "chr1", "LN": 1000}]}
         with pysam.AlignmentFile(bam_path, "wb", header=header) as outf:
-            for name, flag, q0 in (("hi", 0, "I"), ("lo", 16, alt_qual)):
+            for name, flag, seq, qualstr in reads:
                 a = pysam.AlignedSegment()
                 a.query_name = name
-                a.query_sequence = "TACGTACGTA"  # 'T' at offset 0
+                a.query_sequence = seq
                 a.flag = flag
                 a.reference_id = 0
-                a.reference_start = ref_start
+                a.reference_start = 100
                 a.mapping_quality = 60
-                a.cigartuples = [(0, 10)]  # 10M
-                a.query_qualities = pysam.qualitystring_to_array(q0 + "I" * 9)
+                a.cigartuples = [(0, len(seq))]
+                a.query_qualities = pysam.qualitystring_to_array(qualstr)
                 outf.write(a)
         pysam.index(bam_path)
         return bam_path
@@ -864,7 +866,11 @@ class TestAnnotateVcfSnvSupport:
     @pytest.mark.unit
     def test_min_baseq_excludes_low_quality_support(self, tmp_path):
         """A base below min_baseq is dropped from both depth and alt support."""
-        bam = self._bam_with_alt(tmp_path, alt_qual="#")  # '#' == Q2
+        # Two reads carrying alt 'T' at pos 100; the reverse read's alt base is Q2 ('#').
+        bam = self._write_bam(
+            tmp_path,
+            [("hi", 0, "TACGTACGTA", "I" * 10), ("lo", 16, "TACGTACGTA", "#" + "I" * 9)],
+        )
 
         # min_baseq=0: both reads count.
         v = self._snv()[0]
@@ -881,11 +887,24 @@ class TestAnnotateVcfSnvSupport:
         assert v["_alt_qualities"] == [40]  # only the surviving high-quality base
 
     @pytest.mark.unit
+    def test_non_acgt_bases_excluded_from_depth(self, tmp_path):
+        """An N no-call is not counted in the depth denominator (count_coverage parity)."""
+        bam = self._write_bam(
+            tmp_path,
+            [("alt", 0, "TACGTACGTA", "I" * 10), ("ncall", 0, "NACGTACGTA", "I" * 10)],
+        )
+        v = self._snv()[0]
+        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=0)
+        assert v["read_depth"] == 1  # the N read is excluded from the denominator
+        assert v["strand_forward"] == 1 and v["strand_reverse"] == 0
+        assert v["read_support_vaf"] == 1.0
+
+    @pytest.mark.unit
     def test_pileup_uses_unbounded_max_depth(self, tmp_path, monkeypatch):
         """The support pileup lifts pysam's 8000 default so deep sites aren't truncated."""
         from bamcp.core import parsers as parsers_mod
 
-        bam = self._bam_with_alt(tmp_path, alt_qual="I")
+        bam = self._write_bam(tmp_path, [("hi", 0, "TACGTACGTA", "I" * 10)])
         captured: dict = {}
         real_open = parsers_mod._open_alignment
 

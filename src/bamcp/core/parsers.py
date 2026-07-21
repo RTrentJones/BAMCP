@@ -386,6 +386,11 @@ def annotate_vcf_snv_support(
                 seq = aln.query_sequence
                 if qpos is None or seq is None:
                     continue
+                base = seq[qpos].upper()
+                # count_coverage's denominator sums only A/C/G/T, so N/no-call bases
+                # must not inflate the depth denominator here either.
+                if base not in "ACGT":
+                    continue
                 quals = aln.query_qualities
                 # Honor min_baseq for both depth and support so VCF-primary VAF/confidence
                 # agrees with count_coverage(quality_threshold=min_baseq) used elsewhere.
@@ -398,7 +403,7 @@ def annotate_vcf_snv_support(
                 ):
                     continue
                 depth += 1
-                support = acc.get(seq[qpos].upper())
+                support = acc.get(base)
                 if support is None:
                     continue
                 if aln.is_reverse:

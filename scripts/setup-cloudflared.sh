@@ -236,7 +236,9 @@ GH_OWNER=$(gh repo view --json owner --jq '.owner.login' 2>/dev/null | tr '[:upp
 if [[ -z "$GH_OWNER" ]]; then
     GH_OWNER="rtrentjones"  # fallback
 fi
-DEFAULT_IMAGE="ghcr.io/${GH_OWNER}/bamcp:latest"
+# :prod is the moving deploy tag greenlight-build.yml publishes (alongside :<sha>);
+# it never publishes :latest, so default to the tag that actually exists.
+DEFAULT_IMAGE="ghcr.io/${GH_OWNER}/bamcp:prod"
 echo "GHCR image URL:"
 echo "  Default: $DEFAULT_IMAGE"
 read -rp "  Use this? [Y/n] or paste custom URL: " IMAGE_INPUT

@@ -44,6 +44,50 @@ def test_grade_case_no_deterministic_rule_returns_none():
 
 
 @pytest.mark.unit
+def test_tools_satisfied_but_answer_wrong_fails():
+    """The core fix: calling the expected tool no longer passes a case whose answer is wrong."""
+    case = EvalCase(
+        name="x",
+        input="What is the VAF?",
+        expected="The VAF is 43.5%",
+        tools_expected=["get_variants"],
+        expected_claims=["43.5%"],
+    )
+    # Right tool called, but the answer omits the required numeric claim.
+    v = grade_case(case, "I ran the analysis.", ["get_variants"], [])
+    assert v is not None
+    assert v.passed is False
+    assert v.tool_score == 1.0  # tool selection was correct...
+    assert v.answer_score == 0.0  # ...but the answer was not
+    assert "43.5%" in v.rationale
+
+
+@pytest.mark.unit
+def test_tools_and_claims_both_satisfied_passes():
+    case = EvalCase(
+        name="x",
+        input="What is the VAF?",
+        expected="The VAF is 43.5%",
+        tools_expected=["get_variants"],
+        expected_claims=["43.5%"],
+    )
+    v = grade_case(case, "The variant VAF is 43.5% at that site.", ["get_variants"], [])
+    assert v is not None
+    assert v.passed is True
+    assert v.tool_score == 1.0
+    assert v.answer_score == 1.0
+
+
+@pytest.mark.unit
+def test_expected_claims_alone_grade_answer_correctness():
+    case = EvalCase(name="x", input="q", expected="pathogenic", expected_claims=["pathogenic"])
+    assert grade_case(case, "This variant is pathogenic.", [], []).passed is True
+    miss = grade_case(case, "This variant is benign.", [], [])
+    assert miss.passed is False
+    assert miss.answer_score == 0.0
+
+
+@pytest.mark.unit
 def test_grade_case_threshold_passes():
     case = EvalCase(
         name="x",

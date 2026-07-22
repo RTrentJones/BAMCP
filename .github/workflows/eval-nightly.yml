@@ -34,13 +34,22 @@ jobs:
       - run: make install
       - run: pip install -e ".[eval]"
       - run: python tests/create_fixtures.py
-      - name: Score ground-truth truth set (JSON)
+      - name: Score SNV synthetic truth set (JSON)
         run: |
-          python -m bamcp.eval.truthset --json | tee truthset-report.json
+          python -m bamcp.eval.truthset \
+            --manifest tests/eval/datasets/synthetic_v1/manifest.yaml --json \
+            | tee truthset-synthetic-report.json
+      - name: Score indel truth set (JSON)
+        run: |
+          python -m bamcp.eval.truthset \
+            --manifest tests/eval/datasets/indel_v1/manifest.yaml --min-precision 1.0 --json \
+            | tee truthset-indel-report.json
       - uses: actions/upload-artifact@v7
         with:
           name: truthset-report
-          path: truthset-report.json
+          path: |
+            truthset-synthetic-report.json
+            truthset-indel-report.json
 
   llm-eval:
     # Optional: only runs when ANTHROPIC_API_KEY is present in repo secrets, so
@@ -54,17 +63,20 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Check for API key
+      - name: Check for the selected provider's API key
         id: key
         env:
+          PROVIDER: ${{ github.event.inputs.provider || 'anthropic' }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          if [ -n "$ANTHROPIC_API_KEY" ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "No ANTHROPIC_API_KEY configured — skipping LLM eval."
-          fi
+          case "$PROVIDER" in
+            mock) available=true ;;
+            openai) [ -n "$OPENAI_API_KEY" ] && available=true || available=false ;;
+            *) [ -n "$ANTHROPIC_API_KEY" ] && available=true || available=false ;;
+          esac
+          echo "available=$available" >> "$GITHUB_OUTPUT"
+          [ "$available" = "true" ] || echo "No API key for provider '$PROVIDER' — skipping LLM eval."
       - if: steps.key.outputs.available == 'true'
         run: make install && pip install -e ".[eval]"
       - if: steps.key.outputs.available == 'true'
@@ -72,7 +84,9 @@ jobs:
       - name: Run LLM eval harness
         if: steps.key.outputs.available == 'true'
         env:
+          # Both keys are passed through; run_eval uses whichever the --provider selects.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python scripts/run_eval.py \
             --provider "${{ github.event.inputs.provider || 'anthropic' }}" \

@@ -11,8 +11,12 @@
 If you discover a security vulnerability, please report it responsibly:
 
 1. **Do not** open a public GitHub issue.
-2. Email the maintainers with a description of the vulnerability.
-3. Allow reasonable time for a fix before public disclosure.
+2. **Preferred:** open a private report via GitHub Security Advisories —
+   <https://github.com/RTrentJones/BAMCP/security/advisories/new>. This keeps the
+   report private and lets us collaborate on a fix and CVE in-thread.
+3. **Alternative:** email <rtrentjones@gmail.com> with a description of the
+   vulnerability and reproduction steps.
+4. Allow reasonable time for a fix before public disclosure.
 
 We acknowledge receipt within 48 hours and aim to release a patch within 7
 days for critical issues.

@@ -66,8 +66,11 @@ It uses the same manifest schema, so `bamcp.eval.truthset` scores it unchanged.
 Headline result on a 60 kb chr20 slice (66 real NIST SNVs): **recall 1.000 at
 both operating points; precision goes from 0.034 at BAMCP's default
 curation-sensitivity thresholds to 1.000 when thresholded for calling** (VAF ≥
-0.20, depth ≥ 8, MAPQ ≥ 20). That precision/recall tradeoff — and an honest
-statement of what a simulated-read benchmark can and cannot show — is in
+0.20, depth ≥ 8, MAPQ ≥ 20). This is **one 60 kb slice of simulated reads over real
+truth genotypes** — evidence that the detector recovers planted SNVs on this slice, not a
+general claim of caller correctness across genomes, indels, SVs, or real sequencer error.
+That precision/recall tradeoff — and an honest statement of what a simulated-read benchmark
+can and cannot show — is in
 [`tests/eval/datasets/giab/GIAB_RESULTS.md`](tests/eval/datasets/giab/GIAB_RESULTS.md).
 GIAB data is large and network-gated, so this is a manual / nightly job, not a
 PR gate.

@@ -35,7 +35,7 @@ BAMCP brings IGV-style alignment visualization directly into your AI conversatio
 
 ## Why BAMCP?
 
-Existing genomics MCP servers (bio-mcp-samtools, AWS HealthOmics MCP) provide command-line operations but return text/JSON. **BAMCP is the first to leverage the [MCP Apps Extension](https://github.com/modelcontextprotocol/ext-apps) to render interactive visualizations inline.**
+Existing genomics MCP servers (bio-mcp-samtools, AWS HealthOmics MCP) provide command-line operations but return text/JSON. **BAMCP is the first genomics MCP server to leverage the [MCP Apps Extension](https://github.com/modelcontextprotocol/ext-apps) to render interactive visualizations inline** — verifiable against the known genomics-MCP landscape above.
 
 | Feature | CLI-based MCPs | BAMCP |
 |---------|---------------|-------|
@@ -204,6 +204,10 @@ Add to `~/.config/claude/claude_desktop_config.json`:
 
 #### Cursor / VS Code
 
+> **Note:** `uvx bamcp` requires the PyPI release, which is not yet published. Until
+> then, run from a local checkout — `"command": "uv"`, `"args": ["run", "bamcp"]` with
+> `"cwd"` set to your clone — or use the stdio `python -m bamcp` form above.
+
 ```json
 {
   "mcpServers": {
@@ -259,6 +263,11 @@ Returns coverage statistics without visualization.
 | `list_contigs` | List chromosomes and detect genome build | `file_path` | `reference` |
 | `jump_to` | Jump to a specific genomic position | `file_path`, `position` | `contig`, `window`, `reference`, `vcf_path`, `variant_source` |
 | `get_region_summary` | Text summary for LLM reasoning (no UI) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source` |
+| `lookup_clinvar` | Look up variant in ClinVar | `chrom`, `pos`, `ref`, `alt` | — |
+| `lookup_gnomad` | Look up variant in gnomAD | `chrom`, `pos`, `ref`, `alt` | — |
+| `get_variant_curation_summary` | Detailed curation with artifact risk | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference` |
+| `search_gene` | Search gene by symbol (NCBI) | `symbol` | — |
+| `cleanup_cache` | Clean up session's index cache | — | — |
 
 #### VCF as the primary variant source
 
@@ -274,11 +283,6 @@ relationship:
 - **`variant_source="bamcp"`** — BAMCP's read-level candidates only; any `vcf_path` is ignored.
 
 Enrich further with `lookup_clinvar` / `lookup_gnomad` on the returned 1-based positions.
-| `lookup_clinvar` | Look up variant in ClinVar | `chrom`, `pos`, `ref`, `alt` | — |
-| `lookup_gnomad` | Look up variant in gnomAD | `chrom`, `pos`, `ref`, `alt` | — |
-| `get_variant_curation_summary` | Detailed curation with artifact risk | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference` |
-| `search_gene` | Search gene by symbol (NCBI) | `symbol` | — |
-| `cleanup_cache` | Clean up session's index cache | — | — |
 
 ### Region Format
 

@@ -3,14 +3,14 @@
 # Setup Cloudflare Tunnel sidecar for BAMCP OCI Container Instance.
 #
 # Recreates the container instance with two containers:
-#   1. BAMCP (from GHCR — see deploy.yml)
+#   1. BAMCP (from GHCR — built + pushed by .github/workflows/greenlight-build.yml)
 #   2. cloudflared (Cloudflare Tunnel connector)
 #
 # Prerequisites:
 #   - OCI CLI configured (`oci setup config`)
 #   - GitHub CLI authenticated (`gh auth login`)
 #   - Cloudflare Tunnel created (Zero Trust -> Networks -> Tunnels)
-#   - BAMCP image pushed to GHCR (run the Deploy to OCI workflow once)
+#   - BAMCP image pushed to GHCR (push to main once, or run greenlight-build manually)
 #
 # Usage:
 #   ./scripts/setup-cloudflared.sh [--profile PROFILE] [--dry-run]

@@ -5,8 +5,10 @@ as a hiring artifact). Every major claim below was verified against source befor
 This is a **living checklist** — check items as they ship. Ship each item through the
 Greenlight loop (see [Greenlight framing](#greenlight-framing)), not as one giant PR.
 
-**Status:** planning complete, execution not yet started.
-**Owner:** @RTrentJones · **Created:** 2026-07-21
+**Status:** Phases 0–1 complete (production-ready tier); Phases 2–5 advanced to bounded, tested
+depth with large refactors scoped as follow-ups (see [Deferred](#deferred-follow-ups)).
+**Owner:** @RTrentJones · **Created:** 2026-07-21 · Branch: `feat/eng-review-remediation`
+(+ wrapper `feat/bamcp-remote-allowlist`)
 
 ---
 
@@ -233,6 +235,33 @@ Phase 0 (credibility)  ──►  Phase 1 (security P0s)  ──►  Phase 2 (co
 ```
 0→1→2 is a hard chain. 3 and 4 parallelize once 2 lands. 5 is last. Review's own split:
 **Phases 0–1 = "before production-ready"**, **Phases 2–5 = "before flagship interview artifact."**
+
+## Phase 2–5 status (what landed this branch)
+
+- **Phase 2** — [x] 2b viewer reference/context preservation; [x] 2a payload `schema_version`
+  stamp + server↔viewer compat test. *Deferred: full Pydantic/TypedDict + TS codegen (2a-full),
+  pervasive coordinate newtype (2c).*
+- **Phase 3** — [x] 3a grader scores tool-selection vs answer-correctness separately
+  (`expected_claims`); [x] 3d nightly runs both truth sets + both providers. *Deferred: 3b real-MCP
+  router, 3c human-labeled benchmark + judge-swap, 3e real-read GIAB.*
+- **Phase 4** — [x] 4a `tsc --noEmit` + ESLint + vitest + CI job (caught + fixed dead code).
+  *Deferred: 4b god-module splits.*
+- **Phase 5** — [x] new env vars documented; [x] transport docs lead Streamable HTTP; [x] CHANGELOG;
+  [x] engineering retrospective. *Deferred: 5a clean-room wheel+viewer CI.*
+
+## Deferred follow-ups (scoped, not rushed)
+
+Each is genuinely multi-day and higher-quality with dedicated focus; rushing them would reproduce
+the "large volume of AI-assisted code" the review flagged. Listed so they're tracked, not dropped:
+
+- **2a-full / 2c** — generated typed payload contract (Pydantic → JSON Schema → TS) and a coordinate
+  newtype threaded through the codebase.
+- **3b / 3c / 3e** — finish `MCPStdioRouter` and run evals through the real transport; a small
+  human-labeled benchmark with judge-swap concordance; a broader real-read GIAB benchmark.
+- **4b** — split `tools.py` / `parsers.py` / `mcp-app.ts` / `renderer.ts` / the E2E monolith.
+- **5a** — CI builds a wheel, installs it clean, and verifies the bundled viewer + `/__version`.
+- **1c tail** — atomic temp-index writes; Option B (BAMCP-proxied fetch) for full redirect closure.
+- **1e tail** — killable worker-process parsing for true cancellation.
 
 ## Immediate next actions
 

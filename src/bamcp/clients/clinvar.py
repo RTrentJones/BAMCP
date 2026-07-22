@@ -19,6 +19,17 @@ EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 NCBI_RATE_LIMIT_NO_KEY = 3  # 3 req/sec without API key
 NCBI_RATE_LIMIT_WITH_KEY = 10  # 10 req/sec with API key
 
+# Position-search paging: a single base can be overlapped by many indels/CNVs, so page
+# esearch (up to a safety cap) and summarize IDs in batches rather than truncating.
+_ESEARCH_PAGE = 200
+_ESUMMARY_BATCH = 200
+_MAX_POSITION_RECORDS = 2000
+
+
+def _chunks(items: list[str], size: int) -> list[list[str]]:
+    """Split a list into consecutive chunks of at most ``size`` items."""
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
 
 class TokenBucketRateLimiter:
     """Async token bucket rate limiter for API requests.
@@ -135,7 +146,6 @@ class ClinVarClient:
             if cached is not None:
                 return cached
 
-            await self._rate_limiter.acquire()
             result = await self._do_lookup(chrom, pos, ref, alt)
             await self._cache.set(cache_key, result)
             return result
@@ -144,49 +154,73 @@ class ClinVarClient:
         """Execute the actual ClinVar API lookup.
 
         Searches by genomic position (ClinVar's ``[Variant name]`` field is HGVS, not
-        ``REF>ALT``, so an allele clause matches nothing) and disambiguates the exact
-        allele from each returned record's canonical SPDI.
+        ``REF>ALT``, so an allele clause matches nothing), pages past the esearch limit
+        for variant-dense positions, and disambiguates the exact allele from each
+        candidate record's canonical SPDI.
         """
-        params: dict[str, str | int] = {
-            "db": "clinvar",
-            "term": _build_search_term(chrom, pos),
-            "retmode": "json",
-            "retmax": 20,
-        }
-        if self.api_key:
-            params["api_key"] = self.api_key
-
-        # Step 1: esearch for every record overlapping the position.
-        search_resp = await self._http_client.get(f"{EUTILS_BASE}esearch.fcgi", params=params)
-        search_resp.raise_for_status()
-        id_list = search_resp.json().get("esearchresult", {}).get("idlist", [])
+        # Step 1: collect every record ID overlapping the position (paged).
+        id_list = await self._search_ids(chrom, pos)
         if not id_list:
             logger.debug("ClinVar: no records at %s:%s", chrom, pos)
             return None
 
-        # Rate limit before second request
-        await self._rate_limiter.acquire()
+        # Step 2/3: esummary the candidates in batches, returning the first whose SPDI
+        # matches the requested allele (early-exit avoids summarizing every record).
+        for batch in _chunks(id_list, _ESUMMARY_BATCH):
+            await self._rate_limiter.acquire()
+            result_section = await self._esummary(batch)
+            entry = _select_entry(result_section, pos, ref, alt)
+            if entry is not None:
+                return _parse_entry(entry)
 
-        # Step 2: esummary for annotation details on all candidate records.
-        summary_params: dict[str, str | int] = {
+        logger.debug("ClinVar: no allele match for %s:%s %s>%s", chrom, pos, ref, alt)
+        return None
+
+    async def _search_ids(self, chrom: str, pos: int) -> list[str]:
+        """Return all ClinVar record IDs at a position, paging past the esearch limit."""
+        term = _build_search_term(chrom, pos)
+        ids: list[str] = []
+        retstart = 0
+        while retstart < _MAX_POSITION_RECORDS:
+            await self._rate_limiter.acquire()
+            params: dict[str, str | int] = {
+                "db": "clinvar",
+                "term": term,
+                "retmode": "json",
+                "retmax": _ESEARCH_PAGE,
+                "retstart": retstart,
+            }
+            if self.api_key:
+                params["api_key"] = self.api_key
+            resp = await self._http_client.get(f"{EUTILS_BASE}esearch.fcgi", params=params)
+            resp.raise_for_status()
+            search_result = resp.json().get("esearchresult", {})
+            page_ids = search_result.get("idlist", [])
+            if not page_ids:
+                break
+            ids.extend(page_ids)
+            retstart += len(page_ids)
+            try:
+                count = int(search_result.get("count", "0"))
+            except (TypeError, ValueError):
+                count = retstart
+            if retstart >= count:
+                break
+        return ids
+
+    async def _esummary(self, ids: list[str]) -> dict:
+        """Fetch esummary details for a batch of record IDs; return the ``result`` map."""
+        params: dict[str, str | int] = {
             "db": "clinvar",
-            "id": ",".join(id_list),
+            "id": ",".join(ids),
             "retmode": "json",
         }
         if self.api_key:
-            summary_params["api_key"] = self.api_key
-
-        summary_resp = await self._http_client.get(
-            f"{EUTILS_BASE}esummary.fcgi", params=summary_params
-        )
-        summary_resp.raise_for_status()
-
-        # Step 3: pick the record whose SPDI matches the requested allele.
-        entry = _select_entry(summary_resp.json().get("result", {}), pos, ref, alt)
-        if entry is None:
-            logger.debug("ClinVar: no allele match for %s:%s %s>%s", chrom, pos, ref, alt)
-            return None
-        return _parse_entry(entry)
+            params["api_key"] = self.api_key
+        resp = await self._http_client.get(f"{EUTILS_BASE}esummary.fcgi", params=params)
+        resp.raise_for_status()
+        result_section: dict = resp.json().get("result", {})
+        return result_section
 
     async def close(self) -> None:
         """Close the HTTP client."""
@@ -229,13 +263,18 @@ def _select_entry(result_section: dict, pos: int, ref: str, alt: str) -> dict | 
     """Return the esummary entry whose SPDI matches the requested allele.
 
     A ``[Base Position]`` search returns every record overlapping the position (SNVs,
-    indels, delins), so disambiguate to the exact allele via each record's canonical SPDI.
+    indels, delins), so disambiguate to the exact allele via each record's canonical
+    SPDI. Only single-variant records qualify: a haplotype/genotype record's
+    ``variation_set`` holds several component variants, and its aggregate classification
+    must not be attributed to one component allele.
     """
     for uid in result_section.get("uids", []):
         entry: dict = result_section.get(uid, {})
-        for variation in entry.get("variation_set", []):
-            if _spdi_matches(variation.get("canonical_spdi", ""), pos, ref, alt):
-                return entry
+        variation_set = entry.get("variation_set", [])
+        if len(variation_set) == 1 and _spdi_matches(
+            variation_set[0].get("canonical_spdi", ""), pos, ref, alt
+        ):
+            return entry
     return None
 
 

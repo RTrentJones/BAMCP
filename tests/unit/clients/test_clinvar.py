@@ -144,6 +144,22 @@ class TestSelectEntry:
     def test_none_for_empty_result(self):
         assert _select_entry(ESUMMARY_EMPTY["result"], 7674220, "G", "A") is None
 
+    @pytest.mark.unit
+    def test_haplotype_record_not_matched(self):
+        # A multi-variant (haplotype/genotype) record must not match a single-allele
+        # lookup, even when one component SPDI matches.
+        result = {
+            "uids": ["h1"],
+            "h1": {
+                "uid": "h1",
+                "variation_set": [
+                    {"canonical_spdi": "NC_000017.11:7674219:G:A"},
+                    {"canonical_spdi": "NC_000017.11:7674300:C:T"},
+                ],
+            },
+        }
+        assert _select_entry(result, 7674220, "G", "A") is None
+
 
 class TestParseEntry:
     """Tests for _parse_entry (current + legacy esummary schema)."""
@@ -285,6 +301,22 @@ class TestClinVarClient:
         assert result is not None
         assert result.variation_id == 222
         assert result.clinical_significance == "Pathogenic"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_search_ids_pages_past_limit(self, httpx_mock):
+        # count=3 across two pages; _search_ids must collect every ID, not just page 1.
+        httpx_mock.add_response(
+            url=re.compile(r".*/esearch\.fcgi.*"),
+            json={"esearchresult": {"count": "3", "retstart": "0", "idlist": ["1", "2"]}},
+        )
+        httpx_mock.add_response(
+            url=re.compile(r".*/esearch\.fcgi.*"),
+            json={"esearchresult": {"count": "3", "retstart": "2", "idlist": ["3"]}},
+        )
+        client = ClinVarClient()
+        ids = await client._search_ids("chr17", 7674220)
+        assert ids == ["1", "2", "3"]
 
     @pytest.mark.unit
     @pytest.mark.asyncio

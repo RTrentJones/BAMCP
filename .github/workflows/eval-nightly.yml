@@ -63,20 +63,27 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Check for the selected provider's API key
+      - name: Check the selected provider is runnable
         id: key
         env:
           PROVIDER: ${{ github.event.inputs.provider || 'anthropic' }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           case "$PROVIDER" in
             mock) available=true ;;
-            openai) [ -n "$OPENAI_API_KEY" ] && available=true || available=false ;;
+            openai)
+              # NOT yet runnable: the shared runner records follow-up turns in Anthropic message
+              # shape (tool_use / tool_result blocks), which OpenAIProvider forwards verbatim to
+              # chat.completions — so any tool-calling case fails. Real parity needs provider-
+              # specific message translation in the runner (deferred, Phase 3b). Skip rather than
+              # advertise a broken path.
+              available=false
+              echo "OpenAI eval is gated until the runner does provider-specific message translation (Phase 3b)."
+              ;;
             *) [ -n "$ANTHROPIC_API_KEY" ] && available=true || available=false ;;
           esac
           echo "available=$available" >> "$GITHUB_OUTPUT"
-          [ "$available" = "true" ] || echo "No API key for provider '$PROVIDER' — skipping LLM eval."
+          [ "$available" = "true" ] || echo "Provider '$PROVIDER' not runnable here — skipping LLM eval."
       - if: steps.key.outputs.available == 'true'
         run: make install && pip install -e ".[eval]"
       - if: steps.key.outputs.available == 'true'
@@ -84,9 +91,9 @@ jobs:
       - name: Run LLM eval harness
         if: steps.key.outputs.available == 'true'
         env:
-          # Both keys are passed through; run_eval uses whichever the --provider selects.
+          # Only the Anthropic (and mock) paths reach here; OpenAI is gated above until the
+          # runner supports its message shape.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python scripts/run_eval.py \
             --provider "${{ github.event.inputs.provider || 'anthropic' }}" \

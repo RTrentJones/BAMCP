@@ -258,6 +258,9 @@ the "large volume of AI-assisted code" the review flagged. Listed so they're tra
   newtype threaded through the codebase.
 - **3b / 3c / 3e** — finish `MCPStdioRouter` and run evals through the real transport; a small
   human-labeled benchmark with judge-swap concordance; a broader real-read GIAB benchmark.
+  Also **OpenAI multi-turn tool support**: the runner records follow-up turns in Anthropic
+  message shape, so `OpenAIProvider` needs provider-specific translation before the OpenAI eval
+  path is runnable (it is gated off in the nightly workflow until then).
 - **4b** — split `tools.py` / `parsers.py` / `mcp-app.ts` / `renderer.ts` / the E2E monolith.
 - **5a** — CI builds a wheel, installs it clean, and verifies the bundled viewer + `/__version`.
 - **1c tail** — atomic temp-index writes; Option B (BAMCP-proxied fetch) for full redirect closure.

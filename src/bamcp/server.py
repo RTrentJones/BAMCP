@@ -45,6 +45,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             token_expiry=config.token_expiry,
             verify_token=config.verify_token,
             verify_scopes=config.required_scopes or [],
+            allow_dynamic_registration=config.allow_dynamic_registration,
         )
         kwargs["auth"] = build_auth_settings(config)
 

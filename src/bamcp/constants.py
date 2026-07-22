@@ -37,6 +37,9 @@ REGION_TILE_SIZE = 4_096
 
 # Auth and integrations
 DEFAULT_TOKEN_EXPIRY_SECONDS = 3_600
+# When auth is enabled with no explicit BAMCP_REQUIRED_SCOPES, require this scope so tokens
+# are never scope-less. BAMCP is a read-only evidence viewer, hence a single read scope.
+DEFAULT_REQUIRED_SCOPES = ("bamcp:read",)
 DEFAULT_GNOMAD_DATASET = "gnomad_r4"
 DEFAULT_GENOME_BUILD = "GRCh38"
 

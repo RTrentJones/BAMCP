@@ -18,6 +18,7 @@ from .constants import (
     DEFAULT_MIN_MAPQ,
     DEFAULT_MIN_VAF,
     DEFAULT_PORT,
+    DEFAULT_REQUIRED_SCOPES,
     DEFAULT_RESOURCE_SERVER_URL,
     DEFAULT_TOKEN_EXPIRY_SECONDS,
     DEFAULT_TRANSPORT,
@@ -53,6 +54,10 @@ class BAMCPConfig:
     # bearer is accepted as a valid access token with the required scopes — stateless, so it
     # survives container restarts (unlike the in-memory OAuth tokens). Read-only use; keep secret.
     verify_token: str | None = None
+    # OAuth dynamic client registration. OFF by default: an open /register endpoint lets any
+    # client self-register and mint a token, which is not access control. Prod uses the service
+    # token (verify_token). Enable only for interactive OAuth clients in a trusted/dev context.
+    allow_dynamic_registration: bool = False
 
     # External database settings
     ncbi_api_key: str | None = None
@@ -131,6 +136,11 @@ class BAMCPConfig:
 
         scopes_raw = env.get("BAMCP_REQUIRED_SCOPES", "")
         scopes = [s.strip() for s in scopes_raw.split(",") if s.strip()] or None
+        # When auth is on, require at least one scope so tokens are never scope-less. An explicit
+        # BAMCP_REQUIRED_SCOPES overrides this default.
+        auth_on = env.get("BAMCP_AUTH_ENABLED", "").lower() == "true"
+        if auth_on and scopes is None:
+            scopes = list(DEFAULT_REQUIRED_SCOPES)
 
         # Set up cache directory
         cache_dir = env.get("BAMCP_CACHE_DIR") or str(DEFAULT_CACHE_DIR)
@@ -155,6 +165,8 @@ class BAMCPConfig:
             required_scopes=scopes,
             token_expiry=int(env.get("BAMCP_TOKEN_EXPIRY", str(DEFAULT_TOKEN_EXPIRY_SECONDS))),
             verify_token=env.get("BAMCP_VERIFY_TOKEN") or None,
+            allow_dynamic_registration=env.get("BAMCP_ALLOW_DYNAMIC_REGISTRATION", "").lower()
+            == "true",
             ncbi_api_key=env.get("BAMCP_NCBI_API_KEY"),
             clinvar_enabled=env.get("BAMCP_CLINVAR_ENABLED", "true").lower() == "true",
             gnomad_enabled=env.get("BAMCP_GNOMAD_ENABLED", "true").lower() == "true",

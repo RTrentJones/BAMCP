@@ -110,6 +110,31 @@ class TestSerializeRegionData:
     """Tests for serialize_region_data helper."""
 
     @pytest.mark.unit
+    def test_payload_carries_schema_version(self):
+        from bamcp.constants import PAYLOAD_SCHEMA_VERSION
+
+        data = RegionData(contig="chr1", start=1, end=2, reads=[], coverage=[0], variants=[])
+        assert serialize_region_data(data)["schema_version"] == PAYLOAD_SCHEMA_VERSION
+
+    @pytest.mark.unit
+    def test_viewer_expected_schema_version_matches_server(self):
+        """The compiled viewer's EXPECTED_SCHEMA_VERSION must track the server's stamp.
+
+        A lightweight server<->viewer contract test: if the payload shape is bumped on one
+        side without the other, this fails instead of the viewer silently mis-decoding.
+        """
+        import re
+        from pathlib import Path
+
+        from bamcp.constants import PAYLOAD_SCHEMA_VERSION
+
+        constants_ts = Path(__file__).parents[3] / "src/bamcp/static/constants.ts"
+        text = constants_ts.read_text()
+        m = re.search(r"EXPECTED_SCHEMA_VERSION\s*=\s*(\d+)", text)
+        assert m, "EXPECTED_SCHEMA_VERSION not found in constants.ts"
+        assert int(m.group(1)) == PAYLOAD_SCHEMA_VERSION
+
+    @pytest.mark.unit
     def test_empty_region(self):
         data = RegionData(
             contig="chr1", start=100, end=200, reads=[], coverage=[0] * 100, variants=[]
@@ -297,7 +322,9 @@ class TestHandleBrowseRegion:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_reference_preserved_in_jump_payload(self, small_bam_path, ref_fasta_path, config):
+    async def test_reference_preserved_in_jump_payload(
+        self, small_bam_path, ref_fasta_path, config
+    ):
         result = await handle_jump_to(
             {"file_path": small_bam_path, "position": 150, "reference": ref_fasta_path},
             config,

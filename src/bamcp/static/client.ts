@@ -1,6 +1,6 @@
 import { App } from "@modelcontextprotocol/ext-apps";
 import { RegionData, ToolResultParams, Variant } from "./types";
-import { displayPos } from "./constants";
+import { EXPECTED_SCHEMA_VERSION, displayPos } from "./constants";
 
 export type DisplayMode = 'inline' | 'fullscreen' | 'pip';
 
@@ -149,6 +149,15 @@ export class BAMCPClient {
     }
 
     private handleData(data: RegionData): void {
+        if (
+            data?.schema_version !== undefined &&
+            data.schema_version !== EXPECTED_SCHEMA_VERSION
+        ) {
+            console.warn(
+                `BAMCP payload schema_version ${data.schema_version} != expected ` +
+                `${EXPECTED_SCHEMA_VERSION}; viewer bundle may be out of step with the server.`,
+            );
+        }
         if (this.onDataCallback) {
             this.onDataCallback(data);
         }

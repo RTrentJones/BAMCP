@@ -35,6 +35,11 @@ INDEL_DETECTION_MAX_REGION = 100_000
 # tile so panning the viewport reuses work instead of recomputing each region.
 REGION_TILE_SIZE = 4_096
 
+# Version of the RegionData payload contract sent to the viewer (_meta.ui/init). Bump on any
+# breaking shape change so the viewer (and a schema-compat test) can detect a mismatch instead
+# of silently mis-decoding. A first step toward a generated, typed server<->viewer contract.
+PAYLOAD_SCHEMA_VERSION = 1
+
 # Cap on distinct regions held in a server's in-memory region cache (LRU-evicted).
 # Bounds memory: each entry can hold a full RegionData payload.
 REGION_CACHE_MAX_ENTRIES = 128

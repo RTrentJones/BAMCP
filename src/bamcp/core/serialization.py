@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..analysis.evidence import enhance_variants_with_evidence
+from ..constants import PAYLOAD_SCHEMA_VERSION
 from .parsers import AlignedRead, RegionData
 
 
@@ -89,6 +90,7 @@ def serialize_region_data(data: RegionData, compact: bool | None = None) -> dict
     reads_data = _serialize_reads_columnar(data.reads, include_sequence=not compact)
 
     return {
+        "schema_version": PAYLOAD_SCHEMA_VERSION,
         "contig": data.contig,
         "start": data.start,
         "end": data.end,

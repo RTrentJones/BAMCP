@@ -133,6 +133,7 @@ export interface RegionData {
     variants: Variant[];
     reference_sequence?: string;
     variant_evidence?: Record<string, VariantEvidence>;
+    schema_version?: number;  // Payload contract version (see EXPECTED_SCHEMA_VERSION)
     file_path?: string;  // For client-side re-queries
     reference?: string;  // Reference FASTA path — preserved so CRAM/mismatch context survives refetches
     vcf_path?: string;  // Preserved across refetches so VCF sourcing sticks

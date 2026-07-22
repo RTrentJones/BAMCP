@@ -5,11 +5,32 @@ import pytest
 
 from bamcp.clients.gnomad import (
     GnomadClient,
+    GnomadQueryError,
     GnomadResult,
     PopulationFrequency,
     _build_variant_id,
     _parse_response,
 )
+
+
+class TestTransientErrorsNotCached:
+    """A transient GraphQL error must not be cached and replayed as 'not found'."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_transient_error_is_retried_not_cached(self):
+        client = GnomadClient()
+        calls = {"n": 0}
+
+        async def _boom(*_args):
+            calls["n"] += 1
+            raise GnomadQueryError("transient")
+
+        client._do_lookup = _boom  # type: ignore[method-assign]
+        assert await client.lookup("chr1", 1, "A", "T") is None
+        assert await client.lookup("chr1", 1, "A", "T") is None
+        assert calls["n"] == 2  # retried — the error was NOT cached as a negative
+
 
 # -- Sample API response fixtures -------------------------------------------
 
@@ -146,8 +167,10 @@ class TestParseResponse:
 
     @pytest.mark.unit
     def test_parse_graphql_error(self):
-        result = _parse_response(GNOMAD_GRAPHQL_ERROR, "bad-id")
-        assert result is None
+        # A GraphQL error is transient, not a genuine not-found — it raises so the caller
+        # does not cache and replay it as absence.
+        with pytest.raises(GnomadQueryError):
+            _parse_response(GNOMAD_GRAPHQL_ERROR, "bad-id")
 
     @pytest.mark.unit
     def test_parse_exome_fallback(self):

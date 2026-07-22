@@ -138,6 +138,20 @@ if [[ -z "$TUNNEL_TOKEN" ]]; then
     exit 1
 fi
 
+# Auth is enabled below, and the server refuses to start without a bootstrap credential
+# (create_server's fail-loud guard). Supply the M2M service token here — from the environment
+# (CI/automation) or an interactive hidden prompt — so the container can actually serve traffic.
+BAMCP_VERIFY_TOKEN="${BAMCP_VERIFY_TOKEN:-}"
+if [[ -z "$BAMCP_VERIFY_TOKEN" ]]; then
+    read -rsp "Paste BAMCP service token (BAMCP_VERIFY_TOKEN, input hidden): " BAMCP_VERIFY_TOKEN
+    echo
+fi
+if [[ -z "$BAMCP_VERIFY_TOKEN" ]]; then
+    echo "Error: BAMCP_VERIFY_TOKEN cannot be empty (auth is enabled; the server won't start" >&2
+    echo "       without it). Set BAMCP_ALLOW_DYNAMIC_REGISTRATION=true only for a trusted dev setup." >&2
+    exit 1
+fi
+
 DEFAULT_PUBLIC_URL="https://bamcp.rtrentjones.dev"
 read -rp "Public URL [$DEFAULT_PUBLIC_URL]: " PUBLIC_URL_INPUT
 BAMCP_PUBLIC_URL="${PUBLIC_URL_INPUT:-$DEFAULT_PUBLIC_URL}"
@@ -329,6 +343,7 @@ cat > "$CONTAINER_JSON_FILE" <<JSONEOF
       "BAMCP_HOST": "0.0.0.0",
       "BAMCP_PORT": "8000",
       "BAMCP_AUTH_ENABLED": "true",
+      "BAMCP_VERIFY_TOKEN": "$BAMCP_VERIFY_TOKEN",
       "BAMCP_ISSUER_URL": "$BAMCP_PUBLIC_URL",
       "BAMCP_RESOURCE_SERVER_URL": "$BAMCP_PUBLIC_URL",
       "BAMCP_ALLOW_REMOTE_FILES": "true",

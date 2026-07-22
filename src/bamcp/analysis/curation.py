@@ -12,7 +12,7 @@ import logging
 from typing import Any
 
 from ..config import BAMCPConfig
-from ..core.validation import validate_path, validate_variant_input
+from ..core.validation import validate_path, validate_reference_path, validate_variant_input
 from ..middleware.telemetry import telemetry_wrapper
 from .evidence import (
     build_mismatch_index,
@@ -237,6 +237,8 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     alt = args["alt"]
     window = args.get("window", 50)
     reference = args.get("reference", config.reference)
+    if reference:
+        validate_reference_path(reference, config)
     output_format = args.get("format", "text")
     if output_format not in _VALID_FORMATS:
         output_format = "text"

@@ -160,6 +160,16 @@ class TestValidateVariantFilePath:
         with pytest.raises(ValueError, match="Unsupported variant file type"):
             validate_variant_file_path(str(f), config)
 
+    @pytest.mark.unit
+    def test_signed_remote_vcf_url_query_string_accepted(self):
+        """A signed remote VCF URL (?...=) must still pass the .vcf.gz extension check."""
+        config = BAMCPConfig(allow_remote_files=True)
+        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
+            m.return_value = _PUBLIC_IP_ADDRINFO
+            validate_variant_file_path(
+                "https://bucket.s3.amazonaws.com/calls.vcf.gz?X-Amz-Signature=xyz", config
+            )
+
 
 class TestSSRFPrevention:
     """Tests for SSRF prevention in remote URL validation."""
@@ -519,6 +529,16 @@ class TestValidateReferencePath:
         config = BAMCPConfig(allow_remote_files=True)
         with pytest.raises(ValueError, match="Unsupported reference file type"):
             validate_reference_path("https://example.com/not-a-reference.bam", config)
+
+    @pytest.mark.unit
+    def test_signed_url_query_string_does_not_defeat_extension_check(self):
+        """A signed S3/GCS reference URL (?...=) must still pass the .fa.gz extension check."""
+        config = BAMCPConfig(allow_remote_files=True)
+        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
+            m.return_value = _PUBLIC_IP_ADDRINFO
+            validate_reference_path(
+                "https://bucket.s3.amazonaws.com/ref/hg38.fa.gz?X-Amz-Signature=abc123", config
+            )
 
     @pytest.mark.unit
     def test_local_reference_missing(self):

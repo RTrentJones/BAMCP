@@ -38,6 +38,17 @@ ALLOWED_VARIANT_FILE_EXTENSIONS = (".vcf", ".vcf.gz", ".bcf")
 ALLOWED_REFERENCE_EXTENSIONS = (".fa", ".fasta", ".fa.gz", ".fasta.gz", ".fna", ".fna.gz")
 
 
+def _ext_target(path_or_url: str) -> str:
+    """Lower-cased string to run the file-extension check against.
+
+    For remote URLs, use only the URL *path* so a query string (e.g. a signed S3/GCS
+    ``?X-Amz-Signature=…`` URL) does not defeat the ``endswith`` extension check.
+    """
+    if "://" in path_or_url:
+        return urlparse(path_or_url).path.lower()
+    return path_or_url.lower()
+
+
 def _is_private_ip(addr: str) -> bool:
     """Check if an IP address is private, loopback, or link-local.
 
@@ -179,13 +190,13 @@ def validate_variant_file_path(file_path: str, config: BAMCPConfig) -> None:
     if len(file_path) > MAX_FILE_PATH_LENGTH:
         raise ValueError(f"File path too long (max {MAX_FILE_PATH_LENGTH} characters)")
 
-    lower_path = file_path.lower()
+    ext_target = _ext_target(file_path)
     if "://" in file_path:
         if not config.allow_remote_files:
             raise ValueError("Remote files are disabled")
         if not file_path.startswith(REMOTE_FILE_SCHEMES):
             raise ValueError(f"Scheme not supported for remote file: {file_path}")
-        if not any(lower_path.endswith(ext) for ext in ALLOWED_VARIANT_FILE_EXTENSIONS):
+        if not any(ext_target.endswith(ext) for ext in ALLOWED_VARIANT_FILE_EXTENSIONS):
             raise ValueError(
                 "Unsupported variant file type. "
                 f"Allowed extensions: {ALLOWED_VARIANT_FILE_EXTENSIONS}"
@@ -193,7 +204,7 @@ def validate_variant_file_path(file_path: str, config: BAMCPConfig) -> None:
         validate_remote_url(file_path, config)
         return
 
-    if not any(lower_path.endswith(ext) for ext in ALLOWED_VARIANT_FILE_EXTENSIONS):
+    if not any(ext_target.endswith(ext) for ext in ALLOWED_VARIANT_FILE_EXTENSIONS):
         raise ValueError(
             f"Unsupported variant file type. Allowed extensions: {ALLOWED_VARIANT_FILE_EXTENSIONS}"
         )
@@ -222,13 +233,13 @@ def validate_reference_path(reference_path: str, config: BAMCPConfig) -> None:
     if len(reference_path) > MAX_FILE_PATH_LENGTH:
         raise ValueError(f"Reference path too long (max {MAX_FILE_PATH_LENGTH} characters)")
 
-    lower_path = reference_path.lower()
+    ext_target = _ext_target(reference_path)
     if "://" in reference_path:
         if not config.allow_remote_files:
             raise ValueError("Remote files are disabled")
         if not reference_path.startswith(REMOTE_FILE_SCHEMES):
             raise ValueError(f"Scheme not supported for remote reference: {reference_path}")
-        if not any(lower_path.endswith(ext) for ext in ALLOWED_REFERENCE_EXTENSIONS):
+        if not any(ext_target.endswith(ext) for ext in ALLOWED_REFERENCE_EXTENSIONS):
             raise ValueError(
                 "Unsupported reference file type. "
                 f"Allowed extensions: {ALLOWED_REFERENCE_EXTENSIONS}"
@@ -236,7 +247,7 @@ def validate_reference_path(reference_path: str, config: BAMCPConfig) -> None:
         validate_remote_url(reference_path, config)
         return
 
-    if not any(lower_path.endswith(ext) for ext in ALLOWED_REFERENCE_EXTENSIONS):
+    if not any(ext_target.endswith(ext) for ext in ALLOWED_REFERENCE_EXTENSIONS):
         raise ValueError(
             f"Unsupported reference file type. Allowed extensions: {ALLOWED_REFERENCE_EXTENSIONS}"
         )

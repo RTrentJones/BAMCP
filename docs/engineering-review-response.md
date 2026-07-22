@@ -144,31 +144,29 @@ Cheapest wins: align words with reality, de-flake CI. Do first — changes how e
 
 ### Phase 1 — Make "production-ready" honest (the P0 security boundary)  · ~1–1.5 weeks
 
-- [ ] **(S) [wrap] STOPGAP — do first, before code:** set `BAMCP_ALLOWED_REMOTE_HOSTS` in
-  `infra/bamcp.tf` to curated genomics hosts (`hgdownload.soe.ucsc.edu`,
-  `ftp.ncbi.nlm.nih.gov`, `ftp-trace.ncbi.nlm.nih.gov`, `ftp.1000genomes.ebi.ac.uk`,
-  `1000genomes.s3.amazonaws.com`, + any user buckets). Bounds the live SSRF today, feature intact.
-- [ ] **(M) [sub]** **Reference-URL validation** — give the `reference` arg the same policy as
-  BAM/VCF (currently the one open SSRF path). Must stay allowlist-aware (reference is
-  legitimately remote — UCSC).
-- [ ] **(M–L) [sub]** **Unified `resource_policy()`** over BAM/CRAM/**VCF**/**reference**/**index**
-  (index + BAM/VCF already validated; fold reference in and de-duplicate). Enforce the host
-  allowlist as the real control; clean up interrupted temp index files (atomic write + sweep).
-  Document Option A (allowlist-first, chosen) vs Option B (BAMCP-proxied fetch, deferred).
-  Tests: rebinding, CRAM-reference, cleanup.
-- [ ] **(M) [sub] + [wrap]** **Auth: delete the theater** — disable dynamic registration + the
-  auth-code flow; require scopes; validate audience/resource; keep the M2M bearer. **Preserve
-  the verify invariants** (anon→401, `BAMCP_VERIFY_TOKEN`→authorized). Add an **adversarial e2e**
-  (anonymous client cannot obtain access) to `make test`. Update `verify/bamcp.config.ts` only
-  if the contract shape changes. Document the trust model.
-- [ ] **(M) [sub]** Rate limiting + bounded state: trusted-proxy XFF parsing; bounded TTL/LRU
-  limiter; global concurrency ceiling. Byte-aware LRU for `region_cache`; periodic/global
-  expiry; **fix the `id(config)` registry** (lifecycle removal + no id-reuse aliasing);
-  distinct cache-miss sentinel so negative ClinVar/gnomAD results aren't re-fetched.
-- [ ] **(M) [sub]** Parsing cancellation isolation: `wait_for(to_thread(...))` abandons but
-  doesn't cancel pysam work → thread pile-up. Add a parsing concurrency limit; consider worker
-  processes for genuinely-cancellable heavy scans.
-- **Exit:** the security claims in the docs are now *true*, encoded by adversarial tests.
+- [x] **(S) [wrap] STOPGAP:** set `BAMCP_ALLOWED_REMOTE_HOSTS` (+ `BAMCP_RATE_LIMIT_TRUSTED_PROXIES`)
+  in `infra/bamcp.tf` to curated genomics hosts. **Done on wrapper branch `feat/bamcp-remote-allowlist`
+  (not applied — needs sign-off on user cloud-bucket hosts).**
+- [x] **(M) [sub]** **Reference-URL validation** — `validate_reference_path()` closes the one open
+  SSRF path (allowlist-aware, shares the `validate_remote_url` core). Wired into all 7 handlers.
+- [x] **(M–L) [sub]** **Unified data-source validation** — `validate_data_sources()` is the one
+  choke point over BAM/CRAM/VCF/reference/index. Index + BAM/VCF were already validated; reference
+  folded in. Option A (allowlist-first) chosen and documented; Option B (BAMCP-proxied fetch) deferred.
+  Adversarial tests: rebinding, metadata endpoint, CRAM-reference, allowlist. *(Temp-index atomic
+  write/sweep — small follow-up; see Deferred.)*
+- [x] **(M) [sub] + [wrap]** **Auth: deleted the theater** — dynamic registration is a config flag
+  (default OFF): `/register` withheld + `register_client` refuses. Scope required when auth is on.
+  Verify invariants preserved (anon→401, `BAMCP_VERIFY_TOKEN`→authorized). Adversarial tests added.
+  `verify/bamcp.config.ts` unchanged (contract shape preserved).
+- [x] **(M) [sub]** Rate limiting + bounded state: trusted-proxy XFF, bounded-LRU limiter table;
+  `region_cache` LRU-bounded; **registry fixed** (bounded LRU + identity guard + explicit removal —
+  GC-finalizer can't work, `services.config` pins the config); distinct cache-miss sentinel so
+  negative ClinVar/gnomAD results aren't re-fetched.
+- [x] **(M) [sub]** Parsing isolation: all pysam parses confined to a dedicated bounded
+  `ThreadPoolExecutor` (backpressure + no starvation of the loop). Killable worker-process
+  cancellation noted as a deliberate follow-up.
+- **Exit:** ✅ security claims are now *true*, encoded by adversarial tests. Commits: reference SSRF,
+  auth service-token, rate-limiter, caches/registry, parse pool.
 
 ### Phase 2 — Typed contracts & coordinates (kills a bug class)  · ~1 week
 

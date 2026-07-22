@@ -808,9 +808,13 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     validate_path(file_path, config)
     region = args["region"]
     validate_region(region)
-    reference = args.get("reference", config.reference)
-    if reference:
-        validate_reference_path(reference, config)
+    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
+    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
+    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
+    explicit_reference = args.get("reference")
+    if explicit_reference:
+        validate_reference_path(explicit_reference, config)
+    reference = explicit_reference or config.reference
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
     min_vaf = args.get("min_vaf", config.min_vaf)
@@ -859,9 +863,13 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
     validate_path(file_path, config)
     region = args["region"]
     validate_region(region)
-    reference = args.get("reference", config.reference)
-    if reference:
-        validate_reference_path(reference, config)
+    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
+    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
+    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
+    explicit_reference = args.get("reference")
+    if explicit_reference:
+        validate_reference_path(explicit_reference, config)
+    reference = explicit_reference or config.reference
 
     data = await _fetch_region_with_timeout(file_path, region, reference, config, mode="coverage")
 
@@ -887,9 +895,13 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
 
     file_path = args["file_path"]
     validate_path(file_path, config)
-    reference = args.get("reference", config.reference)
-    if reference:
-        validate_reference_path(reference, config)
+    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
+    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
+    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
+    explicit_reference = args.get("reference")
+    if explicit_reference:
+        validate_reference_path(explicit_reference, config)
+    reference = explicit_reference or config.reference
 
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
@@ -950,9 +962,13 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     position = args["position"]
     contig = args.get("contig", DEFAULT_CONTIG)
     window = args.get("window", config.default_window)
-    reference = args.get("reference", config.reference)
-    if reference:
-        validate_reference_path(reference, config)
+    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
+    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
+    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
+    explicit_reference = args.get("reference")
+    if explicit_reference:
+        validate_reference_path(explicit_reference, config)
+    reference = explicit_reference or config.reference
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
@@ -1002,9 +1018,13 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     validate_path(file_path, config)
     region = args["region"]
     validate_region(region)
-    reference = args.get("reference", config.reference)
-    if reference:
-        validate_reference_path(reference, config)
+    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
+    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
+    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
+    explicit_reference = args.get("reference")
+    if explicit_reference:
+        validate_reference_path(explicit_reference, config)
+    reference = explicit_reference or config.reference
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
@@ -1050,9 +1070,13 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     validate_path(file_path, config)
     region = args["region"]
     validate_region(region)
-    reference = args.get("reference", config.reference)
-    if reference:
-        validate_reference_path(reference, config)
+    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
+    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
+    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
+    explicit_reference = args.get("reference")
+    if explicit_reference:
+        validate_reference_path(explicit_reference, config)
+    reference = explicit_reference or config.reference
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
@@ -1265,9 +1289,13 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
     file_path = args["file_path"]
     validate_path(file_path, config)
     contig = args.get("contig", DEFAULT_CONTIG)
-    reference = args.get("reference", config.reference)
-    if reference:
-        validate_reference_path(reference, config)
+    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
+    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
+    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
+    explicit_reference = args.get("reference")
+    if explicit_reference:
+        validate_reference_path(explicit_reference, config)
+    reference = explicit_reference or config.reference
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
 

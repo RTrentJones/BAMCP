@@ -236,9 +236,12 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     ref = args["ref"]
     alt = args["alt"]
     window = args.get("window", 50)
-    reference = args.get("reference", config.reference)
-    if reference:
-        validate_reference_path(reference, config)
+    # Validate only a caller-supplied reference (untrusted SSRF vector); a trusted config default
+    # is used as-is. See the same pattern in core/tools.py handlers.
+    explicit_reference = args.get("reference")
+    if explicit_reference:
+        validate_reference_path(explicit_reference, config)
+    reference = explicit_reference or config.reference
     output_format = args.get("format", "text")
     if output_format not in _VALID_FORMATS:
         output_format = "text"

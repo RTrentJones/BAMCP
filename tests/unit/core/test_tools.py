@@ -1001,6 +1001,33 @@ class TestHandleListContigs:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_works_with_missing_config_default_reference(self, small_bam_path):
+        """A missing operator-set BAMCP_REFERENCE must not break the discovery path for a BAM.
+
+        list_contigs needs no FASTA; a config-default reference is trusted+optional, so only a
+        caller-supplied reference is validated/required.
+        """
+        config = BAMCPConfig(reference="/nonexistent/reference.fa")
+        result = await handle_list_contigs({"file_path": small_bam_path}, config)
+        payload = json.loads(result["content"][0]["text"])
+        assert len(payload["contigs"]) == 2
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_caller_supplied_bad_reference_still_rejected(self, small_bam_path):
+        """The SSRF fix stands: an explicit remote reference to an internal host is blocked."""
+        from unittest.mock import patch
+
+        config = BAMCPConfig(allow_remote_files=True)
+        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
+            m.return_value = [(2, 1, 6, "", ("169.254.169.254", 443))]
+            with pytest.raises(ValueError, match="private/internal address"):
+                await handle_list_contigs(
+                    {"file_path": small_bam_path, "reference": "https://metadata/hg38.fa"}, config
+                )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_contig_format(self, small_bam_path, config):
         result = await handle_list_contigs({"file_path": small_bam_path}, config)
         payload = json.loads(result["content"][0]["text"])

@@ -47,10 +47,12 @@ coverage-strict:
 	python -m pytest tests/ --ignore=tests/e2e -v --cov=bamcp --cov-fail-under=85 --cov-report=term-missing
 
 # Deterministic ground-truth gate — no LLM, no network. This is the CI
-# regression gate: scores BAMCP tools against the synthetic_v1 truth set and
-# fails if variant detection or artifact scoring regresses.
+# regression gate: scores BAMCP tools against the deterministic truth sets and
+# fails if variant/indel detection or artifact scoring regresses. synthetic_v1
+# covers SNVs + artifact rubric; indel_v1 covers the pileup-based indel caller.
 eval-smoke:
 	python -m bamcp.eval.truthset --manifest tests/eval/datasets/synthetic_v1/manifest.yaml
+	python -m bamcp.eval.truthset --manifest tests/eval/datasets/indel_v1/manifest.yaml --min-precision 1.0
 
 # Real GIAB benchmark (network-gated, not in CI). Builds the slice then scores
 # it at a realistic calling operating point. See tests/eval/datasets/giab/.

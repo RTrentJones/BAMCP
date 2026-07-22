@@ -1,0 +1,58 @@
+# BAMCP ground-truth eval dataset — indel_v1
+#
+# A deterministic indel-detection truth set, complementing the SNV-only
+# synthetic_v1. Two indels are planted by tests/create_fixtures.py (Group I) in
+# the otherwise-reference region chr1:3000-3100: a 3bp deletion and a 2bp
+# insertion, each with ample support and surrounded by reference reads, so
+# detect_indels recovers them at a realistic VAF and nothing spurious is called.
+#
+# Same manifest schema and scorer (bamcp.eval.truthset) as synthetic_v1 — only
+# the region and the (indel) alleles differ. No LLM, no network.
+
+dataset: indel_v1
+version: 1
+description: >-
+  Deterministic indel ground truth: one 3bp deletion (chr1:3021 ACGT>A) and one
+  2bp insertion (chr1:3061 A>ATT), planted with ~50% VAF over reference reads,
+  plus reference-only negative regions. Exercises the pileup-based indel caller
+  end-to-end through get_variants.
+
+provenance:
+  generator: tests/create_fixtures.py::create_comprehensive_bam
+  bam: tests/fixtures/comprehensive.bam
+  reference: tests/fixtures/comprehensive_ref.fa
+  note: >-
+    Fixtures are generated (not committed; *.bam is gitignored). The conftest
+    fixtures comprehensive_bam_path / comprehensive_ref_fasta_path create them on
+    first use, so a fresh checkout reproduces this dataset bit-for-bit.
+
+# Region scanned for the indel-detection precision/recall metric. Only the two
+# planted indels fall inside it; nothing else should be called here.
+detection_region: chr1:3000-3100
+
+# Positive truth: VCF-style anchored indel alleles (1-based positions, the
+# coordinate get_variants reports). ref/alt are exactly what detect_indels emits.
+variant_sites:
+  - chrom: chr1
+    pos: 3021
+    ref: ACGT
+    alt: A
+    category: deletion
+    expected_vaf: 0.5
+    expected_artifact: null
+
+  - chrom: chr1
+    pos: 3061
+    ref: A
+    alt: ATT
+    category: insertion
+    expected_vaf: 0.5
+    expected_artifact: null
+
+# Reference-only regions: a correct caller reports zero variants (SNV or indel)
+# here. Reused from the comprehensive fixture's covered, variant-free spans.
+negative_regions:
+  - region: chr1:2100-2150
+    note: 50x reference-only depth (high-coverage true negative)
+  - region: chr2:100-400
+    note: separate contig, reference-only

@@ -2307,6 +2307,34 @@ class TestMediumRoadmapCoverage:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_evicted_services_get_their_clients_closed(self, monkeypatch):
+        """LRU eviction must close the evicted services' HTTP clients (no connection leak)."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        import bamcp.core.tools as tm
+
+        monkeypatch.setattr(tm, "_SERVICES_REGISTRY_MAX", 2)
+        cfg_a = BAMCPConfig()
+        svc_a = tm.get_services(cfg_a)
+        svc_a._clinvar = AsyncMock()  # a client that aclose() must release
+
+        # Churn enough distinct configs to evict A (the oldest / LRU entry).
+        for _ in range(3):
+            tm.get_services(BAMCPConfig())
+
+        # The eviction-close is scheduled on the loop; let it run.
+        for _ in range(5):
+            if not tm._pending_service_closes:
+                break
+            await asyncio.gather(*list(tm._pending_service_closes), return_exceptions=True)
+            await asyncio.sleep(0)
+
+        assert id(cfg_a) not in tm._services_registry  # evicted
+        assert svc_a._clinvar is None  # aclose() ran → clients released
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_close_external_clients_removes_registry_entry(self):
         """Explicit teardown drops the registry entry (no closed instance left behind)."""
         from bamcp.core.tools import _services_registry, close_external_clients, get_services

@@ -150,6 +150,24 @@ class BAMCPServices:
 # in the common case a server has exactly one config, so this holds a single entry.
 _services_registry: OrderedDict[int, BAMCPServices] = OrderedDict()
 _SERVICES_REGISTRY_MAX = 64
+# Strong refs to in-flight eviction-close tasks so they aren't GC'd before completing.
+_pending_service_closes: set[asyncio.Task] = set()
+
+
+def _schedule_services_close(services: BAMCPServices) -> None:
+    """Close an evicted/replaced services' HTTP clients so they don't leak.
+
+    ``get_services`` is synchronous but ``aclose`` is async, so schedule it on the running loop.
+    If no loop is running (a sync caller churning configs), the evicted services almost certainly
+    never lazily created its HTTP clients, so there is nothing to close.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(services.aclose())
+    _pending_service_closes.add(task)
+    task.add_done_callback(_pending_service_closes.discard)
 
 
 def get_services(config: BAMCPConfig) -> BAMCPServices:
@@ -158,8 +176,9 @@ def get_services(config: BAMCPConfig) -> BAMCPServices:
     Keyed by ``id(config)`` with an **identity guard**: a cached entry is reused only if it
     still belongs to *this* config object, so a reused ``id()`` (after an old config was
     collected — its strong ref here having been dropped by :func:`close_external_clients` or
-    LRU eviction) can never alias the wrong services. The registry is a bounded LRU, so it
-    does not leak; call :func:`close_external_clients` for prompt, clean teardown.
+    LRU eviction) can never alias the wrong services. The registry is a bounded LRU; an evicted or
+    stale-overwritten services has its HTTP clients closed (scheduled on the loop) so it does not
+    leak connections. Call :func:`close_external_clients` for prompt, clean teardown.
     """
     key = id(config)
     services = _services_registry.get(key)
@@ -167,11 +186,16 @@ def get_services(config: BAMCPConfig) -> BAMCPServices:
         _services_registry.move_to_end(key)
         return services
 
+    # Stale entry for a reused id() (belonged to a now-dead config) — close it before replacing.
+    if services is not None:
+        _schedule_services_close(services)
+
     services = BAMCPServices.from_config(config)
     _services_registry[key] = services
     _services_registry.move_to_end(key)
     while len(_services_registry) > _SERVICES_REGISTRY_MAX:
-        _services_registry.popitem(last=False)
+        _, evicted = _services_registry.popitem(last=False)
+        _schedule_services_close(evicted)
     return services
 
 

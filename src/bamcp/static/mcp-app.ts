@@ -581,7 +581,7 @@ class BAMCPViewer {
             }, BAMCPViewer.SEQUENCE_FETCH_TIMEOUT_MS);
 
             this.client.fetchRegionDirect(
-                filePath, region, undefined,
+                filePath, region, this.state.data?.reference,
                 this.state.data?.vcf_path, this.state.data?.variant_source,
             ).then(data => {
                 this.pendingSequenceRequest = false;
@@ -629,7 +629,7 @@ class BAMCPViewer {
 
         if (filePath) {
             this.client.fetchRegionDirect(
-                filePath, region, undefined,
+                filePath, region, this.state.data?.reference,
                 this.state.data?.vcf_path, this.state.data?.variant_source,
             ).then(data => {
                 this.pendingSequenceRequest = false;
@@ -714,7 +714,7 @@ class BAMCPViewer {
             const region = `${d.contig}:${fetchStart}-${fetchEnd}`;
 
             const data = await this.client.fetchRegionDirect(
-                d.file_path, region, undefined, d.vcf_path, d.variant_source,
+                d.file_path, region, d.reference, d.vcf_path, d.variant_source,
             );
             if (data) {
                 this.state.loadTile(data);

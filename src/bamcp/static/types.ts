@@ -134,6 +134,7 @@ export interface RegionData {
     reference_sequence?: string;
     variant_evidence?: Record<string, VariantEvidence>;
     file_path?: string;  // For client-side re-queries
+    reference?: string;  // Reference FASTA path — preserved so CRAM/mismatch context survives refetches
     vcf_path?: string;  // Preserved across refetches so VCF sourcing sticks
     variant_source?: string;  // 'auto' | 'vcf' | 'bamcp'
 }

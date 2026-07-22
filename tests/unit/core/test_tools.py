@@ -291,6 +291,18 @@ class TestHandleBrowseRegion:
         # Payload is in _meta.ui/init
         payload = result["_meta"]["ui/init"]
         assert payload["reference_sequence"] is not None
+        # The reference PATH is echoed for client-side re-queries so the viewer's pan/zoom/detail
+        # refetches keep mismatch evidence and can decode CRAM after navigation.
+        assert payload["reference"] == ref_fasta_path
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_reference_preserved_in_jump_payload(self, small_bam_path, ref_fasta_path, config):
+        result = await handle_jump_to(
+            {"file_path": small_bam_path, "position": 150, "reference": ref_fasta_path},
+            config,
+        )
+        assert result["_meta"]["ui/init"]["reference"] == ref_fasta_path
 
     @pytest.mark.unit
     @pytest.mark.asyncio

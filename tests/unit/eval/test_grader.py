@@ -10,17 +10,20 @@ from bamcp.eval.schema import EvalCase
 
 
 @pytest.mark.unit
-def test_grade_case_passes_when_all_tools_called():
+def test_tools_only_case_defers_to_judge_not_auto_pass():
+    """Tool selection is necessary, not sufficient: with no answer check, defer to the judge.
+
+    Calling the expected tools no longer deterministically passes a case — otherwise a model
+    could call the tool and return an empty/wrong answer and still pass.
+    """
     case = EvalCase(
         name="x",
         input="run",
         expected="(any)",
         tools_expected=["get_variants", "get_coverage"],
     )
-    v = grade_case(case, "response", ["get_variants", "get_coverage"], [])
-    assert v is not None
-    assert v.passed is True
-    assert v.deterministic is True
+    # Tools satisfied but no expected_claims / score thresholds → None (judge grades the answer).
+    assert grade_case(case, "response", ["get_variants", "get_coverage"], []) is None
 
 
 @pytest.mark.unit

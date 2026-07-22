@@ -68,10 +68,12 @@ def grade_case(
 ) -> GraderVerdict | None:
     """Run deterministic checks. Return None if no deterministic rule applies.
 
-    Tool selection and answer correctness are graded **separately**: satisfying
-    ``tools_expected`` no longer passes a case on its own when ``expected_claims`` (required
-    factual/numeric content) are declared — those must appear in the answer too. Sub-scores are
-    surfaced on the verdict so a report can show which dimension failed.
+    Tool selection and answer correctness are graded **separately**. Tool selection is necessary
+    but not sufficient: satisfying ``tools_expected`` never passes a case on tool use alone —
+    when no answer-correctness check is declared (no ``expected_claims`` / score thresholds) the
+    result is ``None`` so the LLM judge grades the answer; when one is declared it must also pass.
+    A missing tool or a failed answer check is a deterministic fail. Sub-scores are surfaced on
+    the verdict so a report can show which dimension failed.
     """
     tool_set = set(tool_calls)
     deterministic_signals = []
@@ -126,17 +128,29 @@ def grade_case(
                 + ", ".join(f"{k}>={v}" for k, v in score_thresholds)
             )
 
-    # No deterministic rule applied → defer to the LLM judge.
-    if not deterministic_signals and not failures:
+    # Any declared check failed → deterministic fail (a missing tool or a wrong answer).
+    if failures:
+        return GraderVerdict(
+            passed=False,
+            rationale="; ".join(failures),
+            deterministic=True,
+            score=0.0,
+            tool_score=tool_score,
+            answer_score=answer_score,
+        )
+
+    # All declared checks passed. But tool selection alone is necessary, not sufficient: if no
+    # answer-correctness check ran (no expected_claims, no score thresholds), defer to the LLM
+    # judge for the answer rather than passing on tool invocation alone. The tool was verified
+    # via telemetry; the judge now grades the answer text.
+    if answer_score is None:
         return None
 
-    passed = not failures
-    rationale = "; ".join(failures) if failures else "; ".join(deterministic_signals)
     return GraderVerdict(
-        passed=passed,
-        rationale=rationale,
+        passed=True,
+        rationale="; ".join(deterministic_signals),
         deterministic=True,
-        score=1.0 if passed else 0.0,
+        score=1.0,
         tool_score=tool_score,
         answer_score=answer_score,
     )

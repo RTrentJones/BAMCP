@@ -28,6 +28,14 @@ def test_parse_args_subset_parsed_correctly():
 
 
 @pytest.mark.unit
+def test_parse_args_records_resolved_model_when_omitted():
+    """An omitted --model resolves to the provider default so the run record isn't null."""
+    assert parse_args(["--provider", "openai"]).model == "gpt-4o-mini"
+    assert parse_args(["--provider", "anthropic"]).model == "claude-opus-4-7"
+    assert parse_args(["--provider", "openai", "--model", "gpt-4o"]).model == "gpt-4o"
+
+
+@pytest.mark.unit
 def test_parse_args_invalid_subset_exits(capsys):
     with pytest.raises(SystemExit):
         parse_args(["--subset", "not-valid"])

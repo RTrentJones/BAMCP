@@ -46,12 +46,17 @@ async def test_run_case_invokes_tool_and_grades_pass(tmp_path: Path, small_bam_p
         input="run coverage",
         expected="mean coverage",
         tools_expected=["get_coverage"],
+        # Answer correctness is checked too (tool selection alone no longer passes a case);
+        # the mock's final answer must contain this claim.
+        expected_claims=["coverage"],
     )
     router = InProcessRouter(config=cfg)
 
     result = await run_case(case, provider, router, judge=None, output_dir=tmp_path)
     assert result.verdict.passed is True
     assert result.verdict.deterministic is True
+    assert result.verdict.tool_score == 1.0
+    assert result.verdict.answer_score == 1.0
     assert "get_coverage" in result.tool_calls
     # Telemetry JSONL must exist with at least one event.
     assert Path(result.telemetry_path).exists()

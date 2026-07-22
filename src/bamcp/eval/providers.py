@@ -130,6 +130,20 @@ def make_one_shot_mock(
 # -----------------------------------------------------------------------------
 
 
+# Per-provider default model ids (single source of truth for construction + run records).
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7"
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+
+
+def default_model(provider: str) -> str:
+    """The model id a provider uses when none is given — recorded so runs stay reproducible."""
+    return {
+        "anthropic": DEFAULT_ANTHROPIC_MODEL,
+        "openai": DEFAULT_OPENAI_MODEL,
+        "mock": "mock",
+    }.get(provider, "")
+
+
 class AnthropicProvider:
     """Anthropic Claude provider using the tool-use API."""
 
@@ -137,7 +151,7 @@ class AnthropicProvider:
     # All current claude-opus-4-* and claude-sonnet-4-* models accept vision.
     vision_capable: bool = True
 
-    def __init__(self, model: str = "claude-opus-4-7", max_tokens: int = 4096) -> None:
+    def __init__(self, model: str = DEFAULT_ANTHROPIC_MODEL, max_tokens: int = 4096) -> None:
         try:
             import anthropic  # noqa: F401
         except ImportError as e:  # pragma: no cover — install hint
@@ -189,7 +203,7 @@ class OpenAIProvider:
     # gpt-4o family accepts image content blocks.
     vision_capable: bool = True
 
-    def __init__(self, model: str = "gpt-4o-mini", max_tokens: int = 4096) -> None:
+    def __init__(self, model: str = DEFAULT_OPENAI_MODEL, max_tokens: int = 4096) -> None:
         try:
             import openai  # noqa: F401
         except ImportError as e:  # pragma: no cover — install hint

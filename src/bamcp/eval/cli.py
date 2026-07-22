@@ -13,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from .providers import LLMProvider, get_provider
+from .providers import LLMProvider, default_model, get_provider
 from .report import write_reports, write_summary_line
 from .router import InProcessRouter, ToolRouter
 from .runner import run_cases
@@ -116,7 +116,9 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
         test_cases_path=Path(args.test_cases),
         output_dir=Path(args.output_dir),
         provider=args.provider,
-        model=args.model,
+        # Resolve --model to the provider's actual default when omitted, so run_config.yaml and
+        # the HTML report record the model that was really used (not `null`).
+        model=args.model or default_model(args.provider),
         judge_model=args.judge_model,
         cache=args.cache,
         subset=subset,

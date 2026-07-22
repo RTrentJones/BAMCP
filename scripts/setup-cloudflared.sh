@@ -437,11 +437,16 @@ if $USE_REGISTRY_CREDS; then
 fi
 CREATE_OUTPUT=$(run_oci "${CREATE_ARGS[@]}" 2>&1) || true
 
-echo "$CREATE_OUTPUT"
-
+# Do NOT print the raw response: the OCI create result echoes back the container definition,
+# whose environment_variables (BAMCP_VERIFY_TOKEN) and cloudflared args (tunnel token) are
+# secrets. We only need the new instance OCID from it.
 NEW_INSTANCE_ID=$(echo "$CREATE_OUTPUT" | grep -o 'ocid1\.computecontainerinstance\.[^ "]*' | head -1)
 
 if [[ -z "$NEW_INSTANCE_ID" ]]; then
+    # Surface the response for debugging, with the known secrets redacted (literal replacement).
+    REDACTED_OUTPUT="${CREATE_OUTPUT//$BAMCP_VERIFY_TOKEN/[REDACTED]}"
+    REDACTED_OUTPUT="${REDACTED_OUTPUT//$TUNNEL_TOKEN/[REDACTED]}"
+    echo "$REDACTED_OUTPUT" >&2
     echo "Error: Failed to create container instance." >&2
     exit 1
 fi

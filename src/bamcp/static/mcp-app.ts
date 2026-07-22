@@ -12,7 +12,7 @@
  */
 
 import { BAMCPClient, DebugInfo } from "./client";
-import { BASE_COLORS, displayPos, escapeHtml } from "./constants";
+import { BASE_COLORS, displayPos, escapeHtml, svColor, svTypeLabel } from "./constants";
 import { Renderer } from "./renderer";
 import { StateManager, DEFAULT_SETTINGS } from "./state";
 import {
@@ -27,13 +27,6 @@ import {
 } from "./types";
 
 const CONTEXT_UPDATE_DEBOUNCE_MS = 300;
-
-/** Short SV type label: the VCF SVTYPE, else the symbolic alt (`<DEL>` → `DEL`), else `SV`. */
-function svTypeLabel(v: Variant): string {
-    if (v.sv_type) return v.sv_type;
-    if (v.alt?.startsWith('<')) return v.alt.replace(/[<>]/g, '');
-    return 'SV';
-}
 
 /** Render per-sample genotypes as `name=allele/allele` (missing alleles as `.`). */
 function formatGenotypes(samples?: Record<string, Record<string, unknown>>): string[] {
@@ -800,11 +793,12 @@ class BAMCPViewer {
             // typed badge and escape all VCF-derived text before injecting it as HTML.
             let altCell: string;
             if (v.variant_kind === 'sv') {
-                const svType = svTypeLabel(v);
+                const svType = svTypeLabel(v.sv_type, v.alt);
                 const span = v.sv_end
                     ? `${displayPos(v.position).toLocaleString()}–${Number(v.sv_end).toLocaleString()}`
                     : '';
-                altCell = `<span class="sv-badge" title="${escapeHtml(v.alt)}${span ? ` (${span})` : ''}">${escapeHtml(svType)}</span>`;
+                // Badge color matches the canvas SV-span color for that type.
+                altCell = `<span class="sv-badge" style="background:${svColor(svType)}" title="${escapeHtml(v.alt)}${span ? ` (${span})` : ''}">${escapeHtml(svType)}</span>`;
             } else {
                 altCell = `<span style="color:${BASE_COLORS[v.alt] || '#333'};font-weight:bold">${escapeHtml(v.alt)}</span>`;
             }
@@ -959,7 +953,8 @@ class BAMCPViewer {
         if (variant.variant_kind === 'sv') {
             rows.push(
                 `<span class="detail-key">Type</span>` +
-                `<span class="sv-badge">${escapeHtml(svTypeLabel(variant))}</span>`
+                `<span class="sv-badge" style="background:${svColor(svTypeLabel(variant.sv_type, variant.alt))}">` +
+                `${escapeHtml(svTypeLabel(variant.sv_type, variant.alt))}</span>`
             );
             if (variant.sv_end) {
                 const span = `${displayPos(variant.position).toLocaleString()}` +

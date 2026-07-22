@@ -97,6 +97,29 @@ export function displayPos(pos: number): number {
     return pos + 1;
 }
 
+/** Color per structural-variant type; falls back to SV_COLOR_DEFAULT for unknown types. */
+export const SV_COLORS: Record<string, string> = {
+    DEL: '#ef4444', // deletion — red
+    DUP: '#3b82f6', // duplication — blue
+    INV: '#a855f7', // inversion — purple
+    INS: '#f97316', // insertion — orange
+    CNV: '#14b8a6', // copy-number — teal
+    BND: '#6b7280', // breakend / translocation — gray
+};
+export const SV_COLOR_DEFAULT = '#6b7280';
+
+/** Short SV type label: the VCF SVTYPE, else the symbolic alt (`<DEL>` → `DEL`), else `SV`. */
+export function svTypeLabel(svType?: string | null, alt?: string): string {
+    if (svType) return svType;
+    if (alt?.startsWith('<')) return alt.replace(/[<>]/g, '');
+    return 'SV';
+}
+
+/** Resolve a rendering color for a structural-variant type (case-insensitive). */
+export function svColor(svType: string): string {
+    return SV_COLORS[svType.toUpperCase()] ?? SV_COLOR_DEFAULT;
+}
+
 /**
  * Escape a string for safe interpolation into innerHTML. VCF-derived fields such as
  * a symbolic SV alt (`<DEL>`, `<DUP>`) contain angle brackets that would otherwise be

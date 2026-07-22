@@ -163,8 +163,12 @@ pip install -e ".[dev]"
 # Build production image
 docker compose --profile prod build
 
-# Run production server (Streamable HTTP on port 8000)
-docker compose --profile prod up
+# Run production server (Streamable HTTP on port 8000). The prod profile enables auth, so it
+# needs a service token — the server refuses to start without one:
+BAMCP_VERIFY_TOKEN="$(openssl rand -hex 32)" docker compose --profile prod up
+
+# Prefer to run without auth? Use the beta profile (auth disabled) instead:
+docker compose --profile beta up
 
 # Run tests in Docker
 docker compose --profile dev run --rm test

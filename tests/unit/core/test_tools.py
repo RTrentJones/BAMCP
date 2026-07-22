@@ -2325,6 +2325,38 @@ class TestMediumRoadmapCoverage:
         assert thread_name.startswith("bamcp-parse")
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_parse_pool_gate_bounds_concurrent_submissions(self, monkeypatch):
+        """The submission gate caps in-flight parses so the executor queue can't grow unbounded."""
+        import asyncio
+        import threading
+
+        import bamcp.core.tools as tm
+
+        # Cap concurrency at 2 for the test.
+        monkeypatch.setattr(tm, "_parse_gate", asyncio.Semaphore(2))
+        running = []
+        release = threading.Event()
+
+        def _blocking(i):
+            running.append(i)
+            release.wait(timeout=5)
+            return i
+
+        tasks = [asyncio.create_task(tm._run_in_parse_pool(_blocking, i)) for i in range(4)]
+        # Let the gate admit as many as it will; poll until it settles.
+        for _ in range(50):
+            await asyncio.sleep(0.02)
+            if len(running) >= 2:
+                break
+        await asyncio.sleep(0.05)  # give a (wrongly) admitted 3rd a chance to appear
+        assert len(running) == 2  # gate held the other two back — no unbounded queue
+
+        release.set()
+        results = await asyncio.gather(*tasks)
+        assert sorted(results) == [0, 1, 2, 3]
+
+    @pytest.mark.unit
     def test_services_registry_is_bounded_lru(self):
         """The registry is a bounded LRU — many configs cannot grow it without limit."""
         import bamcp.core.tools as tools_mod

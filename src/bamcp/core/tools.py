@@ -65,22 +65,35 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 # All blocking pysam parses run in this dedicated, bounded pool rather than the event loop's
-# default executor. asyncio.wait_for abandons a timed-out parse but cannot cancel the underlying
-# C call, so a hung parse keeps its worker busy — confining that to a sized, separate pool means
-# it provides backpressure (excess parses queue) and cannot starve unrelated async work. A truly
-# cancellable parse would need a killable worker *process*; that is a deliberate follow-up.
+# default executor, so a hung parse (wait_for abandons the await but can't cancel the C call)
+# can't starve unrelated async work. A truly cancellable parse would need a killable worker
+# *process*; that is a deliberate follow-up.
 _PARSE_EXECUTOR = ThreadPoolExecutor(
     max_workers=PARSE_MAX_CONCURRENCY, thread_name_prefix="bamcp-parse"
 )
+# Submission gate: a plain ThreadPoolExecutor has an UNBOUNDED work queue, so gating on the pool
+# alone isn't real backpressure — a burst of parses (or hung workers) would let submissions pile
+# up in that queue and grow memory. This semaphore bounds in-flight submissions to the worker
+# count, so the executor queue never grows; excess requests wait here (bounded by the async
+# request count) instead. A permit is held until the underlying thread truly finishes (released
+# via a done-callback, and the future is shielded from await-cancellation), so a hung parse keeps
+# occupying its slot rather than freeing it for a submission that would then queue behind it.
+_parse_gate = asyncio.Semaphore(PARSE_MAX_CONCURRENCY)
 
 
-def _run_in_parse_pool(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> asyncio.Future[_T]:
-    """Submit blocking parse work to the dedicated parse pool (drop-in for asyncio.to_thread).
+async def _run_in_parse_pool(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
+    """Run blocking parse work in the dedicated pool under the submission gate.
 
+    Drop-in awaitable for ``asyncio.to_thread`` (callers wrap it in their own ``wait_for``).
     run_in_executor takes no kwargs, so bind them with partial to keep the call sites unchanged.
     """
     call = functools.partial(fn, **kwargs) if kwargs else fn
-    return asyncio.get_running_loop().run_in_executor(_PARSE_EXECUTOR, call, *args)
+    await _parse_gate.acquire()
+    fut = asyncio.get_running_loop().run_in_executor(_PARSE_EXECUTOR, call, *args)
+    # Release only when the thread actually completes — not when an outer wait_for cancels the
+    # await — so hung parses keep holding their slot (real backpressure, bounded executor queue).
+    fut.add_done_callback(lambda _f: _parse_gate.release())
+    return await asyncio.shield(fut)
 
 
 @dataclass

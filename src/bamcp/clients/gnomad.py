@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from .ttl_cache import API_CACHE_MAX_SIZE, API_CACHE_TTL_SECONDS, BoundedTTLCache
+from .ttl_cache import API_CACHE_MAX_SIZE, API_CACHE_TTL_SECONDS, MISS, BoundedTTLCache
 
 logger = logging.getLogger(__name__)
 
@@ -112,16 +112,17 @@ class GnomadClient:
         """
         cache_key = (chrom, pos, ref, alt)
 
-        # Check cache first
-        cached = await self._cache.get(cache_key)
-        if cached is not None:
-            return cached
+        # Check cache first. get_entry distinguishes a miss from a cached "not found"
+        # (None), so a negative result is served from cache instead of re-hitting gnomAD.
+        cached = await self._cache.get_entry(cache_key)
+        if cached is not MISS:
+            return cached  # type: ignore[return-value]
 
         async with self._semaphore:
             # Re-check cache after acquiring semaphore
-            cached = await self._cache.get(cache_key)
-            if cached is not None:
-                return cached
+            cached = await self._cache.get_entry(cache_key)
+            if cached is not MISS:
+                return cached  # type: ignore[return-value]
 
             result = await self._do_lookup(chrom, pos, ref, alt)
             await self._cache.set(cache_key, result)

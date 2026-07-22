@@ -400,6 +400,38 @@ class TestBoundedTTLCache:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_get_entry_distinguishes_miss_from_cached_none(self):
+        """A cached None (negative result) reads back as a hit, not a miss."""
+        from bamcp.clients.ttl_cache import MISS, BoundedTTLCache
+
+        cache: BoundedTTLCache = BoundedTTLCache(maxsize=100, ttl=3600)
+        # Miss → sentinel.
+        assert await cache.get_entry(("absent",)) is MISS
+        # Cache a negative result and read it back as a hit.
+        await cache.set(("absent",), None)
+        assert await cache.get_entry(("absent",)) is None
+        assert await cache.get_entry(("absent",)) is not MISS
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_negative_result_is_not_refetched(self):
+        """A cached 'not found' is served from cache instead of re-hitting the API."""
+        from bamcp.clients.gnomad import GnomadClient
+
+        client = GnomadClient()
+        calls = {"n": 0}
+
+        async def _fake_lookup(*_args):
+            calls["n"] += 1
+            return None  # variant not found
+
+        client._do_lookup = _fake_lookup  # type: ignore[method-assign]
+        assert await client.lookup("chr1", 1, "A", "T") is None
+        assert await client.lookup("chr1", 1, "A", "T") is None
+        assert calls["n"] == 1  # second lookup served from the negative cache
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_cache_evicts_oldest_when_full(self):
         from bamcp.clients.clinvar import BoundedTTLCache
 

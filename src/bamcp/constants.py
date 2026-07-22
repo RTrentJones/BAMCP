@@ -35,6 +35,10 @@ INDEL_DETECTION_MAX_REGION = 100_000
 # tile so panning the viewport reuses work instead of recomputing each region.
 REGION_TILE_SIZE = 4_096
 
+# Cap on distinct regions held in a server's in-memory region cache (LRU-evicted).
+# Bounds memory: each entry can hold a full RegionData payload.
+REGION_CACHE_MAX_ENTRIES = 128
+
 # Auth and integrations
 DEFAULT_TOKEN_EXPIRY_SECONDS = 3_600
 # When auth is enabled with no explicit BAMCP_REQUIRED_SCOPES, require this scope so tokens

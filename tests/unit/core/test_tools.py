@@ -2219,3 +2219,60 @@ class TestMediumRoadmapCoverage:
         assert services_a.gnomad() is not services_b.gnomad()
         assert services_a.gnomad().dataset == "gnomad_r4"
         assert services_b.gnomad().dataset == "gnomad_r2_1"
+
+    @pytest.mark.unit
+    def test_region_cache_evicts_lru_beyond_cap(self, monkeypatch):
+        """The region cache is bounded — LRU entries are evicted past the cap."""
+        from collections import OrderedDict
+
+        from bamcp.core.tools import _get_cached_region, _set_cached_region
+
+        monkeypatch.setattr("bamcp.core.tools.REGION_CACHE_MAX_ENTRIES", 3)
+        cache: OrderedDict = OrderedDict()
+        for i in range(3):
+            _set_cached_region(cache, (f"k{i}",), object(), ttl=3600)
+        # Touch k0 so it becomes most-recently-used.
+        _get_cached_region(cache, ("k0",), ttl=3600)
+        _set_cached_region(cache, ("k3",), object(), ttl=3600)
+
+        assert len(cache) == 3
+        assert ("k1",) not in cache  # evicted (least recently used)
+        assert ("k0",) in cache and ("k3",) in cache
+
+    @pytest.mark.unit
+    def test_services_registry_is_bounded_lru(self):
+        """The registry is a bounded LRU — many configs cannot grow it without limit."""
+        import bamcp.core.tools as tools_mod
+        from bamcp.core.tools import _services_registry, get_services
+
+        # Keep strong refs so ids are not reused mid-test; the cap must still bound the dict.
+        configs = [BAMCPConfig() for _ in range(tools_mod._SERVICES_REGISTRY_MAX + 20)]
+        for cfg in configs:
+            get_services(cfg)
+        assert len(_services_registry) <= tools_mod._SERVICES_REGISTRY_MAX
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_close_external_clients_removes_registry_entry(self):
+        """Explicit teardown drops the registry entry (no closed instance left behind)."""
+        from bamcp.core.tools import _services_registry, close_external_clients, get_services
+
+        cfg = BAMCPConfig()
+        get_services(cfg)
+        assert id(cfg) in _services_registry
+        await close_external_clients(cfg)
+        assert id(cfg) not in _services_registry
+
+    @pytest.mark.unit
+    def test_get_services_identity_guard_rebuilds_on_stale_entry(self):
+        """If an id() is reused, the guard rebuilds rather than aliasing stale services."""
+        from bamcp.core.tools import _services_registry, get_services
+
+        cfg = BAMCPConfig()
+        stale_cfg = BAMCPConfig()
+        stale_services = get_services(stale_cfg)
+        # Simulate id() reuse: a stale services object parked under cfg's id.
+        _services_registry[id(cfg)] = stale_services
+        rebuilt = get_services(cfg)
+        assert rebuilt is not stale_services  # guard rejected the stale entry
+        assert rebuilt.config is cfg

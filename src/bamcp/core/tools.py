@@ -7,6 +7,7 @@ import json
 import logging
 import tempfile
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from ..constants import (
     DEFAULT_CACHE_TTL_SECONDS,
     DEFAULT_CONTIG,
     INDEL_DETECTION_MAX_REGION,
+    REGION_CACHE_MAX_ENTRIES,
     REGION_TILE_SIZE,
     SCAN_VARIANTS_CHUNK_SIZE,
     SCAN_VARIANTS_MAX_REGION,
@@ -72,7 +74,8 @@ class BAMCPServices:
 
     config: BAMCPConfig
     cache: BAMIndexCache
-    region_cache: dict[tuple, tuple[float, RegionData]] = field(default_factory=dict)
+    # LRU-ordered (newest at the end); bounded to REGION_CACHE_MAX_ENTRIES in _set_cached_region.
+    region_cache: OrderedDict[tuple, tuple[float, RegionData]] = field(default_factory=OrderedDict)
     index_download_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     _clinvar: ClinVarClient | None = field(default=None, repr=False)
     _gnomad: GnomadClient | None = field(default=None, repr=False)
@@ -118,20 +121,33 @@ class BAMCPServices:
         self.index_download_locks.clear()
 
 
-# Services keyed by config identity so distinct server instances stay isolated.
-_services_registry: dict[int, BAMCPServices] = {}
+# Services keyed by config identity so distinct server instances stay isolated. LRU-ordered and
+# bounded so it cannot grow without limit across many short-lived configs (tests, embedded use);
+# in the common case a server has exactly one config, so this holds a single entry.
+_services_registry: OrderedDict[int, BAMCPServices] = OrderedDict()
+_SERVICES_REGISTRY_MAX = 64
 
 
 def get_services(config: BAMCPConfig) -> BAMCPServices:
     """Return the :class:`BAMCPServices` for ``config``, creating it on first use.
 
-    Keyed by ``id(config)``: every server has exactly one config object, so this
-    memoizes services per server while never sharing them across servers.
+    Keyed by ``id(config)`` with an **identity guard**: a cached entry is reused only if it
+    still belongs to *this* config object, so a reused ``id()`` (after an old config was
+    collected — its strong ref here having been dropped by :func:`close_external_clients` or
+    LRU eviction) can never alias the wrong services. The registry is a bounded LRU, so it
+    does not leak; call :func:`close_external_clients` for prompt, clean teardown.
     """
-    services = _services_registry.get(id(config))
-    if services is None:
-        services = BAMCPServices.from_config(config)
-        _services_registry[id(config)] = services
+    key = id(config)
+    services = _services_registry.get(key)
+    if services is not None and services.config is config:
+        _services_registry.move_to_end(key)
+        return services
+
+    services = BAMCPServices.from_config(config)
+    _services_registry[key] = services
+    _services_registry.move_to_end(key)
+    while len(_services_registry) > _SERVICES_REGISTRY_MAX:
+        _services_registry.popitem(last=False)
     return services
 
 
@@ -156,10 +172,13 @@ def get_gene_client(config: BAMCPConfig) -> GeneClient:
 
 
 async def close_external_clients(config: BAMCPConfig) -> None:
-    """Close this server's external HTTP clients and clear its per-process caches."""
-    services = _services_registry.get(id(config))
-    if services is not None:
+    """Close this server's external HTTP clients, clear caches, and drop the registry entry."""
+    key = id(config)
+    services = _services_registry.get(key)
+    if services is not None and services.config is config:
         await services.aclose()
+        # Explicit lifecycle removal so a closed server leaves nothing behind.
+        _services_registry.pop(key, None)
 
 
 _CLINVAR_DISCLAIMER = (
@@ -211,7 +230,7 @@ def _cache_key(
 
 
 def _get_cached_region(
-    region_cache: dict[tuple, tuple[float, RegionData]], key: tuple, ttl: int
+    region_cache: OrderedDict[tuple, tuple[float, RegionData]], key: tuple, ttl: int
 ) -> RegionData | None:
     if ttl <= 0:
         return None
@@ -222,14 +241,22 @@ def _get_cached_region(
     if (time.monotonic() - created) > ttl:
         region_cache.pop(key, None)
         return None
+    region_cache.move_to_end(key)  # mark most-recently-used
     return data
 
 
 def _set_cached_region(
-    region_cache: dict[tuple, tuple[float, RegionData]], key: tuple, data: RegionData, ttl: int
+    region_cache: OrderedDict[tuple, tuple[float, RegionData]],
+    key: tuple,
+    data: RegionData,
+    ttl: int,
 ) -> RegionData:
     if ttl > 0:
         region_cache[key] = (time.monotonic(), data)
+        region_cache.move_to_end(key)
+        # Bound memory: evict least-recently-used entries beyond the cap.
+        while len(region_cache) > REGION_CACHE_MAX_ENTRIES:
+            region_cache.popitem(last=False)
     return data
 
 
@@ -442,7 +469,7 @@ async def _fetch_readless_tiled(
     mode: str,
     min_vaf: float | None,
     min_depth: int | None,
-    region_cache: dict[tuple, tuple[float, RegionData]],
+    region_cache: OrderedDict[tuple, tuple[float, RegionData]],
     ttl: int,
 ) -> RegionData:
     """Serve a readless (coverage/variants) query from a per-tile cache.

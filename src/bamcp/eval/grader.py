@@ -41,9 +41,23 @@ _SCORE_THRESHOLD_PATTERN = re.compile(r"score_at_least:\s*(\w+)\s*=\s*([0-9]*\.?
 
 
 def _missing_claims(expected_claims: Iterable[str], response_text: str) -> list[str]:
-    """Return the required claims not present (case-insensitive substring) in the response."""
-    haystack = (response_text or "").lower()
-    return [c for c in expected_claims if c.strip() and c.strip().lower() not in haystack]
+    """Return the required claims not present in the response as a bounded token.
+
+    Matches on alphanumeric boundaries (not raw substring), so ``chr1`` does not spuriously
+    match inside ``chr10`` and ``43.5%`` does not match inside ``143.5%``. This checks literal
+    token *presence* only — it does not model negation (e.g. "not pathogenic" still contains
+    "pathogenic"); use the LLM judge or distinct claims for negation-sensitive cases.
+    """
+    text = response_text or ""
+    missing: list[str] = []
+    for claim in expected_claims:
+        c = claim.strip()
+        if not c:
+            continue
+        pattern = r"(?<![A-Za-z0-9])" + re.escape(c) + r"(?![A-Za-z0-9])"
+        if not re.search(pattern, text, re.IGNORECASE):
+            missing.append(claim)
+    return missing
 
 
 def grade_case(

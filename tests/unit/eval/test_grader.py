@@ -88,6 +88,23 @@ def test_expected_claims_alone_grade_answer_correctness():
 
 
 @pytest.mark.unit
+def test_expected_claims_match_on_token_boundaries():
+    """A short token claim must not match inside a larger token (chr1 != chr10)."""
+    case = EvalCase(name="x", input="q", expected="chr1", expected_claims=["chr1"])
+    # 'chr1' as a bounded token → pass.
+    assert grade_case(case, "Reads on chr1: 100-200", [], []).passed is True
+    # 'chr1' only appears inside 'chr10' → fail (was a false positive under substring match).
+    assert grade_case(case, "The contig is chr10 here", [], []).passed is False
+
+
+@pytest.mark.unit
+def test_expected_claims_numeric_token_boundary():
+    case = EvalCase(name="x", input="q", expected="43.5%", expected_claims=["43.5%"])
+    assert grade_case(case, "VAF is 43.5% at that site", [], []).passed is True
+    assert grade_case(case, "VAF is 143.5% (bogus)", [], []).passed is False
+
+
+@pytest.mark.unit
 def test_grade_case_threshold_passes():
     case = EvalCase(
         name="x",

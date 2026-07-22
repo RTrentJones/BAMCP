@@ -139,10 +139,11 @@ services:
       - BAMCP_PORT=8000
       - BAMCP_AUTH_ENABLED=true
       # Bootstrap credential: the service token, mirroring real prod (OCI/Terraform). Registration
-      # stays OFF — an open /register on a published port is not access control. Compose requires
-      # the token to be supplied (fails fast with the message below if it is unset), matching the
-      # server's own start-up guard.
-      - BAMCP_VERIFY_TOKEN=${BAMCP_VERIFY_TOKEN:?set BAMCP_VERIFY_TOKEN to run the prod profile}
+      # stays OFF — an open /register on a published port is not access control. Passed through
+      # (empty if unset) rather than required at interpolation time, so loading this shared file
+      # for the dev/beta profiles never fails; the requirement is enforced where it belongs — the
+      # server's own start-up guard (create_server) refuses to start prod without a credential.
+      - BAMCP_VERIFY_TOKEN=${BAMCP_VERIFY_TOKEN:-}
       - BAMCP_ISSUER_URL=http://localhost:8000
       - BAMCP_RESOURCE_SERVER_URL=http://localhost:8000
       - BAMCP_ALLOW_REMOTE_FILES=true

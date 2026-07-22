@@ -144,10 +144,6 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
-    # The prod profile requires BAMCP_VERIFY_TOKEN (${VAR:?}); Compose evaluates interpolation
-    # even for `build`, so seed a placeholder for these build-only commands (it never runs).
-    env:
-      BAMCP_VERIFY_TOKEN: ci-build-placeholder
     steps:
       - uses: actions/checkout@v7
       - run: docker compose --profile prod build

@@ -93,11 +93,14 @@ jobs:
         env:
           # Only the Anthropic (and mock) paths reach here; OpenAI is gated above until the
           # runner supports its message shape.
+          PROVIDER: ${{ github.event.inputs.provider || 'anthropic' }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          python scripts/run_eval.py \
-            --provider "${{ github.event.inputs.provider || 'anthropic' }}" \
-            --output-dir .eval-results
+          # mock has no tool calls, so a full run fails the tools_expected cases. Use it as a
+          # secretless schema/parse smoke check (--dry-run) instead of a scoring run.
+          extra=""
+          [ "$PROVIDER" = "mock" ] && extra="--dry-run"
+          python scripts/run_eval.py --provider "$PROVIDER" --output-dir .eval-results $extra
       - uses: actions/upload-artifact@v7
         if: steps.key.outputs.available == 'true'
         with:

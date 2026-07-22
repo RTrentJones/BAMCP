@@ -19,6 +19,17 @@ EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 NCBI_RATE_LIMIT_NO_KEY = 3  # 3 req/sec without API key
 NCBI_RATE_LIMIT_WITH_KEY = 10  # 10 req/sec with API key
 
+# Position-search paging: a single base can be overlapped by many indels/CNVs, so page
+# esearch (up to a safety cap) and summarize IDs in batches rather than truncating.
+_ESEARCH_PAGE = 200
+_ESUMMARY_BATCH = 200
+_MAX_POSITION_RECORDS = 2000
+
+
+def _chunks(items: list[str], size: int) -> list[list[str]]:
+    """Split a list into consecutive chunks of at most ``size`` items."""
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
 
 class TokenBucketRateLimiter:
     """Async token bucket rate limiter for API requests.
@@ -135,93 +146,205 @@ class ClinVarClient:
             if cached is not None:
                 return cached
 
-            await self._rate_limiter.acquire()
             result = await self._do_lookup(chrom, pos, ref, alt)
             await self._cache.set(cache_key, result)
             return result
 
     async def _do_lookup(self, chrom: str, pos: int, ref: str, alt: str) -> ClinVarResult | None:
-        """Execute the actual ClinVar API lookup."""
-        term = _build_search_term(chrom, pos, ref, alt)
+        """Execute the actual ClinVar API lookup.
 
+        Searches by genomic position (ClinVar's ``[Variant name]`` field is HGVS, not
+        ``REF>ALT``, so an allele clause matches nothing), pages past the esearch limit
+        for variant-dense positions, and disambiguates the exact allele from each
+        candidate record's canonical SPDI.
+        """
+        # Step 1: collect every record ID overlapping the position (paged).
+        id_list = await self._search_ids(chrom, pos)
+        if not id_list:
+            logger.debug("ClinVar: no records at %s:%s", chrom, pos)
+            return None
+
+        # Step 2/3: esummary the candidates in batches, returning the first whose SPDI
+        # matches the requested allele (early-exit avoids summarizing every record).
+        for batch in _chunks(id_list, _ESUMMARY_BATCH):
+            await self._rate_limiter.acquire()
+            result_section = await self._esummary(batch)
+            entry = _select_entry(result_section, pos, ref, alt)
+            if entry is not None:
+                return _parse_entry(entry)
+
+        logger.debug("ClinVar: no allele match for %s:%s %s>%s", chrom, pos, ref, alt)
+        return None
+
+    async def _search_ids(self, chrom: str, pos: int) -> list[str]:
+        """Return all ClinVar record IDs at a position, paging past the esearch limit."""
+        term = _build_search_term(chrom, pos)
+        ids: list[str] = []
+        retstart = 0
+        while retstart < _MAX_POSITION_RECORDS:
+            await self._rate_limiter.acquire()
+            params: dict[str, str | int] = {
+                "db": "clinvar",
+                "term": term,
+                "retmode": "json",
+                "retmax": _ESEARCH_PAGE,
+                "retstart": retstart,
+            }
+            if self.api_key:
+                params["api_key"] = self.api_key
+            resp = await self._http_client.get(f"{EUTILS_BASE}esearch.fcgi", params=params)
+            resp.raise_for_status()
+            search_result = resp.json().get("esearchresult", {})
+            page_ids = search_result.get("idlist", [])
+            if not page_ids:
+                break
+            ids.extend(page_ids)
+            retstart += len(page_ids)
+            try:
+                count = int(search_result.get("count", "0"))
+            except (TypeError, ValueError):
+                count = retstart
+            if retstart >= count:
+                break
+        return ids
+
+    async def _esummary(self, ids: list[str]) -> dict:
+        """Fetch esummary details for a batch of record IDs; return the ``result`` map."""
         params: dict[str, str | int] = {
             "db": "clinvar",
-            "term": term,
+            "id": ",".join(ids),
             "retmode": "json",
-            "retmax": 5,
         }
         if self.api_key:
             params["api_key"] = self.api_key
-
-        # Step 1: esearch to find variation IDs
-        search_resp = await self._http_client.get(f"{EUTILS_BASE}esearch.fcgi", params=params)
-        search_resp.raise_for_status()
-        search_data = search_resp.json()
-
-        id_list = search_data.get("esearchresult", {}).get("idlist", [])
-        if not id_list:
-            logger.debug("ClinVar: no results for %s", term)
-            return None
-
-        # Rate limit before second request
-        await self._rate_limiter.acquire()
-
-        # Step 2: esummary to get annotation details
-        summary_params: dict[str, str | int] = {
-            "db": "clinvar",
-            "id": ",".join(id_list[:5]),
-            "retmode": "json",
-        }
-        if self.api_key:
-            summary_params["api_key"] = self.api_key
-
-        summary_resp = await self._http_client.get(
-            f"{EUTILS_BASE}esummary.fcgi", params=summary_params
-        )
-        summary_resp.raise_for_status()
-        summary_data = summary_resp.json()
-
-        return _parse_summary(summary_data)
+        resp = await self._http_client.get(f"{EUTILS_BASE}esummary.fcgi", params=params)
+        resp.raise_for_status()
+        result_section: dict = resp.json().get("result", {})
+        return result_section
 
     async def close(self) -> None:
         """Close the HTTP client."""
         await self._http_client.aclose()
 
 
-def _build_search_term(chrom: str, pos: int, ref: str, alt: str) -> str:
-    """Build a ClinVar search term for a specific variant."""
-    # Strip "chr" prefix for ClinVar queries
+def _build_search_term(chrom: str, pos: int) -> str:
+    """Build a ClinVar esearch term for records overlapping a genomic position.
+
+    Position only: ClinVar's ``[Variant name]`` field holds HGVS names (``c.1799T>A``),
+    not ``REF>ALT``, so a ref>alt clause matches nothing; ``[Base Position]`` indexes the
+    GRCh38 coordinate. The exact allele is disambiguated from each record's SPDI.
+    """
     chrom_num = chrom.replace("chr", "")
-    return f"{chrom_num}[Chromosome] AND {pos}[Base Position] AND {ref}>{alt}[Variant name]"
+    return f"{chrom_num}[Chromosome] AND {pos}[Base Position]"
 
 
-def _parse_summary(data: dict) -> ClinVarResult | None:
-    """Parse an esummary response into a ClinVarResult."""
-    result_section = data.get("result", {})
-    uids = result_section.get("uids", [])
-    if not uids:
-        return None
+def _minimal(pos: int, ref: str, alt: str) -> tuple[int, str, str]:
+    """Reduce ``(pos, ref, alt)`` to a minimal representation by trimming shared bases.
 
-    uid = uids[0]
-    entry = result_section.get(uid, {})
-    if not entry:
-        return None
+    Trims a shared suffix, then a shared prefix (advancing ``pos``), so a VCF-style
+    anchored indel (``pos=100 ref=A alt=AT``) and a canonical SPDI (``100::T``) reduce to
+    the same key. Left-aligns to the trimmed edge only — it does not roll through repeat
+    runs, so an indel inside a homopolymer/tandem repeat may still miss.
+    """
+    ref, alt = ref.upper(), alt.upper()
+    while ref and alt and ref[-1] == alt[-1]:
+        ref, alt = ref[:-1], alt[:-1]
+    while ref and alt and ref[0] == alt[0]:
+        ref, alt, pos = ref[1:], alt[1:], pos + 1
+    return pos, ref, alt
 
-    clinical_sig = entry.get("clinical_significance", {})
+
+def _spdi_matches(spdi: str, pos: int, ref: str, alt: str) -> bool:
+    """Return whether a canonical SPDI (``seq:0based_pos:del:ins``) is this variant.
+
+    SPDI's deletion segment is the reference allele and its insertion the alternate at a
+    0-based interbase position; the requested variant is VCF-style. Both are reduced to a
+    minimal representation (see :func:`_minimal`) before comparison so SNVs and simple
+    (non-repeat) indels match despite VCF's leading anchor base.
+    """
+    parts = spdi.split(":")
+    if len(parts) != 4:
+        return False
+    _seq, spdi_pos, deletion, insertion = parts
+    try:
+        spdi_pos_int = int(spdi_pos)
+    except ValueError:
+        return False
+    return _minimal(spdi_pos_int + 1, deletion, insertion) == _minimal(pos, ref, alt)
+
+
+def _select_entry(result_section: dict, pos: int, ref: str, alt: str) -> dict | None:
+    """Return the esummary entry whose SPDI matches the requested allele.
+
+    A ``[Base Position]`` search returns every record overlapping the position (SNVs,
+    indels, delins), so disambiguate to the exact allele via each record's canonical
+    SPDI. Only single-variant records qualify: a haplotype/genotype record's
+    ``variation_set`` holds several component variants, and its aggregate classification
+    must not be attributed to one component allele.
+    """
+    for uid in result_section.get("uids", []):
+        entry: dict = result_section.get(uid, {})
+        variation_set = entry.get("variation_set", [])
+        if len(variation_set) == 1 and _spdi_matches(
+            variation_set[0].get("canonical_spdi", ""), pos, ref, alt
+        ):
+            return entry
+    return None
+
+
+def _classification(entry: dict) -> dict:
+    """Normalize an esummary entry's classification block.
+
+    ClinVar's 2024 schema splits classifications into ``germline_classification`` /
+    ``oncogenicity_classification`` / ``clinical_impact_classification``; older responses
+    carried ``clinical_significance`` / ``review_status`` / ``trait_set`` at the top level.
+    Returns a dict with ``description`` / ``review_status`` / ``trait_set`` / ``last_evaluated``.
+    """
+    for key in (
+        "germline_classification",
+        "clinical_impact_classification",
+        "oncogenicity_classification",
+    ):
+        block = entry.get(key)
+        if isinstance(block, dict) and block.get("description"):
+            return {
+                "description": block.get("description"),
+                "review_status": block.get("review_status"),
+                "trait_set": block.get("trait_set", []),
+                "last_evaluated": block.get("last_evaluated"),
+            }
+
+    # Legacy (pre-2024) top-level fields.
+    clinical_sig = entry.get("clinical_significance")
     if isinstance(clinical_sig, dict):
-        significance = clinical_sig.get("description", "uncertain significance")
+        description = clinical_sig.get("description")
     else:
-        significance = str(clinical_sig) if clinical_sig else "uncertain significance"
-
-    review_status = entry.get("review_status", "no assertion criteria provided")
+        description = str(clinical_sig) if clinical_sig else None
+    review_status = entry.get("review_status")
     if isinstance(review_status, dict):
-        review_status = review_status.get("description", "no assertion criteria provided")
+        review_status = review_status.get("description")
+    return {
+        "description": description,
+        "review_status": review_status,
+        "trait_set": entry.get("trait_set", []),
+        "last_evaluated": entry.get("last_evaluated"),
+    }
 
+
+def _parse_entry(entry: dict) -> ClinVarResult | None:
+    """Parse a single esummary entry into a ClinVarResult."""
+    uid = entry.get("uid")
+    if not uid:
+        return None
+
+    cls = _classification(entry)
+    significance = cls.get("description") or "uncertain significance"
+    review_status = cls.get("review_status") or "no assertion criteria provided"
     stars = REVIEW_STARS.get(review_status.lower(), 0)
 
     # Extract conditions/traits
     conditions: list[str] = []
-    trait_set = entry.get("trait_set", [])
+    trait_set = cls.get("trait_set") or []
     if isinstance(trait_set, list):
         for trait in trait_set:
             if isinstance(trait, dict):
@@ -245,7 +368,7 @@ def _parse_summary(data: dict) -> ClinVarResult | None:
         review_status=review_status,
         stars=stars,
         conditions=conditions,
-        last_evaluated=entry.get("last_evaluated"),
+        last_evaluated=cls.get("last_evaluated"),
         gene=gene,
         variant_name=entry.get("title"),
     )

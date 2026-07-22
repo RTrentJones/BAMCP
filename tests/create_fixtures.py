@@ -729,6 +729,54 @@ def create_comprehensive_bam(ref_path: str):
             )
         )
 
+    # ── Group I: Planted indel truth (positions 3000-3100) ───────────
+    # A clean 3bp deletion (anchor column 3020) and a 2bp insertion (anchor
+    # column 3060), each with ample support, plus reference reads spanning both
+    # for a realistic VAF denominator. Everything matches the reference apart
+    # from the indels, so no spurious SNVs are called in the region. Backs the
+    # indel_v1 eval dataset — a deterministic indel-detection regression gate
+    # (no LLM, no network), complementing the SNV-only synthetic_v1 set.
+    for i in range(10):
+        # 21M3D26M at 3000: deletes ref 3021-3023, so the deletion anchors at
+        # column 3020 -> get_variants reports 1-based 3021 ref=ACGT alt=A.
+        del_seq = _ref_seq_at(chr1_ref, 3000, 21) + _ref_seq_at(chr1_ref, 3024, 26)
+        reads.append(
+            _make_read(
+                f"plant_del_{i}",
+                del_seq,
+                0,
+                3000,
+                [(0, 21), (2, 3), (0, 26)],
+                flag=0 if i % 2 == 0 else 16,
+            )
+        )
+    for i in range(10):
+        # 21M2I27M at 3040: inserts "TT" after column 3060 -> get_variants
+        # reports 1-based 3061 ref=A alt=ATT.
+        ins_seq = _ref_seq_at(chr1_ref, 3040, 21) + "TT" + _ref_seq_at(chr1_ref, 3061, 27)
+        reads.append(
+            _make_read(
+                f"plant_ins_{i}",
+                ins_seq,
+                0,
+                3040,
+                [(0, 21), (1, 2), (0, 27)],
+                flag=0 if i % 2 == 0 else 16,
+            )
+        )
+    for i in range(10):
+        # Reference reads spanning both anchors (no indel) — the VAF denominator.
+        reads.append(
+            _make_read(
+                f"plant_ref_{i}",
+                _ref_seq_at(chr1_ref, 3000, 100),
+                0,
+                3000,
+                [(0, 100)],
+                flag=0 if i % 2 == 0 else 16,
+            )
+        )
+
     # ── Write BAM ────────────────────────────────────────────────────
     # Sort reads by (reference_id, reference_start) before writing
     reads.sort(key=lambda r: (r.reference_id, r.reference_start))

@@ -157,13 +157,19 @@ _pending_service_closes: set[asyncio.Task] = set()
 def _schedule_services_close(services: BAMCPServices) -> None:
     """Close an evicted/replaced services' HTTP clients so they don't leak.
 
-    ``get_services`` is synchronous but ``aclose`` is async, so schedule it on the running loop.
-    If no loop is running (a sync caller churning configs), the evicted services almost certainly
-    never lazily created its HTTP clients, so there is nothing to close.
+    ``get_services`` is synchronous but ``aclose`` is async. When called from within a running
+    loop (the normal request path) schedule it as a task; when called from sync embedded code
+    with no loop, close it synchronously with ``asyncio.run`` — a sync caller can still have
+    lazily created ``httpx.AsyncClient``s (they don't require a loop to construct), so we must
+    not silently skip the close there.
     """
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
+        try:
+            asyncio.run(services.aclose())
+        except Exception:  # noqa: BLE001 — cleanup must never break eviction
+            logger.debug("failed to close evicted services synchronously", exc_info=True)
         return
     task = loop.create_task(services.aclose())
     _pending_service_closes.add(task)

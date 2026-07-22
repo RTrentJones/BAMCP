@@ -2334,6 +2334,29 @@ class TestMediumRoadmapCoverage:
         assert svc_a._clinvar is None  # aclose() ran → clients released
 
     @pytest.mark.unit
+    def test_evicted_services_closed_without_a_running_loop(self, monkeypatch):
+        """Sync embedded churn (no loop) must still close evicted services' clients."""
+        import bamcp.core.tools as tm
+
+        monkeypatch.setattr(tm, "_SERVICES_REGISTRY_MAX", 2)
+        cfg_a = BAMCPConfig()
+        svc_a = tm.get_services(cfg_a)
+
+        closed = {"v": False}
+
+        async def _aclose():
+            closed["v"] = True
+
+        svc_a.aclose = _aclose  # type: ignore[method-assign]
+
+        # No running loop here (sync test); churn past the cap to evict A.
+        for _ in range(3):
+            tm.get_services(BAMCPConfig())
+
+        assert id(cfg_a) not in tm._services_registry  # evicted
+        assert closed["v"] is True  # closed synchronously via asyncio.run
+
+    @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_close_external_clients_removes_registry_entry(self):
         """Explicit teardown drops the registry entry (no closed instance left behind)."""

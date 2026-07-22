@@ -138,6 +138,11 @@ services:
       - BAMCP_HOST=0.0.0.0
       - BAMCP_PORT=8000
       - BAMCP_AUTH_ENABLED=true
+      # Local demo credential: dynamic registration is enabled so this profile is usable
+      # standalone. The real internet-facing prod (OCI/Terraform) instead sets a service token
+      # (BAMCP_VERIFY_TOKEN) and leaves registration OFF. With auth on, the server refuses to
+      # start unless one of these is provided (see create_server), so this line is required.
+      - BAMCP_ALLOW_DYNAMIC_REGISTRATION=true
       - BAMCP_ISSUER_URL=http://localhost:8000
       - BAMCP_RESOURCE_SERVER_URL=http://localhost:8000
       - BAMCP_ALLOW_REMOTE_FILES=true

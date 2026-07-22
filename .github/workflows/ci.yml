@@ -24,10 +24,17 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
       - name: Verify uv.lock is in sync with pyproject.toml
         run: uv lock --check
       - name: Install from the frozen lock
         run: uv sync --frozen --extra dev --extra eval --extra telemetry
+      # The bundled viewer is part of the ship-gate (test_resources asserts the built bundle),
+      # so build it here just as `make install` does for the other jobs.
+      - name: Build the viewer bundle
+        run: make build-viewer
       - name: Deterministic fixtures + ship-gate from the pinned env
         run: |
           uv run python tests/create_fixtures.py

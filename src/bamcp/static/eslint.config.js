@@ -1,6 +1,10 @@
 // Flat ESLint config for the BAMCP viewer (TypeScript). Minimal but real: JS + TS recommended
-// rules. Tighten over time; the point is to have a static-lint layer the frontend never had.
+// rules. Browser + Node globals come from the `globals` package rather than a hand-rolled list,
+// so DOM value-types (HTMLInputElement, localStorage, …) are recognized. typescript-eslint's
+// recommended preset already disables core `no-undef` for TS (TypeScript itself checks that);
+// the globals still matter for the .js/.ts config files and any non-TS lint.
 import js from "@eslint/js";
+import globals from "globals";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
@@ -10,15 +14,8 @@ export default tseslint.config(
   {
     languageOptions: {
       globals: {
-        window: "readonly",
-        document: "readonly",
-        console: "readonly",
-        setTimeout: "readonly",
-        clearTimeout: "readonly",
-        requestAnimationFrame: "readonly",
-        HTMLElement: "readonly",
-        HTMLCanvasElement: "readonly",
-        CanvasRenderingContext2D: "readonly",
+        ...globals.browser,
+        ...globals.node,
       },
     },
     rules: {

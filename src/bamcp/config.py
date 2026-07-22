@@ -127,6 +127,12 @@ class BAMCPConfig:
         if self.token_expiry < 1:
             raise ValueError(f"token_expiry must be at least 1 second, got {self.token_expiry}")
 
+        # When auth is on, require at least one scope so tokens (incl. the service token) are never
+        # scope-less. Applied here — not only in from_env() — so directly-constructed configs
+        # (embedded servers, tests) get the same invariant. An explicit scope list is respected.
+        if self.auth_enabled and not self.required_scopes:
+            self.required_scopes = list(DEFAULT_REQUIRED_SCOPES)
+
         # Validate cache settings
         if self.cache_ttl < 0:
             raise ValueError(f"cache_ttl must be non-negative, got {self.cache_ttl}")
@@ -143,11 +149,8 @@ class BAMCPConfig:
 
         scopes_raw = env.get("BAMCP_REQUIRED_SCOPES", "")
         scopes = [s.strip() for s in scopes_raw.split(",") if s.strip()] or None
-        # When auth is on, require at least one scope so tokens are never scope-less. An explicit
-        # BAMCP_REQUIRED_SCOPES overrides this default.
-        auth_on = env.get("BAMCP_AUTH_ENABLED", "").lower() == "true"
-        if auth_on and scopes is None:
-            scopes = list(DEFAULT_REQUIRED_SCOPES)
+        # NB: the auth-on "default to bamcp:read when scope-less" invariant lives in
+        # __post_init__ so direct construction gets it too (not just this env path).
 
         # Set up cache directory
         cache_dir = env.get("BAMCP_CACHE_DIR") or str(DEFAULT_CACHE_DIR)

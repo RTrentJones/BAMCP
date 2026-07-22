@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import tempfile
 import time
 from collections import OrderedDict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 import pysam
@@ -25,6 +28,7 @@ from ..constants import (
     DEFAULT_CACHE_TTL_SECONDS,
     DEFAULT_CONTIG,
     INDEL_DETECTION_MAX_REGION,
+    PARSE_MAX_CONCURRENCY,
     REGION_CACHE_MAX_ENTRIES,
     REGION_TILE_SIZE,
     SCAN_VARIANTS_CHUNK_SIZE,
@@ -57,6 +61,26 @@ from .validation import (
 )
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+# All blocking pysam parses run in this dedicated, bounded pool rather than the event loop's
+# default executor. asyncio.wait_for abandons a timed-out parse but cannot cancel the underlying
+# C call, so a hung parse keeps its worker busy — confining that to a sized, separate pool means
+# it provides backpressure (excess parses queue) and cannot starve unrelated async work. A truly
+# cancellable parse would need a killable worker *process*; that is a deliberate follow-up.
+_PARSE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=PARSE_MAX_CONCURRENCY, thread_name_prefix="bamcp-parse"
+)
+
+
+def _run_in_parse_pool(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> asyncio.Future[_T]:
+    """Submit blocking parse work to the dedicated parse pool (drop-in for asyncio.to_thread).
+
+    run_in_executor takes no kwargs, so bind them with partial to keep the call sites unchanged.
+    """
+    call = functools.partial(fn, **kwargs) if kwargs else fn
+    return asyncio.get_running_loop().run_in_executor(_PARSE_EXECUTOR, call, *args)
 
 
 @dataclass
@@ -417,7 +441,7 @@ async def _compute_region_data(
 
     if mode == "coverage":
         return await asyncio.wait_for(
-            asyncio.to_thread(
+            _run_in_parse_pool(
                 fetch_coverage_only,
                 file_path,
                 region,
@@ -430,7 +454,7 @@ async def _compute_region_data(
         )
     if mode == "variants" and reference:
         return await asyncio.wait_for(
-            asyncio.to_thread(
+            _run_in_parse_pool(
                 fetch_candidate_variants_only,
                 file_path,
                 region,
@@ -444,7 +468,7 @@ async def _compute_region_data(
             timeout=BAM_PARSE_TIMEOUT_SECONDS,
         )
     return await asyncio.wait_for(
-        asyncio.to_thread(
+        _run_in_parse_pool(
             fetch_region,
             file_path,
             region,
@@ -521,7 +545,7 @@ async def _annotate_vcf_support(
 ) -> None:
     """Attach truncation-free read-level support to VCF SNVs (off the event loop)."""
     await asyncio.wait_for(
-        asyncio.to_thread(
+        _run_in_parse_pool(
             annotate_vcf_snv_support,
             file_path,
             region,
@@ -587,7 +611,7 @@ async def _fetch_region_with_timeout(
     if mode == "variants" and vcf_path and (vcf_primary or not reference):
         contig, start, end = parse_region(region)
         vcf_variants = await asyncio.wait_for(
-            asyncio.to_thread(load_vcf_variants, vcf_path, region),
+            _run_in_parse_pool(load_vcf_variants, vcf_path, region),
             timeout=BAM_PARSE_TIMEOUT_SECONDS,
         )
         # Only touch the BAM when there's an SNV whose support we can actually count.
@@ -601,7 +625,7 @@ async def _fetch_region_with_timeout(
         ref_seq = None
         if reference:
             ref_seq = await asyncio.wait_for(
-                asyncio.to_thread(fetch_reference_sequence, reference, region),
+                _run_in_parse_pool(fetch_reference_sequence, reference, region),
                 timeout=BAM_PARSE_TIMEOUT_SECONDS,
             )
         return _set_cached_region(
@@ -636,7 +660,7 @@ async def _fetch_region_with_timeout(
 
     if vcf_path:
         vcf_variants = await asyncio.wait_for(
-            asyncio.to_thread(load_vcf_variants, vcf_path, region),
+            _run_in_parse_pool(load_vcf_variants, vcf_path, region),
             timeout=BAM_PARSE_TIMEOUT_SECONDS,
         )
         if vcf_primary:
@@ -855,7 +879,7 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
             ]
 
     contigs = await asyncio.wait_for(
-        asyncio.to_thread(_list_contigs_sync),
+        _run_in_parse_pool(_list_contigs_sync),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
     )
 
@@ -1230,7 +1254,7 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
 
     try:
         variants = await asyncio.wait_for(
-            asyncio.to_thread(
+            _run_in_parse_pool(
                 scan_variants_chunked,
                 file_path,
                 contig,

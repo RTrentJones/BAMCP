@@ -2240,6 +2240,21 @@ class TestMediumRoadmapCoverage:
         assert ("k0",) in cache and ("k3",) in cache
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_parse_pool_runs_in_dedicated_threads_with_kwargs(self):
+        """Blocking parse work runs in the dedicated bamcp-parse pool, kwargs supported."""
+        import threading
+
+        from bamcp.core.tools import _run_in_parse_pool
+
+        def _work(a, *, b):
+            return (a + b, threading.current_thread().name)
+
+        total, thread_name = await _run_in_parse_pool(_work, 2, b=3)
+        assert total == 5
+        assert thread_name.startswith("bamcp-parse")
+
+    @pytest.mark.unit
     def test_services_registry_is_bounded_lru(self):
         """The registry is a bounded LRU — many configs cannot grow it without limit."""
         import bamcp.core.tools as tools_mod

@@ -39,6 +39,11 @@ REGION_TILE_SIZE = 4_096
 # Bounds memory: each entry can hold a full RegionData payload.
 REGION_CACHE_MAX_ENTRIES = 128
 
+# Max concurrent pysam parses. All blocking BAM/CRAM/VCF work runs in a dedicated thread pool
+# of this size, so a burst of requests (or parses that hang past their timeout) is confined to
+# this pool and cannot starve the event loop's default executor.
+PARSE_MAX_CONCURRENCY = 8
+
 # Auth and integrations
 DEFAULT_TOKEN_EXPIRY_SECONDS = 3_600
 # When auth is enabled with no explicit BAMCP_REQUIRED_SCOPES, require this scope so tokens

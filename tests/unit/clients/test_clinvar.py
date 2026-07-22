@@ -122,6 +122,20 @@ class TestSpdiMatching:
         assert _spdi_matches("NC_000017.11:7674219:g:a", 7674220, "G", "A")
 
     @pytest.mark.unit
+    def test_vcf_insertion_matches_canonical_spdi(self):
+        # VCF pos=100 ref=A alt=AT (leading anchor) ↔ canonical SPDI 100::T.
+        assert _spdi_matches("NC_000001.11:100::T", 100, "A", "AT")
+
+    @pytest.mark.unit
+    def test_vcf_deletion_matches_canonical_spdi(self):
+        # VCF pos=100 ref=AT alt=A ↔ canonical SPDI 100:T:.
+        assert _spdi_matches("NC_000001.11:100:T:", 100, "AT", "A")
+
+    @pytest.mark.unit
+    def test_insertion_wrong_base_does_not_match(self):
+        assert not _spdi_matches("NC_000001.11:100::G", 100, "A", "AT")
+
+    @pytest.mark.unit
     def test_malformed_spdi(self):
         assert not _spdi_matches("not-an-spdi", 7674220, "G", "A")
         assert not _spdi_matches("NC:x:G:A", 7674220, "G", "A")

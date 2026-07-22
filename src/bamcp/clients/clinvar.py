@@ -238,11 +238,29 @@ def _build_search_term(chrom: str, pos: int) -> str:
     return f"{chrom_num}[Chromosome] AND {pos}[Base Position]"
 
 
+def _minimal(pos: int, ref: str, alt: str) -> tuple[int, str, str]:
+    """Reduce ``(pos, ref, alt)`` to a minimal representation by trimming shared bases.
+
+    Trims a shared suffix, then a shared prefix (advancing ``pos``), so a VCF-style
+    anchored indel (``pos=100 ref=A alt=AT``) and a canonical SPDI (``100::T``) reduce to
+    the same key. Left-aligns to the trimmed edge only — it does not roll through repeat
+    runs, so an indel inside a homopolymer/tandem repeat may still miss.
+    """
+    ref, alt = ref.upper(), alt.upper()
+    while ref and alt and ref[-1] == alt[-1]:
+        ref, alt = ref[:-1], alt[:-1]
+    while ref and alt and ref[0] == alt[0]:
+        ref, alt, pos = ref[1:], alt[1:], pos + 1
+    return pos, ref, alt
+
+
 def _spdi_matches(spdi: str, pos: int, ref: str, alt: str) -> bool:
     """Return whether a canonical SPDI (``seq:0based_pos:del:ins``) is this variant.
 
-    SPDI's deletion segment is the reference allele and its insertion the alternate; its
-    position is 0-based, so it is 1-based ``pos`` when ``spdi_pos + 1 == pos``.
+    SPDI's deletion segment is the reference allele and its insertion the alternate at a
+    0-based interbase position; the requested variant is VCF-style. Both are reduced to a
+    minimal representation (see :func:`_minimal`) before comparison so SNVs and simple
+    (non-repeat) indels match despite VCF's leading anchor base.
     """
     parts = spdi.split(":")
     if len(parts) != 4:
@@ -252,11 +270,7 @@ def _spdi_matches(spdi: str, pos: int, ref: str, alt: str) -> bool:
         spdi_pos_int = int(spdi_pos)
     except ValueError:
         return False
-    return (
-        spdi_pos_int + 1 == pos
-        and deletion.upper() == ref.upper()
-        and insertion.upper() == alt.upper()
-    )
+    return _minimal(spdi_pos_int + 1, deletion, insertion) == _minimal(pos, ref, alt)
 
 
 def _select_entry(result_section: dict, pos: int, ref: str, alt: str) -> dict | None:

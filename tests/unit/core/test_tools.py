@@ -340,6 +340,10 @@ class TestHandleBrowseRegion:
         # Payload is in _meta.ui/init
         payload = result["_meta"]["ui/init"]
         assert payload["reference_sequence"] is not None
+        # A config-default (operator) reference is NOT echoed into the payload: the viewer would
+        # send it back as args.reference on refetch, and the handler would then re-validate the
+        # trusted default as caller input. It is re-applied server-side on refetch instead.
+        assert "reference" not in payload
 
     @pytest.mark.unit
     @pytest.mark.asyncio

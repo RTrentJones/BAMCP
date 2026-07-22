@@ -986,9 +986,12 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     payload["file_path"] = file_path  # For client-side re-queries
     # Preserve the full data-source context so the viewer's pan/zoom/detail refetches carry it.
     # Without reference, follow-up calls lose mismatch evidence and CRAM decode fails on navigation.
+    # Echo ONLY a caller-supplied reference: a config-default reference is re-applied server-side on
+    # refetch and stays trusted — echoing it would make refetches re-validate the operator default
+    # as caller input and fail when it's outside the caller allow-list.
     payload["variant_source"] = variant_source
-    if reference is not None:
-        payload["reference"] = reference
+    if explicit_reference is not None:
+        payload["reference"] = explicit_reference
     if effective_vcf is not None:
         payload["vcf_path"] = effective_vcf
 
@@ -1038,9 +1041,12 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     payload["file_path"] = file_path  # For client-side re-queries
     # Preserve the full data-source context so the viewer's pan/zoom/detail refetches carry it.
     # Without reference, follow-up calls lose mismatch evidence and CRAM decode fails on navigation.
+    # Echo ONLY a caller-supplied reference: a config-default reference is re-applied server-side on
+    # refetch and stays trusted — echoing it would make refetches re-validate the operator default
+    # as caller input and fail when it's outside the caller allow-list.
     payload["variant_source"] = variant_source
-    if reference is not None:
-        payload["reference"] = reference
+    if explicit_reference is not None:
+        payload["reference"] = explicit_reference
     if effective_vcf is not None:
         payload["vcf_path"] = effective_vcf
 

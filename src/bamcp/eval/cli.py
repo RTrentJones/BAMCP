@@ -44,7 +44,12 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
         choices=["anthropic", "openai", "mock"],
         help="LLM provider (default: anthropic).",
     )
-    p.add_argument("--model", default="claude-opus-4-7", help="Provider-specific model id.")
+    p.add_argument(
+        "--model",
+        default=None,
+        help="Provider-specific model id. Omit to use the provider's own default "
+        "(so --provider openai does not inherit an Anthropic model id).",
+    )
     p.add_argument(
         "--judge-model",
         default=None,

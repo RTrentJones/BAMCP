@@ -240,17 +240,19 @@ class OpenAIProvider:
         return ProviderResponse(text=choice.content or "", tool_calls=tool_calls)
 
 
-def get_provider(name: str, model: str) -> LLMProvider:
+def get_provider(name: str, model: str | None = None) -> LLMProvider:
     """Factory: resolve a provider name + model to an LLMProvider instance.
 
+    ``model`` may be ``None`` — each provider then uses its own default, so a caller that
+    selects ``openai`` without a model does not inherit an Anthropic model id (and vice versa).
     ``mock`` is supported for offline runs (echoes the case input back as text).
     """
     if name == "mock":
         return make_one_shot_mock(text="[mock response]")
     if name == "anthropic":
-        return AnthropicProvider(model=model)
+        return AnthropicProvider(model=model) if model else AnthropicProvider()
     if name == "openai":
-        return OpenAIProvider(model=model)
+        return OpenAIProvider(model=model) if model else OpenAIProvider()
     raise ValueError(f"Unknown provider {name!r}. Supported: anthropic, openai, mock.")
 
 

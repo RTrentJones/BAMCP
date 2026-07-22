@@ -134,15 +134,15 @@ services:
       - BAMCP_MIN_VAF=0.1
       - BAMCP_MIN_DEPTH=10
       - BAMCP_MIN_MAPQ=0
-      - BAMCP_TRANSPORT=sse
+      - BAMCP_TRANSPORT=streamable-http
       - BAMCP_HOST=0.0.0.0
       - BAMCP_PORT=8000
       - BAMCP_AUTH_ENABLED=true
-      # Local demo credential: dynamic registration is enabled so this profile is usable
-      # standalone. The real internet-facing prod (OCI/Terraform) instead sets a service token
-      # (BAMCP_VERIFY_TOKEN) and leaves registration OFF. With auth on, the server refuses to
-      # start unless one of these is provided (see create_server), so this line is required.
-      - BAMCP_ALLOW_DYNAMIC_REGISTRATION=true
+      # Bootstrap credential: the service token, mirroring real prod (OCI/Terraform). Registration
+      # stays OFF — an open /register on a published port is not access control. Compose requires
+      # the token to be supplied (fails fast with the message below if it is unset), matching the
+      # server's own start-up guard.
+      - BAMCP_VERIFY_TOKEN=${BAMCP_VERIFY_TOKEN:?set BAMCP_VERIFY_TOKEN to run the prod profile}
       - BAMCP_ISSUER_URL=http://localhost:8000
       - BAMCP_RESOURCE_SERVER_URL=http://localhost:8000
       - BAMCP_ALLOW_REMOTE_FILES=true

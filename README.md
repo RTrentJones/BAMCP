@@ -406,7 +406,9 @@ BAMCP/
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml
-│       └── release.yml
+│       ├── greenlight-build.yml   # ship-gate + build/push image + trigger deploy
+│       ├── eval-nightly.yml
+│       └── security.yml
 ├── Dockerfile              # Production (multi-stage)
 ├── Dockerfile.dev          # Development (with test tooling)
 ├── docker-compose.yml      # dev/beta/prod profiles

@@ -178,16 +178,22 @@ Prod docker-compose: `cap_drop: [ALL]`, `no-new-privileges`, `read_only`, `memor
 
 ## Deployment
 
-### OCI Container Instance (Prod)
+### Container image + deploy (prod)
 
-Deploy workflow: `.github/workflows/deploy.yml`
+Deploy is owned by Greenlight, not this repo — there is **no `deploy.yml` here** (the
+legacy `v*`-tag → OCIR workflow was retired in favor of the wrapper pipeline). On every
+push to `main`:
 
-- Triggers on `v*` tags or manual dispatch
-- Builds ARM64 image via `docker buildx` + QEMU
-- Pushes to OCIR via official `oracle-actions/*` GitHub Actions
-- Restarts container instance to pull new image
-
-**Required GitHub Secrets**: `OCI_CLI_USER`, `OCI_CLI_TENANCY`, `OCI_CLI_FINGERPRINT`, `OCI_CLI_KEY_CONTENT`, `OCI_CLI_REGION`, `OCI_COMPARTMENT_OCID`, `OCI_CONTAINER_INSTANCE_OCID`, `OCI_AUTH_TOKEN`
+1. **`.github/workflows/greenlight-build.yml`** — ship-gate (`make test` + `make
+   eval-smoke`), then builds the arm64 image natively and pushes it to GHCR
+   (`ghcr.io/rtrentjones/bamcp:prod` moving tag + `:<sha>` immutable), then fires
+   `repository_dispatch(deploy-bamcp)` at the wrapper repo (`RTrentJones/RTrentJones.dev`)
+   via `GREENLIGHT_DISPATCH_TOKEN`.
+2. The wrapper's **`greenlight-deploy-bamcp.yml`** runs the `oci-deploy-verify` composite:
+   restart the OCI Container Instance to re-pull `:prod`, verify prod is actually serving
+   the new image, then post a `greenlight/deploy-bamcp` commit status back here. The OCI
+   creds + verify token live on the wrapper (`TF_VAR_OCI_*`, `BAMCP_VERIFY_TOKEN`), so this
+   repo only needs `GREENLIGHT_DISPATCH_TOKEN`.
 
 ### Public Access via Cloudflare Tunnel
 
@@ -248,8 +254,8 @@ tests/
 docker/
   entrypoint.sh, healthcheck.py
 .github/
-  workflows/ci.yml, workflows/release.yml, workflows/deploy.yml,
-  pull_request_template.md, ISSUE_TEMPLATE/
+  workflows/ci.yml, workflows/greenlight-build.yml, workflows/eval-nightly.yml,
+  workflows/security.yml, pull_request_template.md, ISSUE_TEMPLATE/
 ```
 
 ## Viewer UI Build Process

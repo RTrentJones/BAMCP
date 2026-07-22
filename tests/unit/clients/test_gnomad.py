@@ -265,6 +265,7 @@ class TestGnomadIntegration:
     """
 
     @pytest.mark.integration
+    @pytest.mark.network
     @pytest.mark.asyncio
     async def test_real_api_known_variant(self):
         """Test lookup of a known common variant (rs1042522 in TP53).
@@ -297,6 +298,7 @@ class TestGnomadIntegration:
                 )
 
     @pytest.mark.integration
+    @pytest.mark.network
     @pytest.mark.asyncio
     async def test_real_api_not_found(self):
         """Test lookup of a variant that shouldn't exist."""

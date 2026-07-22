@@ -1,4 +1,4 @@
-.PHONY: install test test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval-smoke giab-benchmark eval eval-cached eval-compare eval-dry eval-vision-setup render-viewer render-viewer-all-modes
+.PHONY: install test test-network test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval-smoke giab-benchmark eval eval-cached eval-compare eval-dry eval-vision-setup render-viewer render-viewer-all-modes
 
 build-viewer:
 	cd src/bamcp/static && npm install && npm run build
@@ -8,6 +8,11 @@ install: build-viewer
 
 test:
 	python -m pytest tests/ --ignore=tests/e2e -v
+
+# Live tier: tests that make real external network calls (gnomAD, etc.). Excluded from the
+# default hermetic suite; run explicitly (e.g. scheduled CI) — the -m here overrides addopts.
+test-network:
+	python -m pytest tests/ --ignore=tests/e2e -v -m network --no-cov
 
 test-e2e:
 	playwright install chromium

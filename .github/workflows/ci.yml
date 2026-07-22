@@ -14,6 +14,26 @@ permissions:
   contents: read
 
 jobs:
+  # Reproducible-build gate: the lockfile must be fresh, and the PINNED environment must
+  # install and pass the ship-gate (test + eval-smoke). The 3.10-3.12 `test` matrix below
+  # deliberately installs broad ranges — that is the compat check; this is the pinned one.
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Verify uv.lock is in sync with pyproject.toml
+        run: uv lock --check
+      - name: Install from the frozen lock
+        run: uv sync --frozen --extra dev --extra eval --extra telemetry
+      - name: Deterministic fixtures + ship-gate from the pinned env
+        run: |
+          uv run python tests/create_fixtures.py
+          uv run python -m pytest tests/ --ignore=tests/e2e -q
+          uv run make eval-smoke
+
   lint:
     runs-on: ubuntu-latest
     steps:

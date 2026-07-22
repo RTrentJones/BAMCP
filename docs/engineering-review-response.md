@@ -131,15 +131,16 @@ submodule · **[wrap]** `RTrentJones.dev` wrapper · **[up]** upstream Greenligh
 ### Phase 0 — Stop the credibility bleed  · ~2–3 days
 Cheapest wins: align words with reality, de-flake CI. Do first — changes how everything reads.
 
-- [ ] **(S) [sub]** Docs truth pass: fix the broken README VCF/ClinVar table rows; scope the
-  MCP-Apps claim to *"first genomics/genetic MCP to leverage MCP Apps"*; soften "OAuth
-  enabled / locked-down"; narrow the caller-correctness claim to exactly what the 60 kb SNV
-  slice showed; remove `uvx bamcp` until PyPI publish; add a real security-reporting route.
-- [ ] **(M) [sub]** Test hermeticity split: move live gnomAD calls + `example.com` DNS tests
-  out of the default suite into a scheduled/live tier; mock `socket.getaddrinfo` in validation
-  unit tests. **Must not touch what `make eval-smoke` depends on** (it's a deploy gate).
-- [ ] **(S) [sub]** Regenerate `uv.lock`; make CI install from the frozen lock, not broad ranges.
-- **Exit:** PR suite fully hermetic + green offline; every doc claim defensible.
+- [x] **(S) [sub]** Docs truth pass: fixed the broken README table (VCF prose had split it);
+  scoped the MCP-Apps claim to *"first genomics MCP server"*; noted `uvx bamcp` needs the
+  pending PyPI publish; bounded the 60 kb GIAB headline; concrete SECURITY.md reporting route.
+- [x] **(M) [sub]** Test hermeticity: added a `network` marker (excluded by default via
+  `addopts -m 'not network'`), marked the 2 live gnomAD tests, mocked `socket.getaddrinfo` in
+  the 4 `example.com` validation tests, added `make test-network`. Suite is green offline
+  (696 passed, 2 deselected); `eval-smoke` untouched.
+- [x] **(S) [sub]** `uv.lock` regenerated; added a CI `lockfile` job (`uv lock --check` +
+  frozen install + ship-gate from the pinned env). The 3.10–3.12 matrix stays as the compat check.
+- **Exit:** ✅ PR suite fully hermetic + green offline; every doc claim defensible.
 
 ### Phase 1 — Make "production-ready" honest (the P0 security boundary)  · ~1–1.5 weeks
 

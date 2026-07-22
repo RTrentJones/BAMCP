@@ -30,8 +30,10 @@ class TestValidatePath:
     @pytest.mark.unit
     def test_remote_files_allowed(self):
         config = BAMCPConfig(allow_remote_files=True)
-        # Should not raise — example.com resolves to public IPs
-        validate_path("https://example.com/file.bam", config)
+        # Hermetic: mock DNS to a public IP so no live resolution is needed.
+        with patch("bamcp.core.validation.socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [(2, 1, 6, "", ("93.184.216.34", 443))]
+            validate_path("https://example.com/file.bam", config)
 
     @pytest.mark.unit
     def test_remote_files_invalid_scheme(self):
@@ -213,8 +215,10 @@ class TestSSRFPrevention:
     def test_allow_public_ip(self):
         """Public IPs should be allowed."""
         config = BAMCPConfig(allow_remote_files=True)
-        # example.com resolves to public IP
-        validate_remote_url("https://example.com/file.bam", config)
+        # Hermetic: mock DNS to a public IP.
+        with patch("bamcp.core.validation.socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [(2, 1, 6, "", ("93.184.216.34", 443))]
+            validate_remote_url("https://example.com/file.bam", config)
 
     @pytest.mark.unit
     def test_no_hostname(self):
@@ -237,8 +241,10 @@ class TestSSRFPrevention:
             allow_remote_files=True,
             allowed_remote_hosts=["example.com"],
         )
-        # Should not raise
-        validate_remote_url("https://example.com/file.bam", config)
+        # Should not raise (hermetic: mock DNS to a public IP)
+        with patch("bamcp.core.validation.socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [(2, 1, 6, "", ("93.184.216.34", 443))]
+            validate_remote_url("https://example.com/file.bam", config)
 
     @pytest.mark.unit
     def test_allowed_remote_hosts_case_insensitive(self):
@@ -248,7 +254,10 @@ class TestSSRFPrevention:
             allowed_remote_hosts=["Example.COM"],
         )
         # Should not raise on the allow-list check (host normalized to lower-case).
-        validate_remote_url("https://example.com/file.bam", config)
+        # Hermetic: mock DNS to a public IP.
+        with patch("bamcp.core.validation.socket.getaddrinfo") as mock_getaddrinfo:
+            mock_getaddrinfo.return_value = [(2, 1, 6, "", ("93.184.216.34", 443))]
+            validate_remote_url("https://example.com/file.bam", config)
 
     @pytest.mark.unit
     def test_is_private_ip_helper(self):

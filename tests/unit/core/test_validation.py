@@ -10,12 +10,18 @@ from bamcp.core.validation import (
     CHROM_PATTERN,
     REGION_PATTERN,
     _is_private_ip,
+    validate_data_sources,
     validate_path,
+    validate_reference_path,
     validate_region,
     validate_remote_url,
     validate_variant_file_path,
     validate_variant_input,
 )
+
+_PUBLIC_IP_ADDRINFO = [(2, 1, 6, "", ("93.184.216.34", 443))]
+_PRIVATE_IP_ADDRINFO = [(2, 1, 6, "", ("10.0.0.1", 443))]
+_METADATA_ADDRINFO = [(2, 1, 6, "", ("169.254.169.254", 443))]
 
 
 class TestValidatePath:
@@ -459,3 +465,103 @@ class TestValidateVariantInput:
         result = validate_variant_input("chr1", 100, "A", "")
         assert result is not None
         assert "Invalid alternate allele" in result
+
+
+class TestValidateReferencePath:
+    """The reference FASTA arg must get the same SSRF policy as BAM/VCF inputs.
+
+    Before this, ``reference`` was handed straight to pysam unvalidated — a remote
+    reference could target a private/internal host or a cloud metadata endpoint.
+    """
+
+    @pytest.mark.unit
+    def test_remote_reference_disabled_by_default(self):
+        config = BAMCPConfig(allow_remote_files=False)
+        with pytest.raises(ValueError, match="Remote files are disabled"):
+            validate_reference_path("https://example.com/hg38.fa", config)
+
+    @pytest.mark.unit
+    def test_remote_reference_blocks_private_ip(self):
+        config = BAMCPConfig(allow_remote_files=True)
+        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
+            m.return_value = _PRIVATE_IP_ADDRINFO
+            with pytest.raises(ValueError, match="private/internal address"):
+                validate_reference_path("https://internal.example.com/hg38.fa", config)
+
+    @pytest.mark.unit
+    def test_remote_reference_blocks_metadata_endpoint(self):
+        """A remote reference must not be able to reach the cloud metadata endpoint."""
+        config = BAMCPConfig(allow_remote_files=True)
+        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
+            m.return_value = _METADATA_ADDRINFO
+            with pytest.raises(ValueError, match="private/internal address"):
+                validate_reference_path("https://metadata.example.com/hg38.fa", config)
+
+    @pytest.mark.unit
+    def test_remote_reference_enforces_allowlist(self):
+        config = BAMCPConfig(
+            allow_remote_files=True, allowed_remote_hosts=["hgdownload.soe.ucsc.edu"]
+        )
+        with pytest.raises(ValueError, match="not in the allowed remote hosts"):
+            validate_reference_path("https://evil.example.com/hg38.fa", config)
+
+    @pytest.mark.unit
+    def test_remote_reference_allowlisted_public_ok(self):
+        config = BAMCPConfig(
+            allow_remote_files=True, allowed_remote_hosts=["hgdownload.soe.ucsc.edu"]
+        )
+        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
+            m.return_value = _PUBLIC_IP_ADDRINFO
+            validate_reference_path("https://hgdownload.soe.ucsc.edu/goldenPath/hg38.fa.gz", config)
+
+    @pytest.mark.unit
+    def test_remote_reference_bad_extension(self):
+        config = BAMCPConfig(allow_remote_files=True)
+        with pytest.raises(ValueError, match="Unsupported reference file type"):
+            validate_reference_path("https://example.com/not-a-reference.bam", config)
+
+    @pytest.mark.unit
+    def test_local_reference_missing(self):
+        config = BAMCPConfig()
+        with pytest.raises(FileNotFoundError, match="Reference file not found"):
+            validate_reference_path("/nonexistent/hg38.fa", config)
+
+    @pytest.mark.unit
+    def test_local_reference_ok(self, tmp_path):
+        config = BAMCPConfig(allowed_directories=None)
+        f = tmp_path / "ref.fa"
+        f.write_text(">chr1\nACGT\n")
+        validate_reference_path(str(f), config)
+
+    @pytest.mark.unit
+    def test_local_reference_outside_allowed_dirs(self, tmp_path):
+        f = tmp_path / "ref.fa"
+        f.write_text(">chr1\nACGT\n")
+        config = BAMCPConfig(allowed_directories=["/some/other/dir"])
+        with pytest.raises(ValueError, match="not in allowed directories"):
+            validate_reference_path(str(f), config)
+
+
+class TestValidateDataSources:
+    """The one-call aggregator validates every source a tool hands to pysam."""
+
+    @pytest.mark.unit
+    def test_reference_is_validated_via_aggregator(self, tmp_path):
+        bam = tmp_path / "sample.bam"
+        bam.write_bytes(b"BAM\x01")
+        config = BAMCPConfig(allow_remote_files=True, allowed_directories=None)
+        # A poisoned remote reference must be rejected even when the BAM is fine.
+        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
+            m.return_value = _PRIVATE_IP_ADDRINFO
+            with pytest.raises(ValueError, match="private/internal address"):
+                validate_data_sources(
+                    str(bam), config, reference="https://internal.example.com/hg38.fa"
+                )
+
+    @pytest.mark.unit
+    def test_none_sources_skipped(self, tmp_path):
+        bam = tmp_path / "sample.bam"
+        bam.write_bytes(b"BAM\x01")
+        config = BAMCPConfig(allowed_directories=None)
+        # reference/vcf None → only the BAM is validated, no error.
+        validate_data_sources(str(bam), config)

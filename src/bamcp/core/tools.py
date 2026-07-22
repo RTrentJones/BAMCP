@@ -47,6 +47,7 @@ from .parsers import (
 from .serialization import serialize_region_data
 from .validation import (
     validate_path,
+    validate_reference_path,
     validate_region,
     validate_remote_url,
     validate_variant_file_path,
@@ -727,6 +728,8 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     region = args["region"]
     validate_region(region)
     reference = args.get("reference", config.reference)
+    if reference:
+        validate_reference_path(reference, config)
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
     min_vaf = args.get("min_vaf", config.min_vaf)
@@ -776,6 +779,8 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
     region = args["region"]
     validate_region(region)
     reference = args.get("reference", config.reference)
+    if reference:
+        validate_reference_path(reference, config)
 
     data = await _fetch_region_with_timeout(file_path, region, reference, config, mode="coverage")
 
@@ -802,6 +807,8 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
     file_path = args["file_path"]
     validate_path(file_path, config)
     reference = args.get("reference", config.reference)
+    if reference:
+        validate_reference_path(reference, config)
 
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
@@ -863,6 +870,8 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     contig = args.get("contig", DEFAULT_CONTIG)
     window = args.get("window", config.default_window)
     reference = args.get("reference", config.reference)
+    if reference:
+        validate_reference_path(reference, config)
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
@@ -910,6 +919,8 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     region = args["region"]
     validate_region(region)
     reference = args.get("reference", config.reference)
+    if reference:
+        validate_reference_path(reference, config)
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
@@ -953,6 +964,8 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     region = args["region"]
     validate_region(region)
     reference = args.get("reference", config.reference)
+    if reference:
+        validate_reference_path(reference, config)
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
@@ -1166,6 +1179,8 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
     validate_path(file_path, config)
     contig = args.get("contig", DEFAULT_CONTIG)
     reference = args.get("reference", config.reference)
+    if reference:
+        validate_reference_path(reference, config)
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
 

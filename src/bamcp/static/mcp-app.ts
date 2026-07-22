@@ -1242,6 +1242,5 @@ class BAMCPViewer {
     }
 }
 
-// Init
-// @ts-ignore
-(window as any).viewer = new BAMCPViewer();
+// Init — expose the viewer on window for debugging/E2E hooks.
+(window as unknown as { viewer: BAMCPViewer }).viewer = new BAMCPViewer();

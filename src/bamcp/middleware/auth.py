@@ -31,13 +31,21 @@ from ..config import BAMCPConfig
 
 
 def build_auth_settings(config: BAMCPConfig) -> AuthSettings:
-    """Build AuthSettings from BAMCPConfig."""
+    """Build AuthSettings from BAMCPConfig.
+
+    Dynamic client registration is gated on ``config.allow_dynamic_registration``
+    (default OFF). With it off, the ``/register`` endpoint is not exposed, so an
+    anonymous client cannot self-register and mint a token — the only accepted
+    credential is the configured service token (``verify_token``) or a client
+    registered out-of-band. This is the honest access-control posture; an open
+    registration endpoint with a no-consent authorize is not access control.
+    """
     return AuthSettings(
         issuer_url=cast(AnyHttpUrl, config.issuer_url),
         resource_server_url=cast(AnyHttpUrl, config.resource_server_url),
         required_scopes=config.required_scopes or [],
         client_registration_options=ClientRegistrationOptions(
-            enabled=True,
+            enabled=config.allow_dynamic_registration,
             valid_scopes=config.required_scopes or [],
             default_scopes=config.required_scopes or [],
         ),
@@ -55,12 +63,16 @@ class BAMCPAuthProvider(
         token_expiry: int = 3600,
         verify_token: str | None = None,
         verify_scopes: list[str] | None = None,
+        allow_dynamic_registration: bool = False,
     ) -> None:
         self.token_expiry = token_expiry
         # Optional M2M service token (CI verify): a single configured bearer accepted statelessly,
         # so it survives restarts (the OAuth stores below are in-memory and reset on every restart).
         self._verify_token = verify_token or None
         self._verify_scopes = verify_scopes or []
+        # Dynamic client registration (default OFF). When off, register_client refuses, so no
+        # anonymous client can self-register and mint a token — access is the service token only.
+        self._allow_dynamic_registration = allow_dynamic_registration
         self._clients: dict[str, OAuthClientInformationFull] = {}
         self._auth_codes: dict[str, AuthorizationCode] = {}
         self._access_tokens: dict[str, AccessToken] = {}
@@ -72,6 +84,11 @@ class BAMCPAuthProvider(
         return self._clients.get(client_id)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        # Refuse self-registration when dynamic registration is disabled. Defense in depth:
+        # the SDK also withholds the /register endpoint, but this guarantees no client is
+        # admitted through this provider regardless of how it is reached.
+        if not self._allow_dynamic_registration:
+            raise ValueError("Dynamic client registration is disabled")
         if client_info.client_id is not None:
             self._clients[client_info.client_id] = client_info
 

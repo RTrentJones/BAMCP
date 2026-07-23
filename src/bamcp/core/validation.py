@@ -35,6 +35,18 @@ MAX_REGION_LENGTH = 100
 # Allowed file extensions
 ALLOWED_FILE_EXTENSIONS = (".bam", ".cram")
 ALLOWED_VARIANT_FILE_EXTENSIONS = (".vcf", ".vcf.gz", ".bcf")
+ALLOWED_REFERENCE_EXTENSIONS = (".fa", ".fasta", ".fa.gz", ".fasta.gz", ".fna", ".fna.gz")
+
+
+def _ext_target(path_or_url: str) -> str:
+    """Lower-cased string to run the file-extension check against.
+
+    For remote URLs, use only the URL *path* so a query string (e.g. a signed S3/GCS
+    ``?X-Amz-Signature=…`` URL) does not defeat the ``endswith`` extension check.
+    """
+    if "://" in path_or_url:
+        return urlparse(path_or_url).path.lower()
+    return path_or_url.lower()
 
 
 def _is_private_ip(addr: str) -> bool:
@@ -178,13 +190,13 @@ def validate_variant_file_path(file_path: str, config: BAMCPConfig) -> None:
     if len(file_path) > MAX_FILE_PATH_LENGTH:
         raise ValueError(f"File path too long (max {MAX_FILE_PATH_LENGTH} characters)")
 
-    lower_path = file_path.lower()
+    ext_target = _ext_target(file_path)
     if "://" in file_path:
         if not config.allow_remote_files:
             raise ValueError("Remote files are disabled")
         if not file_path.startswith(REMOTE_FILE_SCHEMES):
             raise ValueError(f"Scheme not supported for remote file: {file_path}")
-        if not any(lower_path.endswith(ext) for ext in ALLOWED_VARIANT_FILE_EXTENSIONS):
+        if not any(ext_target.endswith(ext) for ext in ALLOWED_VARIANT_FILE_EXTENSIONS):
             raise ValueError(
                 "Unsupported variant file type. "
                 f"Allowed extensions: {ALLOWED_VARIANT_FILE_EXTENSIONS}"
@@ -192,7 +204,7 @@ def validate_variant_file_path(file_path: str, config: BAMCPConfig) -> None:
         validate_remote_url(file_path, config)
         return
 
-    if not any(lower_path.endswith(ext) for ext in ALLOWED_VARIANT_FILE_EXTENSIONS):
+    if not any(ext_target.endswith(ext) for ext in ALLOWED_VARIANT_FILE_EXTENSIONS):
         raise ValueError(
             f"Unsupported variant file type. Allowed extensions: {ALLOWED_VARIANT_FILE_EXTENSIONS}"
         )
@@ -205,6 +217,71 @@ def validate_variant_file_path(file_path: str, config: BAMCPConfig) -> None:
 
         if not any(abs_path.is_relative_to(Path(d).resolve()) for d in config.allowed_directories):
             raise ValueError("Path is not in allowed directories")
+
+
+def validate_reference_path(reference_path: str, config: BAMCPConfig) -> None:
+    """Validate a reference FASTA path/URL with the same policy as BAM/VCF inputs.
+
+    Closes an SSRF gap: the ``reference`` argument is handed straight to
+    ``pysam.AlignmentFile(reference_filename=…)`` and htslib will fetch it, so an
+    unvalidated remote reference could target a private/internal host or a cloud
+    metadata endpoint. Remote references are a first-class use case (public UCSC
+    FASTA for CRAM decode), so this is **allow-list aware** rather than blocking —
+    it shares the SSRF core (:func:`validate_remote_url`) with the BAM/CRAM/VCF and
+    index paths, so one policy governs every remote resource BAMCP hands to pysam.
+    """
+    if len(reference_path) > MAX_FILE_PATH_LENGTH:
+        raise ValueError(f"Reference path too long (max {MAX_FILE_PATH_LENGTH} characters)")
+
+    ext_target = _ext_target(reference_path)
+    if "://" in reference_path:
+        if not config.allow_remote_files:
+            raise ValueError("Remote files are disabled")
+        if not reference_path.startswith(REMOTE_FILE_SCHEMES):
+            raise ValueError(f"Scheme not supported for remote reference: {reference_path}")
+        if not any(ext_target.endswith(ext) for ext in ALLOWED_REFERENCE_EXTENSIONS):
+            raise ValueError(
+                "Unsupported reference file type. "
+                f"Allowed extensions: {ALLOWED_REFERENCE_EXTENSIONS}"
+            )
+        validate_remote_url(reference_path, config)
+        return
+
+    if not any(ext_target.endswith(ext) for ext in ALLOWED_REFERENCE_EXTENSIONS):
+        raise ValueError(
+            f"Unsupported reference file type. Allowed extensions: {ALLOWED_REFERENCE_EXTENSIONS}"
+        )
+
+    if config.allowed_directories:
+        try:
+            abs_path = Path(reference_path).resolve()
+        except OSError as e:
+            raise ValueError(f"Invalid reference path: {reference_path}") from e
+        if not any(abs_path.is_relative_to(Path(d).resolve()) for d in config.allowed_directories):
+            raise ValueError("Reference path is not in allowed directories")
+
+    if not Path(reference_path).is_file():
+        raise FileNotFoundError(f"Reference file not found: {reference_path}")
+
+
+def validate_data_sources(
+    file_path: str,
+    config: BAMCPConfig,
+    *,
+    reference: str | None = None,
+    vcf_path: str | None = None,
+) -> None:
+    """Validate every data source a tool call will hand to pysam, in one place.
+
+    The single choke point for the remote-resource policy: alignment file, optional
+    reference FASTA, and optional variant (VCF/BCF) overlay all pass through the same
+    SSRF-aware validators so no input reaches htslib unchecked.
+    """
+    validate_path(file_path, config)
+    if reference:
+        validate_reference_path(reference, config)
+    if vcf_path:
+        validate_variant_file_path(vcf_path, config)
 
 
 def validate_variant_input(chrom: str, pos: int, ref: str, alt: str) -> str | None:

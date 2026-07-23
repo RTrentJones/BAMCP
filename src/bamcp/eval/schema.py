@@ -28,6 +28,10 @@ class EvalCase:
     expected: str
     category: str = "uncategorized"
     tools_expected: list[str] = field(default_factory=list)
+    # Required factual/numeric claims that must appear verbatim (case-insensitive) in the
+    # assistant's answer. Grades *answer correctness* deterministically and separately from
+    # tool selection — a case with claims can no longer pass on tool invocation alone.
+    expected_claims: list[str] = field(default_factory=list)
     bam_fixture: str | None = None
     rendering_modes: list[str] = field(default_factory=list)
     # When True, the case can only be answered with vision. Non-vision runs
@@ -46,6 +50,7 @@ class EvalCase:
             expected=str(d["expected"]),
             category=str(d.get("category", "uncategorized")),
             tools_expected=list(d.get("tools_expected", []) or []),
+            expected_claims=[str(c) for c in (d.get("expected_claims", []) or [])],
             bam_fixture=d.get("bam_fixture"),
             rendering_modes=list(d.get("rendering_modes", []) or []),
             vision_required=bool(d.get("vision_required", False)),
@@ -60,6 +65,10 @@ class GraderVerdict:
     rationale: str
     deterministic: bool  # True if a deterministic check decided; False = LLM-judged
     score: float = 0.0  # 0.0 to 1.0 for partial credit (deterministic = 0 or 1)
+    # Separately-tracked sub-scores (None when that dimension wasn't checked). Tool selection
+    # and answer correctness are graded independently so a report can show which one failed.
+    tool_score: float | None = None
+    answer_score: float | None = None
 
 
 @dataclass

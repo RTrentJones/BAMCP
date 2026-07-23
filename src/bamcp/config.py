@@ -18,6 +18,7 @@ from .constants import (
     DEFAULT_MIN_MAPQ,
     DEFAULT_MIN_VAF,
     DEFAULT_PORT,
+    DEFAULT_REQUIRED_SCOPES,
     DEFAULT_RESOURCE_SERVER_URL,
     DEFAULT_TOKEN_EXPIRY_SECONDS,
     DEFAULT_TRANSPORT,
@@ -53,6 +54,10 @@ class BAMCPConfig:
     # bearer is accepted as a valid access token with the required scopes — stateless, so it
     # survives container restarts (unlike the in-memory OAuth tokens). Read-only use; keep secret.
     verify_token: str | None = None
+    # OAuth dynamic client registration. OFF by default: an open /register endpoint lets any
+    # client self-register and mint a token, which is not access control. Prod uses the service
+    # token (verify_token). Enable only for interactive OAuth clients in a trusted/dev context.
+    allow_dynamic_registration: bool = False
 
     # External database settings
     ncbi_api_key: str | None = None
@@ -72,6 +77,13 @@ class BAMCPConfig:
     allowed_remote_hosts: list[str] | None = None
     trusted_hosts: list[str] | None = None
     rate_limit: int = 60  # requests per minute per IP
+    # IPs/CIDRs of trusted reverse proxies. X-Forwarded-For is honored ONLY when the direct peer
+    # is one of these (default: loopback, since the cloudflared tunnel sidecar is co-located).
+    # Otherwise XFF is ignored and the direct socket IP is used — an untrusted client cannot spoof
+    # its identity to bypass per-IP limits or balloon the tracking table.
+    rate_limit_trusted_proxies: list[str] | None = None
+    # Hard ceiling on distinct client IPs tracked by the limiter (bounds memory under churn).
+    rate_limit_max_tracked_ips: int = 10_000
 
     # Telemetry settings
     telemetry_enabled: bool = False
@@ -115,6 +127,12 @@ class BAMCPConfig:
         if self.token_expiry < 1:
             raise ValueError(f"token_expiry must be at least 1 second, got {self.token_expiry}")
 
+        # When auth is on, require at least one scope so tokens (incl. the service token) are never
+        # scope-less. Applied here — not only in from_env() — so directly-constructed configs
+        # (embedded servers, tests) get the same invariant. An explicit scope list is respected.
+        if self.auth_enabled and not self.required_scopes:
+            self.required_scopes = list(DEFAULT_REQUIRED_SCOPES)
+
         # Validate cache settings
         if self.cache_ttl < 0:
             raise ValueError(f"cache_ttl must be non-negative, got {self.cache_ttl}")
@@ -131,6 +149,8 @@ class BAMCPConfig:
 
         scopes_raw = env.get("BAMCP_REQUIRED_SCOPES", "")
         scopes = [s.strip() for s in scopes_raw.split(",") if s.strip()] or None
+        # NB: the auth-on "default to bamcp:read when scope-less" invariant lives in
+        # __post_init__ so direct construction gets it too (not just this env path).
 
         # Set up cache directory
         cache_dir = env.get("BAMCP_CACHE_DIR") or str(DEFAULT_CACHE_DIR)
@@ -155,6 +175,8 @@ class BAMCPConfig:
             required_scopes=scopes,
             token_expiry=int(env.get("BAMCP_TOKEN_EXPIRY", str(DEFAULT_TOKEN_EXPIRY_SECONDS))),
             verify_token=env.get("BAMCP_VERIFY_TOKEN") or None,
+            allow_dynamic_registration=env.get("BAMCP_ALLOW_DYNAMIC_REGISTRATION", "").lower()
+            == "true",
             ncbi_api_key=env.get("BAMCP_NCBI_API_KEY"),
             clinvar_enabled=env.get("BAMCP_CLINVAR_ENABLED", "true").lower() == "true",
             gnomad_enabled=env.get("BAMCP_GNOMAD_ENABLED", "true").lower() == "true",
@@ -179,6 +201,12 @@ class BAMCPConfig:
             ]
             or None,
             rate_limit=int(env.get("BAMCP_RATE_LIMIT", "60")),
+            rate_limit_trusted_proxies=[
+                p.strip()
+                for p in env.get("BAMCP_RATE_LIMIT_TRUSTED_PROXIES", "").split(",")
+                if p.strip()
+            ]
+            or None,
             telemetry_enabled=env.get("BAMCP_TELEMETRY_ENABLED", "").lower() == "true",
             telemetry_path=env.get("BAMCP_TELEMETRY_PATH", ""),
             telemetry_otel_enabled=env.get("BAMCP_TELEMETRY_OTEL", "").lower() == "true",

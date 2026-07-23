@@ -56,3 +56,12 @@ def test_get_provider_openai_construction():
 
     p = OpenAIProvider(model="gpt-4o-mini")
     assert p.model == "gpt-4o-mini"
+
+
+@pytest.mark.unit
+def test_get_provider_none_model_uses_provider_default():
+    """A None model must not leak an Anthropic id into the OpenAI provider (and vice versa)."""
+    assert get_provider("openai", None).model.startswith("gpt")
+    assert get_provider("anthropic", None).model.startswith("claude")
+    # An explicit model is still honored.
+    assert get_provider("openai", "gpt-4o").model == "gpt-4o"

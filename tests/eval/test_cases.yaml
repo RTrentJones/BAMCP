@@ -1,13 +1,17 @@
 # BAMCP eval cases — MARRVEL-MCP-compatible schema.
 #
 # Required fields: name, input, expected.
-# Optional fields: category, tools_expected, bam_fixture, rendering_modes.
+# Optional fields: category, tools_expected, expected_claims, bam_fixture, rendering_modes.
 #
-# Deterministic grading:
-#   - `tools_expected` is satisfied if every named tool appears in telemetry.
-#   - `expected` may contain inline thresholds for rubric scores using the
-#     literal "score_at_least: <key>=<float>" — the grader pulls the value
-#     from the JSON rubric payload the variant curation tool emits.
+# Deterministic grading (tool selection and answer correctness are scored separately):
+#   - `tools_expected` is satisfied if every named tool appears in telemetry (TOOL selection).
+#   - `expected_claims` is a list of factual/numeric strings that must appear (case-insensitive)
+#     in the assistant's answer (ANSWER correctness). A case with claims can NOT pass on tool
+#     invocation alone — the answer must be right too. Use robust literals (contig names,
+#     categorical facts), not fragile formatting-dependent numbers, for LLM-run cases.
+#   - `expected` may contain inline thresholds for rubric scores using the literal
+#     "score_at_least: <key>=<float>" — the grader pulls the value from the JSON rubric payload
+#     the variant curation tool emits (ANSWER correctness).
 
 - case:
     name: "Coverage stats for chr1:90-200"
@@ -36,6 +40,7 @@
       List contigs in tests/fixtures/small.bam. Use list_contigs.
     expected: "Tool list_contigs returns chr1 with its length."
     tools_expected: ["list_contigs"]
+    expected_claims: ["chr1"]  # answer must name the contig, not just call the tool
     bam_fixture: "tests/fixtures/small.bam"
 
 - case:

@@ -134,13 +134,6 @@ export class Renderer {
     }
 
     /**
-     * Check if a position is within the current viewport.
-     */
-    private isInViewport(position: number): boolean {
-        return position >= this.state.viewport.start && position <= this.state.viewport.end;
-    }
-
-    /**
      * Size a canvas for crisp rendering on HiDPI displays: the backing store is
      * devicePixelRatio times the CSS size, the CSS box stays at logical size, and
      * the context is scaled so all draw code can work in logical (CSS) pixels.
@@ -520,7 +513,7 @@ export class Renderer {
         const height = this.logicalReadsHeight;
         const scale = this.getScale();
         const data = this.state.data;
-        const { height: READ_HEIGHT, gap: READ_GAP, showLabels } = this.getReadDimensions();
+        const { height: READ_HEIGHT, gap: READ_GAP } = this.getReadDimensions();
 
         ctx.clearRect(0, 0, width, height);
 

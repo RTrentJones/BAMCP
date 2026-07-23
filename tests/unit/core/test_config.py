@@ -363,3 +363,15 @@ class TestConfigValidation:
         """Remote index download cap must be positive."""
         with pytest.raises(ValueError, match="max_remote_index_bytes must be at least 1"):
             BAMCPConfig(max_remote_index_bytes=0)
+
+    @pytest.mark.unit
+    def test_auth_default_scope_applies_to_direct_construction(self):
+        """The auth-on scope invariant lives in __post_init__, so direct construction gets it."""
+        # Directly-constructed (not from_env) auth-on config → never scope-less.
+        assert BAMCPConfig(auth_enabled=True, verify_token="x").required_scopes == ["bamcp:read"]
+        # An explicit scope list is respected.
+        assert BAMCPConfig(auth_enabled=True, required_scopes=["custom"]).required_scopes == [
+            "custom"
+        ]
+        # Auth off → left untouched.
+        assert BAMCPConfig(auth_enabled=False).required_scopes is None

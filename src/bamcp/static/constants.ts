@@ -3,6 +3,11 @@
  * Includes color palettes for IGV-style visualization options.
  */
 
+// RegionData payload contract version this viewer build expects. The server stamps
+// `schema_version` on every payload; a mismatch means the bundle is out of step with the
+// server and may mis-decode, so we warn loudly (see BAMCPClient.handleData).
+export const EXPECTED_SCHEMA_VERSION = 1;
+
 // Base colors for nucleotides
 export const BASE_COLORS: Record<string, string> = {
     'A': '#22c55e',  // Green

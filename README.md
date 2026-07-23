@@ -35,7 +35,7 @@ BAMCP brings IGV-style alignment visualization directly into your AI conversatio
 
 ## Why BAMCP?
 
-Existing genomics MCP servers (bio-mcp-samtools, AWS HealthOmics MCP) provide command-line operations but return text/JSON. **BAMCP is the first to leverage the [MCP Apps Extension](https://github.com/modelcontextprotocol/ext-apps) to render interactive visualizations inline.**
+Existing genomics MCP servers (bio-mcp-samtools, AWS HealthOmics MCP) provide command-line operations but return text/JSON. **BAMCP is the first genomics MCP server to leverage the [MCP Apps Extension](https://github.com/modelcontextprotocol/ext-apps) to render interactive visualizations inline** — verifiable against the known genomics-MCP landscape above.
 
 | Feature | CLI-based MCPs | BAMCP |
 |---------|---------------|-------|
@@ -57,7 +57,7 @@ Existing genomics MCP servers (bio-mcp-samtools, AWS HealthOmics MCP) provide co
 - **Region Navigation** — Jump to coordinates, genes, or specific variants
 - **Format Support** — BAM, CRAM (with reference), and indexed remote files (HTTP/S3)
 - **Canvas Rendering** — High-performance visualization of thousands of reads via HTML5 Canvas
-- **Multiple Transports** — stdio, SSE, and Streamable HTTP
+- **Multiple Transports** — stdio, Streamable HTTP (preferred for network), and legacy SSE
 - **OAuth 2.0 Authentication** — Optional token-based auth for network deployments
 - **Docker Ready** — Production and development Docker images with compose profiles
 
@@ -163,8 +163,12 @@ pip install -e ".[dev]"
 # Build production image
 docker compose --profile prod build
 
-# Run production server (SSE on port 8000)
-docker compose --profile prod up
+# Run production server (Streamable HTTP on port 8000). The prod profile enables auth, so it
+# needs a service token — the server refuses to start without one:
+BAMCP_VERIFY_TOKEN="$(openssl rand -hex 32)" docker compose --profile prod up
+
+# Prefer to run without auth? Use the beta profile (auth disabled) instead:
+docker compose --profile beta up
 
 # Run tests in Docker
 docker compose --profile dev run --rm test
@@ -190,19 +194,29 @@ Add to `~/.config/claude/claude_desktop_config.json`:
 }
 ```
 
-#### Claude Desktop (SSE — network)
+#### Claude Desktop (Streamable HTTP — network, preferred)
+
+Run the server with `BAMCP_TRANSPORT=streamable-http` and point the client at `/mcp`:
 
 ```json
 {
   "mcpServers": {
     "bamcp": {
-      "url": "http://localhost:8000/sse"
+      "url": "http://localhost:8000/mcp"
     }
   }
 }
 ```
 
+> Legacy SSE (`BAMCP_TRANSPORT=sse`, URL `http://localhost:8000/sse`) is still supported for
+> compatibility, but the MCP spec deprecates the HTTP+SSE transport in favor of Streamable HTTP.
+> Prod runs Streamable HTTP.
+
 #### Cursor / VS Code
+
+> **Note:** `uvx bamcp` requires the PyPI release, which is not yet published. Until
+> then, run from a local checkout — `"command": "uv"`, `"args": ["run", "bamcp"]` with
+> `"cwd"` set to your clone — or use the stdio `python -m bamcp` form above.
 
 ```json
 {
@@ -259,6 +273,11 @@ Returns coverage statistics without visualization.
 | `list_contigs` | List chromosomes and detect genome build | `file_path` | `reference` |
 | `jump_to` | Jump to a specific genomic position | `file_path`, `position` | `contig`, `window`, `reference`, `vcf_path`, `variant_source` |
 | `get_region_summary` | Text summary for LLM reasoning (no UI) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source` |
+| `lookup_clinvar` | Look up variant in ClinVar | `chrom`, `pos`, `ref`, `alt` | — |
+| `lookup_gnomad` | Look up variant in gnomAD | `chrom`, `pos`, `ref`, `alt` | — |
+| `get_variant_curation_summary` | Detailed curation with artifact risk | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference` |
+| `search_gene` | Search gene by symbol (NCBI) | `symbol` | — |
+| `cleanup_cache` | Clean up session's index cache | — | — |
 
 #### VCF as the primary variant source
 
@@ -274,11 +293,6 @@ relationship:
 - **`variant_source="bamcp"`** — BAMCP's read-level candidates only; any `vcf_path` is ignored.
 
 Enrich further with `lookup_clinvar` / `lookup_gnomad` on the returned 1-based positions.
-| `lookup_clinvar` | Look up variant in ClinVar | `chrom`, `pos`, `ref`, `alt` | — |
-| `lookup_gnomad` | Look up variant in gnomAD | `chrom`, `pos`, `ref`, `alt` | — |
-| `get_variant_curation_summary` | Detailed curation with artifact risk | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference` |
-| `search_gene` | Search gene by symbol (NCBI) | `symbol` | — |
-| `cleanup_cache` | Clean up session's index cache | — | — |
 
 ### Region Format
 
@@ -316,11 +330,38 @@ Regions can be specified as:
 
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
-| `BAMCP_AUTH_ENABLED` | Enable OAuth 2.0 auth (`true`/`false`) | `false` |
+| `BAMCP_AUTH_ENABLED` | Enable auth (`true`/`false`) | `false` |
 | `BAMCP_ISSUER_URL` | OAuth issuer URL | `http://localhost:8000` |
 | `BAMCP_RESOURCE_SERVER_URL` | OAuth resource server URL | `http://localhost:8000` |
-| `BAMCP_REQUIRED_SCOPES` | Comma-separated required scopes | None |
+| `BAMCP_REQUIRED_SCOPES` | Comma-separated required scopes (defaults to `bamcp:read` when auth is on) | None |
 | `BAMCP_TOKEN_EXPIRY` | Access token lifetime (seconds) | `3600` |
+| `BAMCP_ALLOW_DYNAMIC_REGISTRATION` | Allow OAuth dynamic client registration | `false` |
+| `BAMCP_VERIFY_TOKEN` | M2M service token (a single bearer accepted statelessly) | None |
+
+**Trust model.** BAMCP is a single-instance server, not a multi-tenant identity provider. Access
+is a **service token** (`BAMCP_VERIFY_TOKEN`) — a stateless bearer that survives restarts.
+Dynamic client registration is **off by default**: an open `/register` endpoint would let any
+client self-register and mint a token, which is not access control. Enable it
+(`BAMCP_ALLOW_DYNAMIC_REGISTRATION=true`) only for interactive OAuth clients in a trusted/dev
+context. With auth enabled, an unauthenticated request is rejected (401) and only the service
+token (or an out-of-band-registered client) is authorized.
+
+### Security Settings
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `BAMCP_ALLOW_REMOTE_FILES` | Allow HTTP(S) BAM/CRAM/VCF/reference URLs | `false` |
+| `BAMCP_ALLOWED_REMOTE_HOSTS` | Comma-separated host allow-list for remote fetch (the real SSRF control) | None |
+| `BAMCP_ALLOWED_DIRECTORIES` | Comma-separated local dirs that file paths must be under | None |
+| `BAMCP_RATE_LIMIT` | Requests per minute per client IP | `60` |
+| `BAMCP_RATE_LIMIT_TRUSTED_PROXIES` | IPs/CIDRs whose `X-Forwarded-For` is trusted | loopback |
+| `BAMCP_TRUSTED_HOSTS` | Allowed `Host` headers (DNS-rebinding protection) | None |
+
+Remote fetch is SSRF-guarded: private/internal/metadata IPs are always blocked, and — because the
+actual fetch is performed by pysam/htslib (which follows redirects outside BAMCP) — the
+**host allow-list is the primary control**. Set `BAMCP_ALLOWED_REMOTE_HOSTS` in any
+internet-reachable deployment. `X-Forwarded-For` is honored only from a trusted proxy so a client
+cannot spoof its IP to bypass rate limits.
 
 ---
 

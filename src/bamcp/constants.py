@@ -35,8 +35,25 @@ INDEL_DETECTION_MAX_REGION = 100_000
 # tile so panning the viewport reuses work instead of recomputing each region.
 REGION_TILE_SIZE = 4_096
 
+# Version of the RegionData payload contract sent to the viewer (_meta.ui/init). Bump on any
+# breaking shape change so the viewer (and a schema-compat test) can detect a mismatch instead
+# of silently mis-decoding. A first step toward a generated, typed server<->viewer contract.
+PAYLOAD_SCHEMA_VERSION = 1
+
+# Cap on distinct regions held in a server's in-memory region cache (LRU-evicted).
+# Bounds memory: each entry can hold a full RegionData payload.
+REGION_CACHE_MAX_ENTRIES = 128
+
+# Max concurrent pysam parses. All blocking BAM/CRAM/VCF work runs in a dedicated thread pool
+# of this size, so a burst of requests (or parses that hang past their timeout) is confined to
+# this pool and cannot starve the event loop's default executor.
+PARSE_MAX_CONCURRENCY = 8
+
 # Auth and integrations
 DEFAULT_TOKEN_EXPIRY_SECONDS = 3_600
+# When auth is enabled with no explicit BAMCP_REQUIRED_SCOPES, require this scope so tokens
+# are never scope-less. BAMCP is a read-only evidence viewer, hence a single read scope.
+DEFAULT_REQUIRED_SCOPES = ("bamcp:read",)
 DEFAULT_GNOMAD_DATASET = "gnomad_r4"
 DEFAULT_GENOME_BUILD = "GRCh38"
 

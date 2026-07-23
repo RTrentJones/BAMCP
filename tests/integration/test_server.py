@@ -67,14 +67,32 @@ class TestCreateServer:
 
     @pytest.mark.unit
     def test_server_with_auth(self):
-        """Server created with auth should have auth provider."""
+        """Server created with auth + a credential should have an auth provider."""
         config = BAMCPConfig(
             auth_enabled=True,
             issuer_url="http://localhost:8000",
             resource_server_url="http://localhost:8000",
+            verify_token="svc-secret",  # a bootstrap credential
         )
         server = create_server(config)
         assert server is not None
+
+    @pytest.mark.unit
+    def test_auth_without_bootstrap_credential_refuses_to_start(self):
+        """Auth enabled with no service token and no registration is an unusable config."""
+        config = BAMCPConfig(
+            auth_enabled=True,
+            allow_dynamic_registration=False,
+            verify_token=None,
+        )
+        with pytest.raises(ValueError, match="no way to obtain a credential"):
+            create_server(config)
+
+    @pytest.mark.unit
+    def test_auth_with_dynamic_registration_only_is_allowed(self):
+        """Dynamic registration alone is a valid bootstrap path (dev/trusted context)."""
+        config = BAMCPConfig(auth_enabled=True, allow_dynamic_registration=True)
+        assert create_server(config) is not None
 
     @pytest.mark.unit
     def test_server_host_port(self):

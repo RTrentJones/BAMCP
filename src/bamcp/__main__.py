@@ -21,7 +21,12 @@ def _add_http_middleware(app, config: BAMCPConfig):  # noqa: ANN001, ANN201
 
     # Order matters: outermost middleware runs first
     # 1. Rate limiting (reject before doing work)
-    app.add_middleware(RateLimitMiddleware, requests_per_minute=config.rate_limit)
+    app.add_middleware(
+        RateLimitMiddleware,
+        requests_per_minute=config.rate_limit,
+        trusted_proxies=config.rate_limit_trusted_proxies,
+        max_tracked_ips=config.rate_limit_max_tracked_ips,
+    )
 
     # 2. Security headers (add to all responses)
     app.add_middleware(SecurityHeadersMiddleware)

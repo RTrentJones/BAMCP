@@ -2,14 +2,19 @@
 
 Two-tier:
 
-1. Deterministic: when ``tools_expected`` is set, require those tools to
-   appear in the captured telemetry. When ``expected`` contains structured
-   markers (e.g. ``"score_at_least: vaf_quality=0.5"``), check them against
-   the recorded tool output. Pass deterministically.
+1. Deterministic — **tool selection and answer correctness are scored separately**:
+   - ``tools_expected`` (tool selection): every named tool must appear in telemetry.
+   - ``expected_claims`` (answer correctness): required factual/numeric strings must appear
+     in the assistant's answer.
+   - ``score_at_least: <key>=<float>`` in ``expected`` (answer correctness): checked against
+     the rubric payload the curation tool emits.
+   A case fails if *any* declared check fails, so satisfying ``tools_expected`` no longer
+   passes a case whose answer is wrong. Sub-scores (``tool_score``/``answer_score``) are
+   surfaced on the verdict.
 
-2. LLM judge: free-form ``expected`` strings are compared against the
-   assistant response via a small judge prompt. The judge model defaults to
-   the same provider/model running the eval; users can override it.
+2. LLM judge: free-form ``expected`` strings are compared against the assistant response via a
+   small judge prompt. The judge model defaults to the same provider/model running the eval;
+   users can override it.
 """
 
 from __future__ import annotations
@@ -35,26 +40,66 @@ _JUDGE_PROMPT = (
 _SCORE_THRESHOLD_PATTERN = re.compile(r"score_at_least:\s*(\w+)\s*=\s*([0-9]*\.?[0-9]+)")
 
 
+def _missing_claims(expected_claims: Iterable[str], response_text: str) -> list[str]:
+    """Return the required claims not present in the response as a bounded token.
+
+    Matches on alphanumeric boundaries (not raw substring), so ``chr1`` does not spuriously
+    match inside ``chr10`` and ``43.5%`` does not match inside ``143.5%``. This checks literal
+    token *presence* only — it does not model negation (e.g. "not pathogenic" still contains
+    "pathogenic"); use the LLM judge or distinct claims for negation-sensitive cases.
+    """
+    text = response_text or ""
+    missing: list[str] = []
+    for claim in expected_claims:
+        c = claim.strip()
+        if not c:
+            continue
+        pattern = r"(?<![A-Za-z0-9])" + re.escape(c) + r"(?![A-Za-z0-9])"
+        if not re.search(pattern, text, re.IGNORECASE):
+            missing.append(claim)
+    return missing
+
+
 def grade_case(
     case: EvalCase,
     response_text: str,
     tool_calls: Iterable[str],
     rubric_payloads: Iterable[dict] = (),
 ) -> GraderVerdict | None:
-    """Run deterministic checks. Return None if no deterministic rule applies."""
+    """Run deterministic checks. Return None if no deterministic rule applies.
+
+    Tool selection and answer correctness are graded **separately**. Tool selection is necessary
+    but not sufficient: satisfying ``tools_expected`` never passes a case on tool use alone —
+    when no answer-correctness check is declared (no ``expected_claims`` / score thresholds) the
+    result is ``None`` so the LLM judge grades the answer; when one is declared it must also pass.
+    A missing tool or a failed answer check is a deterministic fail. Sub-scores are surfaced on
+    the verdict so a report can show which dimension failed.
+    """
     tool_set = set(tool_calls)
     deterministic_signals = []
+    failures = []
+    tool_score: float | None = None
+    answer_score: float | None = None
 
+    # --- Tool selection -----------------------------------------------------
     if case.tools_expected:
         missing = [t for t in case.tools_expected if t not in tool_set]
+        tool_score = 1.0 if not missing else 0.0
         if missing:
-            return GraderVerdict(
-                passed=False,
-                rationale=f"Missing expected tool calls: {missing}",
-                deterministic=True,
-            )
-        deterministic_signals.append("tools_expected satisfied")
+            failures.append(f"missing expected tool calls: {missing}")
+        else:
+            deterministic_signals.append("tools_expected satisfied")
 
+    # --- Answer correctness: required literal/numeric claims ----------------
+    if case.expected_claims:
+        missing_claims = _missing_claims(case.expected_claims, response_text)
+        answer_score = 1.0 if not missing_claims else 0.0
+        if missing_claims:
+            failures.append(f"answer missing required claims: {missing_claims}")
+        else:
+            deterministic_signals.append(f"all {len(case.expected_claims)} expected claims present")
+
+    # --- Answer correctness: rubric score thresholds -----------------------
     score_thresholds = _SCORE_THRESHOLD_PATTERN.findall(case.expected)
     if score_thresholds:
         merged: dict[str, float] = {}
@@ -64,33 +109,51 @@ def grade_case(
                 for k, v in scores.items():
                     if isinstance(v, (int, float)):
                         merged[k] = max(merged.get(k, 0.0), float(v))
+        threshold_ok = True
         for key, threshold_str in score_thresholds:
             threshold = float(threshold_str)
             actual = merged.get(key)
             if actual is None:
-                return GraderVerdict(
-                    passed=False,
-                    rationale=f"Score '{key}' not present in any rubric payload",
-                    deterministic=True,
-                )
-            if actual < threshold:
-                return GraderVerdict(
-                    passed=False,
-                    rationale=f"Score '{key}'={actual:.3f} below threshold {threshold:.3f}",
-                    deterministic=True,
-                )
-        deterministic_signals.append(
-            "rubric thresholds satisfied: " + ", ".join(f"{k}>={v}" for k, v in score_thresholds)
+                failures.append(f"score '{key}' not present in any rubric payload")
+                threshold_ok = False
+            elif actual < threshold:
+                failures.append(f"score '{key}'={actual:.3f} below threshold {threshold:.3f}")
+                threshold_ok = False
+        answer_score = min(
+            answer_score if answer_score is not None else 1.0, 1.0 if threshold_ok else 0.0
+        )
+        if threshold_ok:
+            deterministic_signals.append(
+                "rubric thresholds satisfied: "
+                + ", ".join(f"{k}>={v}" for k, v in score_thresholds)
+            )
+
+    # Any declared check failed → deterministic fail (a missing tool or a wrong answer).
+    if failures:
+        return GraderVerdict(
+            passed=False,
+            rationale="; ".join(failures),
+            deterministic=True,
+            score=0.0,
+            tool_score=tool_score,
+            answer_score=answer_score,
         )
 
-    if deterministic_signals:
-        return GraderVerdict(
-            passed=True,
-            rationale="; ".join(deterministic_signals),
-            deterministic=True,
-            score=1.0,
-        )
-    return None
+    # All declared checks passed. But tool selection alone is necessary, not sufficient: if no
+    # answer-correctness check ran (no expected_claims, no score thresholds), defer to the LLM
+    # judge for the answer rather than passing on tool invocation alone. The tool was verified
+    # via telemetry; the judge now grades the answer text.
+    if answer_score is None:
+        return None
+
+    return GraderVerdict(
+        passed=True,
+        rationale="; ".join(deterministic_signals),
+        deterministic=True,
+        score=1.0,
+        tool_score=tool_score,
+        answer_score=answer_score,
+    )
 
 
 async def judge_with_llm(

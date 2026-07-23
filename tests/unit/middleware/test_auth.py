@@ -13,8 +13,13 @@ from bamcp.middleware.auth import BAMCPAuthProvider, build_auth_settings
 
 @pytest.fixture
 def provider():
-    """Auth provider with 1-hour token expiry."""
-    return BAMCPAuthProvider(token_expiry=3600)
+    """Auth provider with 1-hour token expiry.
+
+    Dynamic registration is enabled here because these tests exercise the
+    authorization-code flow mechanics, which begin with register_client. Prod
+    defaults to registration OFF — see TestDynamicRegistrationDisabled.
+    """
+    return BAMCPAuthProvider(token_expiry=3600, allow_dynamic_registration=True)
 
 
 @pytest.fixture
@@ -56,9 +61,20 @@ class TestBuildAuthSettings:
         assert str(settings.issuer_url) == "http://localhost:8000/"
         assert settings.required_scopes == ["read", "write"]
         assert settings.client_registration_options is not None
-        assert settings.client_registration_options.enabled is True
+        # Dynamic registration follows the config flag, which defaults OFF.
+        assert settings.client_registration_options.enabled is False
         assert settings.revocation_options is not None
         assert settings.revocation_options.enabled is True
+
+    @pytest.mark.unit
+    def test_registration_enabled_when_configured(self):
+        config = BAMCPConfig(
+            issuer_url="http://localhost:8000",
+            resource_server_url="http://localhost:8000",
+            allow_dynamic_registration=True,
+        )
+        settings = build_auth_settings(config)
+        assert settings.client_registration_options.enabled is True
 
     @pytest.mark.unit
     def test_builds_settings_no_scopes(self):
@@ -240,6 +256,54 @@ class TestBAMCPAuthProvider:
         )
         result = await provider.load_authorization_code(other, code)
         assert result is None
+
+
+class TestDynamicRegistrationDisabled:
+    """Adversarial: with the locked-down default, an anonymous client cannot get access.
+
+    The reviewed 'OAuth' was a token-minting service — open dynamic registration plus a
+    no-consent authorize let anyone register and mint a token. With registration OFF
+    (the default), self-registration is refused, so the authorization-code flow is
+    unreachable and the only accepted credential is the configured service token.
+    """
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_anonymous_client_cannot_self_register(self, client_info):
+        provider = BAMCPAuthProvider()  # default: registration disabled
+        with pytest.raises(ValueError, match="registration is disabled"):
+            await provider.register_client(client_info)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_unregistered_client_is_unknown(self, client_info):
+        """Without registration, the client is never known → SDK rejects before authorize."""
+        provider = BAMCPAuthProvider()
+        assert await provider.get_client(client_info.client_id) is None
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_forged_bearer_is_rejected_without_service_token(self):
+        """No service token configured → no bearer is ever valid."""
+        provider = BAMCPAuthProvider()
+        assert await provider.load_access_token("anything-a-client-made-up") is None
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_only_the_service_token_is_accepted(self):
+        provider = BAMCPAuthProvider(verify_token="svc-secret", verify_scopes=["bamcp:read"])
+        assert await provider.load_access_token("svc-secret") is not None
+        assert await provider.load_access_token("svc-secre") is None  # near-miss rejected
+
+    @pytest.mark.unit
+    def test_config_default_locks_down_registration(self, monkeypatch):
+        monkeypatch.setenv("BAMCP_AUTH_ENABLED", "true")
+        monkeypatch.delenv("BAMCP_ALLOW_DYNAMIC_REGISTRATION", raising=False)
+        monkeypatch.delenv("BAMCP_REQUIRED_SCOPES", raising=False)
+        cfg = BAMCPConfig.from_env()
+        assert cfg.allow_dynamic_registration is False
+        # Auth-on with no explicit scopes → a scope is required, never scope-less.
+        assert cfg.required_scopes == ["bamcp:read"]
 
 
 class TestServiceToken:

@@ -274,3 +274,30 @@ class TestRubricErrorResponses:
         except (ValueError, TypeError):
             is_json = False
         assert not is_json, "Text-mode error must remain plain text"
+
+
+class TestCurationReferenceSSRF:
+    """The curation handler must apply the same reference SSRF policy as the other tools."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_poisoned_remote_reference_is_rejected(self, small_bam_path):
+        from unittest.mock import patch
+
+        config = BAMCPConfig(allow_remote_files=True)
+        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
+            m.return_value = [(2, 1, 6, "", ("169.254.169.254", 443))]  # metadata endpoint
+            # The reference is validated before any fetch, so a poisoned remote reference is
+            # rejected rather than handed to pysam.
+            with pytest.raises(ValueError, match="private/internal address"):
+                await handle_get_variant_curation_summary(
+                    {
+                        "file_path": small_bam_path,
+                        "chrom": "chr1",
+                        "pos": 150,
+                        "ref": "A",
+                        "alt": "T",
+                        "reference": "https://metadata.example.com/hg38.fa",
+                    },
+                    config,
+                )

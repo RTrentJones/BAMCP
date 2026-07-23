@@ -59,6 +59,10 @@ def _serialize_result(r: EvalResult) -> dict:
     d["verdict_rationale"] = verdict["rationale"]
     d["verdict_deterministic"] = verdict["deterministic"]
     d["verdict_score"] = verdict["score"]
+    # Separately-tracked sub-scores so the artifact shows whether a deterministic failure was
+    # tool selection or answer correctness (None when that dimension wasn't graded).
+    d["verdict_tool_score"] = verdict.get("tool_score")
+    d["verdict_answer_score"] = verdict.get("answer_score")
     return d
 
 

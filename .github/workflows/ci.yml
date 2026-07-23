@@ -14,6 +14,33 @@ permissions:
   contents: read
 
 jobs:
+  # Reproducible-build gate: the lockfile must be fresh, and the PINNED environment must
+  # install and pass the ship-gate (test + eval-smoke). The 3.10-3.12 `test` matrix below
+  # deliberately installs broad ranges — that is the compat check; this is the pinned one.
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+      - name: Verify uv.lock is in sync with pyproject.toml
+        run: uv lock --check
+      - name: Install from the frozen lock
+        run: uv sync --frozen --extra dev --extra eval --extra telemetry
+      # The bundled viewer is part of the ship-gate (test_resources asserts the built bundle),
+      # so build it here just as `make install` does for the other jobs.
+      - name: Build the viewer bundle
+        run: make build-viewer
+      - name: Deterministic fixtures + ship-gate from the pinned env
+        run: |
+          uv run python tests/create_fixtures.py
+          uv run python -m pytest tests/ --ignore=tests/e2e -q
+          uv run make eval-smoke
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -73,6 +100,25 @@ jobs:
         run: python tests/create_fixtures.py
       - name: Score ground-truth truth set
         run: make eval-smoke
+
+  frontend:
+    # Static checks + unit tests for the viewer TS — a layer the frontend never had.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/bamcp/static
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: src/bamcp/static/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
 
   e2e:
     needs: [test, lint]

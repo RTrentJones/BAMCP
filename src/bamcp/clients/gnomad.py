@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from .ttl_cache import API_CACHE_MAX_SIZE, API_CACHE_TTL_SECONDS, BoundedTTLCache
+from .ttl_cache import API_CACHE_MAX_SIZE, API_CACHE_TTL_SECONDS, MISS, BoundedTTLCache
 
 logger = logging.getLogger(__name__)
 
@@ -112,18 +112,25 @@ class GnomadClient:
         """
         cache_key = (chrom, pos, ref, alt)
 
-        # Check cache first
-        cached = await self._cache.get(cache_key)
-        if cached is not None:
-            return cached
+        # Check cache first. get_entry distinguishes a miss from a cached "not found"
+        # (None), so a negative result is served from cache instead of re-hitting gnomAD.
+        cached = await self._cache.get_entry(cache_key)
+        if cached is not MISS:
+            return cached  # type: ignore[return-value]
 
         async with self._semaphore:
             # Re-check cache after acquiring semaphore
-            cached = await self._cache.get(cache_key)
-            if cached is not None:
-                return cached
+            cached = await self._cache.get_entry(cache_key)
+            if cached is not MISS:
+                return cached  # type: ignore[return-value]
 
-            result = await self._do_lookup(chrom, pos, ref, alt)
+            try:
+                result = await self._do_lookup(chrom, pos, ref, alt)
+            except GnomadQueryError as e:
+                # Transient GraphQL error — return not-found for this call but DON'T cache it,
+                # so the next lookup retries instead of replaying the error for the TTL.
+                logger.debug("%s", e)
+                return None
             await self._cache.set(cache_key, result)
             return result
 
@@ -150,6 +157,10 @@ class GnomadClient:
         await self._http_client.aclose()
 
 
+class GnomadQueryError(Exception):
+    """A gnomAD GraphQL error response (transient) — distinct from a genuine not-found."""
+
+
 def _build_variant_id(chrom: str, pos: int, ref: str, alt: str) -> str:
     """Build a gnomAD variant ID from components."""
     # Strip "chr" prefix for gnomAD variant IDs
@@ -158,10 +169,14 @@ def _build_variant_id(chrom: str, pos: int, ref: str, alt: str) -> str:
 
 
 def _parse_response(data: dict, variant_id: str) -> GnomadResult | None:
-    """Parse a gnomAD GraphQL response into a GnomadResult."""
+    """Parse a gnomAD GraphQL response into a GnomadResult.
+
+    Raises :class:`GnomadQueryError` on a GraphQL ``errors`` payload — a transient/query error is
+    NOT the same as a genuine "variant not found" and must not be cached and replayed as absence.
+    Returns ``None`` only for a true not-found (which the caller may cache).
+    """
     if "errors" in data:
-        logger.debug("gnomAD GraphQL errors: %s", data["errors"])
-        return None
+        raise GnomadQueryError(f"gnomAD GraphQL errors for {variant_id}: {data['errors']}")
 
     variant_data = data.get("data", {}).get("variant")
     if not variant_data:

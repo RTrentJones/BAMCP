@@ -41,10 +41,20 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     if config.auth_enabled:
         from .middleware.auth import BAMCPAuthProvider, build_auth_settings
 
+        # Fail loud on an unusable auth config: with dynamic registration disabled (the default)
+        # and no service token, no client could ever obtain a credential — the server would be
+        # reachable but reject every request. Refuse to start instead of running a dead server.
+        if not config.verify_token and not config.allow_dynamic_registration:
+            raise ValueError(
+                "Auth is enabled but there is no way to obtain a credential: set "
+                "BAMCP_VERIFY_TOKEN (service token) or BAMCP_ALLOW_DYNAMIC_REGISTRATION=true."
+            )
+
         kwargs["auth_server_provider"] = BAMCPAuthProvider(
             token_expiry=config.token_expiry,
             verify_token=config.verify_token,
             verify_scopes=config.required_scopes or [],
+            allow_dynamic_registration=config.allow_dynamic_registration,
         )
         kwargs["auth"] = build_auth_settings(config)
 

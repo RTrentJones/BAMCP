@@ -101,6 +101,16 @@ jobs:
           extra=""
           [ "$PROVIDER" = "mock" ] && extra="--dry-run"
           python scripts/run_eval.py --provider "$PROVIDER" --output-dir .eval-results $extra
+      - name: Model comparison + tool-use ablation
+        # Skip mock (no tool calls → tool-use cases can't be compared); OpenAI is already gated off.
+        if: steps.key.outputs.available == 'true' && github.event.inputs.provider != 'mock'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python scripts/run_comparison.py \
+            --provider "${{ github.event.inputs.provider || 'anthropic' }}" \
+            --models claude-opus-4-8 claude-sonnet-4-5 \
+            --output-dir .eval-results/comparison
       - uses: actions/upload-artifact@v7
         if: steps.key.outputs.available == 'true'
         with:

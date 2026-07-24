@@ -204,6 +204,27 @@ def format_curation_summary(summary: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_clinical_context(context: dict) -> str:
+    """Render the optional ClinVar/gnomAD context block as text."""
+    lines = ["CLINICAL CONTEXT (external, research-grade)"]
+    clinvar = context.get("clinvar")
+    if clinvar:
+        lines.append(
+            f"  ClinVar: {clinvar.get('clinical_significance')} "
+            f"({clinvar.get('stars')}-star; {clinvar.get('review_status')})"
+        )
+    else:
+        lines.append("  ClinVar: no record found")
+    pop = context.get("population_frequency")
+    if pop:
+        lines.append(
+            f"  gnomAD: global_af={pop.get('global_af')} max_pop_af={pop.get('max_pop_af')}"
+        )
+    else:
+        lines.append("  gnomAD: no record found")
+    return "\n".join(lines)
+
+
 def _error_response(message: str, output_format: str) -> dict:
     """Wrap an error message in the same envelope shape both formats produce."""
     if output_format == "rubric":
@@ -245,6 +266,7 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     output_format = args.get("format", "text")
     if output_format not in _VALID_FORMATS:
         output_format = "text"
+    include_clinical = bool(args.get("include_clinical", False))
 
     # Validate inputs
     validation_error = validate_variant_input(chrom, pos, ref, alt)
@@ -315,6 +337,16 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
         "intended_use": INTENDED_USE,
     }
 
+    # Optional bridge: attach external clinical/population context (ClinVar + gnomAD) so the
+    # artifact-focused curation view can also carry clinical signal. Off by default; degrades
+    # gracefully when a source has no record.
+    clinical_ctx: dict[str, Any] | None = None
+    if include_clinical:
+        from .fusion import clinical_context
+
+        clinical_ctx = await clinical_context(config, chrom, pos, ref, alt)
+        curation_summary["clinical_context"] = clinical_ctx
+
     if output_format == "rubric":
         curation_summary["rubric_version"] = RUBRIC_VERSION
         curation_summary["scores"] = compute_rubric_scores(target_variant, evidence, artifact_risk)
@@ -322,5 +354,7 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
 
     # Format as readable text for LLM
     text_summary = format_curation_summary(curation_summary)
+    if clinical_ctx is not None:
+        text_summary += "\n\n" + _format_clinical_context(clinical_ctx)
 
     return {"content": [{"type": "text", "text": text_summary}]}

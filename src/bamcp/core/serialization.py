@@ -65,6 +65,20 @@ def _serialize_reads_columnar(reads: list[AlignedRead], include_sequence: bool) 
     return cols
 
 
+def build_enhanced_variants(data: RegionData) -> tuple[list[dict], dict]:
+    """Evidence-enhanced variants + the per-variant evidence map for a region.
+
+    Shared by :func:`serialize_region_data` (viewer payload) and the evidence-fusion path
+    (``classify_variant``), so the strand/quality/artifact/confidence signals reach both the
+    viewer and the ACMG reasoning scaffold. Positions stay 0-based here (the internal frame).
+
+    Returns ``(enhanced_variants, variant_evidence)``.
+    """
+    return enhance_variants_with_evidence(
+        data.variants, data.reads, data.reference_sequence, data.start
+    )
+
+
 def serialize_region_data(data: RegionData, compact: bool | None = None) -> dict:
     """Serialize RegionData to a JSON-compatible dict.
 
@@ -82,9 +96,7 @@ def serialize_region_data(data: RegionData, compact: bool | None = None) -> dict
         compact = region_size > 500
 
     # Compute read-level evidence for every variant (shared with get_variants).
-    enhanced_variants, variant_evidence = enhance_variants_with_evidence(
-        data.variants, data.reads, data.reference_sequence, data.start
-    )
+    enhanced_variants, variant_evidence = build_enhanced_variants(data)
 
     # Serialize reads columnar - compact mode omits sequences for smaller payload
     reads_data = _serialize_reads_columnar(data.reads, include_sequence=not compact)

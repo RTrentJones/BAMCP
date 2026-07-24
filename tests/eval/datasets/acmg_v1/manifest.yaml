@@ -1,0 +1,118 @@
+# BAMCP ACMG classification eval dataset — acmg_v1 (seed set)
+#
+# A small, curated set of expert-reviewed variants spanning the ACMG
+# significance spectrum, including adversarial "trap" cases from the taxonomy in
+# archived/BAMCP_EVAL_HARNESS.md (gene-name bias, prediction overreliance,
+# frequency confusion, review-status). It scores the `classify_variant` tool's
+# guided-reasoning loop, run by src/bamcp/eval/acmg.py.
+#
+# IMPORTANT:
+#   - This is a NIGHTLY / manual eval: it needs a live LLM provider plus network
+#     access to ClinVar and gnomAD. It is NOT part of the PR gate.
+#   - `expected_classification` is the expert ground-truth label used for
+#     scoring. Coordinates are GRCh38, 1-based; they are used to fetch external
+#     evidence and (against a matching BAM) the observation. When a coordinate
+#     does not resolve in a source, evidence for that source is simply absent and
+#     the model classifies on what remains — the label is still ground truth.
+#   - Treat v1 as a seed to expand toward the 50+/tier target in the design doc.
+
+dataset: acmg_v1
+version: 1
+genome_build: GRCh38
+description: >-
+  Seed ACMG classification benchmark: clear pathogenic/benign anchors plus
+  nuanced and adversarial cases designed to probe known LLM failure modes.
+
+cases:
+  # -- tier1: clear, well-studied ------------------------------------------
+  - chrom: chr17
+    pos: 7674220
+    ref: C
+    alt: T
+    gene: TP53
+    expected_classification: Pathogenic
+    tier: tier1_clear
+    trap: null
+    note: "Well-established TP53 pathogenic missense."
+
+  - chrom: chr13
+    pos: 32340301
+    ref: A
+    alt: T
+    gene: BRCA2
+    expected_classification: Pathogenic
+    tier: tier1_clear
+    trap: null
+    note: "BRCA2 truncating-class pathogenic anchor."
+
+  - chrom: chr7
+    pos: 117559590
+    ref: A
+    alt: G
+    gene: CFTR
+    expected_classification: Benign
+    tier: tier1_clear
+    trap: null
+    note: "Common CFTR benign polymorphism."
+
+  # -- tier2: nuanced, requires weighing evidence --------------------------
+  - chrom: chr7
+    pos: 55181378
+    ref: C
+    alt: T
+    gene: EGFR
+    expected_classification: Likely Pathogenic
+    tier: tier2_nuanced
+    trap: computational_overreliance
+    note: "Hotspot-region missense; predictions strong but weigh clinical evidence."
+
+  - chrom: chr2
+    pos: 47478543
+    ref: G
+    alt: A
+    gene: MSH2
+    expected_classification: Likely Pathogenic
+    tier: tier2_nuanced
+    trap: null
+    note: "Mismatch-repair gene; splice/functional consideration."
+
+  # -- tier3: adversarial — designed to catch specific failure modes -------
+  - chrom: chr17
+    pos: 7676154
+    ref: G
+    alt: C
+    gene: TP53
+    expected_classification: Benign
+    tier: tier3_adversarial
+    trap: gene_name_bias
+    note: "Common polymorphism in TP53 — tests overcalling due to gene reputation."
+
+  - chrom: chr2
+    pos: 214730440
+    ref: A
+    alt: G
+    gene: BARD1
+    expected_classification: Uncertain Significance
+    tier: tier3_adversarial
+    trap: prediction_overreliance
+    note: "In-silico tools say deleterious but no clinical evidence — should stay VUS."
+
+  - chrom: chr1
+    pos: 45331556
+    ref: G
+    alt: A
+    gene: MUTYH
+    expected_classification: Uncertain Significance
+    tier: tier3_adversarial
+    trap: frequency_confusion
+    note: "Borderline AF (~0.1%) — below BA1, above PM2_supporting; tests threshold logic."
+
+  - chrom: chr11
+    pos: 108236078
+    ref: A
+    alt: G
+    gene: ATM
+    expected_classification: Likely Benign
+    tier: tier3_adversarial
+    trap: review_status_ignored
+    note: "Weak (1-star) assertions exist; tests weighting by review status."

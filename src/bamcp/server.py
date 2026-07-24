@@ -5,6 +5,7 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 
+from .analysis.acmg import handle_classify_variant
 from .analysis.curation import handle_get_variant_curation_summary
 from .config import BAMCPConfig
 from .core.tools import (
@@ -271,6 +272,43 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             args["reference"] = reference
         result = await handle_get_variant_curation_summary(args, config)
         return str(result["content"][0]["text"])
+
+    @mcp.tool(
+        description=(
+            "Assemble a multi-source evidence package (BAM observation + ClinVar + gnomAD) for "
+            "a variant and return an ACMG reasoning scaffold. Apply each applicable criterion, "
+            "then give a classification (Pathogenic / Likely Pathogenic / VUS / Likely Benign / "
+            "Benign) with confidence. Research-grade, not a clinical determination. Positions "
+            "are 1-based."
+        ),
+    )
+    async def classify_variant(
+        file_path: str,
+        chrom: str,
+        pos: int,
+        ref: str,
+        alt: str,
+        gene: str | None = None,
+        window: int = 50,
+        reference: str | None = None,
+    ) -> CallToolResult:
+        args: dict = {
+            "file_path": file_path,
+            "chrom": chrom,
+            "pos": pos,
+            "ref": ref,
+            "alt": alt,
+            "window": window,
+        }
+        if gene is not None:
+            args["gene"] = gene
+        if reference is not None:
+            args["reference"] = reference
+        result = await handle_classify_variant(args, config)
+        return CallToolResult(
+            content=[TextContent(type="text", text=result["content"][0]["text"])],
+            structuredContent=result.get("structuredContent"),
+        )
 
     @mcp.tool(
         description=(

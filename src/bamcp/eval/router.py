@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ..analysis.acmg import handle_classify_variant
 from ..analysis.curation import handle_get_variant_curation_summary
 from ..config import BAMCPConfig
 from ..core.tools import (
@@ -64,6 +65,7 @@ _HANDLERS: dict[str, Callable] = {
     "lookup_clinvar": handle_lookup_clinvar,
     "lookup_gnomad": handle_lookup_gnomad,
     "scan_variants": handle_scan_variants,
+    "classify_variant": handle_classify_variant,
     "get_variant_curation_summary": handle_get_variant_curation_summary,
 }
 

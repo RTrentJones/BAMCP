@@ -44,6 +44,7 @@ class TestCreateServer:
             "lookup_clinvar",
             "lookup_gnomad",
             "get_variant_curation_summary",
+            "classify_variant",
             "search_gene",
             "scan_variants",
             "cleanup_cache",

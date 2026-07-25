@@ -53,6 +53,36 @@ A few examples where a check falsified something that looked correct:
   called it *task success*. The fix separates the two dimensions and requires the answer to carry
   the required factual claims.
 
+## What the review rounds missed — and a peer caught
+
+The most instructive bug in the project was not caught by any of the 17 adversarial review rounds,
+the deterministic truth set, or the type checker. It was caught by a person *using the tool to do
+real analysis*: `search_gene` returned **GRCh38** coordinates while the BAM was aligned to
+**GRCh37**, a silent ~0.5–2 Mb offset. Every "BRCA1" session had actually been looking at anonymous
+intergenic sequence — and the empty ClinVar/gnomAD results that followed were being read as evidence
+the calls were noise. The reasoning was circular against a bad premise.
+
+Two honest lessons:
+
+- **A green test suite proves the code does what the tests assume, not that the assumptions are
+  right.** The truth set planted variants at coordinates *in the test's own frame*, so it could
+  never have caught a cross-build coordinate error. The missing test was a *biological* invariant —
+  "the gene you asked for lands where its reads are" — not another mechanical one.
+- **The failure mode that survives review is the one that produces plausible output.** A crash gets
+  found; a 500 kb silent offset that still returns well-formed JSON does not. This is why the class
+  is more dangerous than a louder bug.
+
+The fix generalized into a design rule the rest of the remediation now follows:
+
+> **Self-describing outputs — every response states the configuration that shaped it.**
+
+`search_gene` states the build it resolved and *why* (`explicit` / `detected-from-bam` /
+`server-default`) and warns on mismatch; variant responses echo the `applied_filters` they used, so
+an empty result is "filtered" rather than "absent"; external lookups carry a `status`
+(`found`/`not_found`/`unavailable`) so a failed fetch can't masquerade as a benign absence. When
+output carries its own provenance, a wrong assumption surfaces as a visible field instead of a
+silent offset — and the LLM reasoning over that output can catch the contradiction itself.
+
 ## Trade-offs I made deliberately
 
 - **Service-token auth over an identity provider.** For a single-instance server behind a

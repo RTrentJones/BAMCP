@@ -129,3 +129,82 @@ async def test_curation_include_clinical_bridge(offline_cfg, comprehensive_bam_p
     assert "CLINICAL CONTEXT" in text
     # External lookups disabled -> "no record found", never fabricated data.
     assert "no record found" in text
+
+
+class _RaisingClient:
+    """A lookup client whose every call errors — stands in for a network failure."""
+
+    async def lookup(self, *_a, **_k):
+        raise RuntimeError("network down")
+
+
+# -- Phase 2: error-vs-absence -------------------------------------------------
+
+
+@pytest.mark.unit
+def test_frequency_criteria_unavailable_does_not_apply_pm2_on_absence():
+    """An ERRORED gnomAD lookup must not become PM2 'absence supports rarity' evidence."""
+    from bamcp.analysis.acmg import _frequency_criteria
+
+    crit = _frequency_criteria({"status": "unavailable"})
+    text = " ".join(c["evaluate_with"] for c in crit)
+    assert "UNAVAILABLE" in text
+    assert "Do NOT apply PM2" in text
+    # Must NOT emit the genuine-absence phrasing that would license rarity.
+    assert "Absence supports rarity" not in text
+
+
+@pytest.mark.unit
+def test_frequency_criteria_none_is_genuine_absence():
+    """A genuine not-found (None) still yields the normal PM2-on-absence line."""
+    from bamcp.analysis.acmg import _frequency_criteria
+
+    crit = _frequency_criteria(None)
+    assert "No gnomAD entry was found" in crit[0]["evaluate_with"]
+
+
+@pytest.mark.unit
+def test_clinical_criteria_unavailable_is_distinct_from_not_found():
+    from bamcp.analysis.acmg import _clinical_criteria
+
+    unavail = _clinical_criteria({"status": "unavailable"})[0]["evaluate_with"]
+    assert "UNAVAILABLE" in unavail
+    not_found = _clinical_criteria(None)[0]["evaluate_with"]
+    assert "genuinely not" in not_found
+    assert "UNAVAILABLE" not in not_found
+
+
+@pytest.mark.unit
+async def test_assemble_evidence_marks_failed_lookups_unavailable(
+    comprehensive_ref_fasta_path, comprehensive_bam_path, monkeypatch
+):
+    """A failed ClinVar/gnomAD fetch → {'status': 'unavailable'}, never None (absence)."""
+    monkeypatch.setattr("bamcp.core.tools.get_clinvar_client", lambda config: _RaisingClient())
+    monkeypatch.setattr("bamcp.core.tools.get_gnomad_client", lambda config: _RaisingClient())
+    cfg = BAMCPConfig(
+        reference=comprehensive_ref_fasta_path, clinvar_enabled=True, gnomad_enabled=True
+    )
+
+    ev = await assemble_evidence("chr1", 1051, "A", "T", comprehensive_bam_path, cfg)
+    assert ev["clinvar"] == {"status": "unavailable"}
+    assert ev["population_frequency"] == {"status": "unavailable"}
+
+    # And the scaffold built over it refuses to treat the failure as absence.
+    scaffold = build_acmg_scaffold(ev)
+    blob = str(scaffold)
+    assert "UNAVAILABLE" in blob
+
+
+@pytest.mark.unit
+async def test_clinical_context_marks_failed_lookups_unavailable(
+    comprehensive_ref_fasta_path, monkeypatch
+):
+    monkeypatch.setattr("bamcp.core.tools.get_clinvar_client", lambda config: _RaisingClient())
+    monkeypatch.setattr("bamcp.core.tools.get_gnomad_client", lambda config: _RaisingClient())
+    cfg = BAMCPConfig(
+        reference=comprehensive_ref_fasta_path, clinvar_enabled=True, gnomad_enabled=True
+    )
+
+    ctx = await clinical_context(cfg, "chr1", 100, "A", "T")
+    assert ctx["clinvar"] == {"status": "unavailable"}
+    assert ctx["population_frequency"] == {"status": "unavailable"}

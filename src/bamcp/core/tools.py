@@ -21,7 +21,7 @@ import pysam
 from ..analysis.evidence import enhance_vcf_variants
 from ..clients.clinvar import ClinVarClient
 from ..clients.genes import GeneClient
-from ..clients.gnomad import GnomadClient
+from ..clients.gnomad import GnomadClient, GnomadQueryError
 from ..config import BAMCPConfig
 from ..constants import (
     BAM_PARSE_TIMEOUT_SECONDS,
@@ -257,6 +257,26 @@ _GNOMAD_DISCLAIMER = (
     "Note: This is research-grade population frequency data from gnomAD and is "
     "not intended for clinical diagnostic use."
 )
+
+# Lookup outcome vocabulary for the external-database tools. The load-bearing distinction
+# is not_found (genuine absence — the variant is truly not in the database) vs. unavailable
+# (the lookup errored/timed out — absence is UNKNOWN and must NOT be read as "rare/benign").
+# Collapsing the two is the circular trap that turns an empty gnomAD result into false
+# rarity (PM2) evidence; the explicit status keeps callers honest.
+_LOOKUP_FOUND = "found"
+_LOOKUP_NOT_FOUND = "not_found"
+_LOOKUP_UNAVAILABLE = "unavailable"
+_LOOKUP_DISABLED = "disabled"
+_LOOKUP_INVALID = "invalid_input"
+
+
+def _lookup_result(payload: dict[str, Any], *, status: str, disclaimer: str) -> dict:
+    """Wrap an external-database lookup payload with an explicit ``status`` field so a
+    caller can tell a genuine not-found from a failed lookup (see the vocabulary above)."""
+    payload["status"] = status
+    payload.setdefault("disclaimer", disclaimer)
+    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+
 
 _CANDIDATE_VARIANT_DISCLAIMER = (
     "Note: BAMCP reports research-grade candidate variants from read-level evidence; "
@@ -1289,81 +1309,50 @@ async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> di
     alt = args["alt"]
 
     if not config.clinvar_enabled:
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {"error": "ClinVar lookup is disabled", "disclaimer": _CLINVAR_DISCLAIMER}
-                    ),
-                }
-            ]
-        }
+        return _lookup_result(
+            {"error": "ClinVar lookup is disabled"},
+            status=_LOOKUP_DISABLED,
+            disclaimer=_CLINVAR_DISCLAIMER,
+        )
 
     # Validate input parameters
     validation_error = validate_variant_input(chrom, pos, ref, alt)
     if validation_error:
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {"error": validation_error, "disclaimer": _CLINVAR_DISCLAIMER}
-                    ),
-                }
-            ]
-        }
+        return _lookup_result(
+            {"error": validation_error}, status=_LOOKUP_INVALID, disclaimer=_CLINVAR_DISCLAIMER
+        )
 
     client = get_clinvar_client(config)
 
     try:
         result = await client.lookup(chrom, pos, ref, alt)
     except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
-        # Network and HTTP errors - expected failures
+        # Network/HTTP failure — the lookup is UNAVAILABLE, not an authoritative not-found.
         logger.warning("ClinVar lookup failed for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {"error": "ClinVar lookup failed", "disclaimer": _CLINVAR_DISCLAIMER}
-                    ),
-                }
-            ]
-        }
+        return _lookup_result(
+            {"error": "ClinVar lookup failed"},
+            status=_LOOKUP_UNAVAILABLE,
+            disclaimer=_CLINVAR_DISCLAIMER,
+        )
     except asyncio.TimeoutError:
         logger.warning("ClinVar lookup timed out for %s:%d %s>%s", chrom, pos, ref, alt)
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {"error": "ClinVar lookup timed out", "disclaimer": _CLINVAR_DISCLAIMER}
-                    ),
-                }
-            ]
-        }
+        return _lookup_result(
+            {"error": "ClinVar lookup timed out"},
+            status=_LOOKUP_UNAVAILABLE,
+            disclaimer=_CLINVAR_DISCLAIMER,
+        )
 
     if result is None:
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "found": False,
-                            "message": f"No ClinVar entry found for {chrom}:{pos} {ref}>{alt}",
-                            "disclaimer": _CLINVAR_DISCLAIMER,
-                        }
-                    ),
-                }
-            ]
-        }
+        return _lookup_result(
+            {
+                "found": False,
+                "message": f"No ClinVar entry found for {chrom}:{pos} {ref}>{alt}",
+            },
+            status=_LOOKUP_NOT_FOUND,
+            disclaimer=_CLINVAR_DISCLAIMER,
+        )
 
-    payload = asdict(result)
-    payload["disclaimer"] = _CLINVAR_DISCLAIMER
-
-    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+    return _lookup_result(asdict(result), status=_LOOKUP_FOUND, disclaimer=_CLINVAR_DISCLAIMER)
 
 
 @telemetry_wrapper("lookup_gnomad")
@@ -1378,81 +1367,59 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
     alt = args["alt"]
 
     if not config.gnomad_enabled:
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {"error": "gnomAD lookup is disabled", "disclaimer": _GNOMAD_DISCLAIMER}
-                    ),
-                }
-            ]
-        }
+        return _lookup_result(
+            {"error": "gnomAD lookup is disabled"},
+            status=_LOOKUP_DISABLED,
+            disclaimer=_GNOMAD_DISCLAIMER,
+        )
 
     # Validate input parameters
     validation_error = validate_variant_input(chrom, pos, ref, alt)
     if validation_error:
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {"error": validation_error, "disclaimer": _GNOMAD_DISCLAIMER}
-                    ),
-                }
-            ]
-        }
+        return _lookup_result(
+            {"error": validation_error}, status=_LOOKUP_INVALID, disclaimer=_GNOMAD_DISCLAIMER
+        )
 
     client = get_gnomad_client(config)
 
     try:
         result = await client.lookup(chrom, pos, ref, alt)
     except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
-        # Network and HTTP errors - expected failures
+        # Network/HTTP failure — the lookup is UNAVAILABLE, not an authoritative not-found.
         logger.warning("gnomAD lookup failed for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {"error": "gnomAD lookup failed", "disclaimer": _GNOMAD_DISCLAIMER}
-                    ),
-                }
-            ]
-        }
+        return _lookup_result(
+            {"error": "gnomAD lookup failed"},
+            status=_LOOKUP_UNAVAILABLE,
+            disclaimer=_GNOMAD_DISCLAIMER,
+        )
+    except GnomadQueryError as e:
+        # Transient GraphQL error — the client propagates it (rather than returning None) so we
+        # report "unavailable" here instead of a misleading "not found in gnomAD".
+        logger.warning("gnomAD query error for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
+        return _lookup_result(
+            {"error": "gnomAD lookup failed"},
+            status=_LOOKUP_UNAVAILABLE,
+            disclaimer=_GNOMAD_DISCLAIMER,
+        )
     except asyncio.TimeoutError:
         logger.warning("gnomAD lookup timed out for %s:%d %s>%s", chrom, pos, ref, alt)
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {"error": "gnomAD lookup timed out", "disclaimer": _GNOMAD_DISCLAIMER}
-                    ),
-                }
-            ]
-        }
+        return _lookup_result(
+            {"error": "gnomAD lookup timed out"},
+            status=_LOOKUP_UNAVAILABLE,
+            disclaimer=_GNOMAD_DISCLAIMER,
+        )
 
     if result is None:
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "found": False,
-                            "message": f"No gnomAD entry found for {chrom}:{pos} {ref}>{alt}",
-                            "disclaimer": _GNOMAD_DISCLAIMER,
-                        }
-                    ),
-                }
-            ]
-        }
+        return _lookup_result(
+            {
+                "found": False,
+                "message": f"No gnomAD entry found for {chrom}:{pos} {ref}>{alt}",
+            },
+            status=_LOOKUP_NOT_FOUND,
+            disclaimer=_GNOMAD_DISCLAIMER,
+        )
 
-    payload = asdict(result)
-    payload["disclaimer"] = _GNOMAD_DISCLAIMER
-
-    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+    return _lookup_result(asdict(result), status=_LOOKUP_FOUND, disclaimer=_GNOMAD_DISCLAIMER)
 
 
 @telemetry_wrapper("scan_variants")

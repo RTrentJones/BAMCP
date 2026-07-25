@@ -301,6 +301,17 @@ relationship:
 
 Enrich further with `lookup_clinvar` / `lookup_gnomad` on the returned 1-based positions.
 
+#### Error vs. absence in database lookups
+
+`lookup_clinvar` / `lookup_gnomad` responses carry an explicit `status`:
+`found` · `not_found` (the variant is genuinely absent from that database) ·
+`unavailable` (the lookup **errored or timed out** — absence is *unknown*) · `disabled` ·
+`invalid_input`. This matters because a failed lookup must not read as "not in the database" —
+in the ACMG scaffold (`classify_variant`) that would let a network blip masquerade as rarity
+(PM2) or "no pathogenic assertion" evidence. When a source is `unavailable`, the fused evidence
+block is `{"status": "unavailable"}` (not `null`) and the scaffold flags the line for retry
+rather than treating it as absence.
+
 #### Self-describing filters
 
 Every variant-producing response (`get_variants`, `visualize_region`, `jump_to`,

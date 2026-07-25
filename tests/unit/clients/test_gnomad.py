@@ -18,7 +18,7 @@ class TestTransientErrorsNotCached:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_transient_error_is_retried_not_cached(self):
+    async def test_transient_error_propagates_and_is_retried_not_cached(self):
         client = GnomadClient()
         calls = {"n": 0}
 
@@ -27,8 +27,12 @@ class TestTransientErrorsNotCached:
             raise GnomadQueryError("transient")
 
         client._do_lookup = _boom  # type: ignore[method-assign]
-        assert await client.lookup("chr1", 1, "A", "T") is None
-        assert await client.lookup("chr1", 1, "A", "T") is None
+        # The error now PROPAGATES (so callers can report "unavailable" instead of a
+        # misleading "not found") and is still not cached — the next call retries.
+        with pytest.raises(GnomadQueryError):
+            await client.lookup("chr1", 1, "A", "T")
+        with pytest.raises(GnomadQueryError):
+            await client.lookup("chr1", 1, "A", "T")
         assert calls["n"] == 2  # retried — the error was NOT cached as a negative
 
 
@@ -233,8 +237,10 @@ class TestGnomadClient:
         )
 
         client = GnomadClient()
-        result = await client.lookup("chr1", 100, "A", "T")
-        assert result is None
+        # A GraphQL error is transient — it propagates (not swallowed to None) so the
+        # handler reports "unavailable" rather than a misleading "not found".
+        with pytest.raises(GnomadQueryError):
+            await client.lookup("chr1", 100, "A", "T")
 
     @pytest.mark.unit
     @pytest.mark.asyncio

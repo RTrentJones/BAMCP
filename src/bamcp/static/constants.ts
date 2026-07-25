@@ -102,6 +102,27 @@ export function displayPos(pos: number): number {
     return pos + 1;
 }
 
+/**
+ * Format a genomic position for a ruler tick, given the spacing between ticks.
+ *
+ * A fixed `.toFixed(1) + 'K'` rounding collapses every tick finer than ~100 bp to the
+ * same string (a 50 bp interval renders "1.1K, 1.1K, 1.2K, 1.2K…"; a 5 bp interval
+ * renders "1.1K" five times), so the ruler conveys no information when zoomed in. Pick
+ * a K/M unit only when the tick spacing is coarse enough for that unit to stay distinct,
+ * with enough decimals that adjacent ticks differ; otherwise use the full comma-grouped
+ * position. `tickInterval` is in base pairs.
+ */
+export function formatRulerLabel(pos: number, tickInterval: number): string {
+    const withUnit = (divisor: number, unit: string): string => {
+        const step = tickInterval / divisor;
+        const decimals = Math.max(0, Math.ceil(-Math.log10(step)));
+        return (pos / divisor).toFixed(decimals) + unit;
+    };
+    if (pos >= 1_000_000 && tickInterval >= 1_000_000) return withUnit(1_000_000, "M");
+    if (pos >= 1_000 && tickInterval >= 1_000) return withUnit(1_000, "K");
+    return Math.round(pos).toLocaleString("en-US");
+}
+
 /** Color per structural-variant type; falls back to SV_COLOR_DEFAULT for unknown types. */
 export const SV_COLORS: Record<string, string> = {
     DEL: '#ef4444', // deletion — red

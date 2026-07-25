@@ -301,6 +301,15 @@ relationship:
 
 Enrich further with `lookup_clinvar` / `lookup_gnomad` on the returned 1-based positions.
 
+#### Self-describing filters
+
+Every variant-producing response (`get_variants`, `visualize_region`, `jump_to`,
+`get_region_summary`, `scan_variants`) echoes the thresholds it **actually applied** —
+`applied_filters` (`min_vaf`, `min_depth`, `min_mapq`, `min_baseq`, and `max_reads` where reads
+are shown) plus a `filter_note`. This makes a variant's **absence** interpretable: an empty result
+at a site may reflect an aggressive `min_vaf`/`min_depth` rather than a true reference call. Loosen
+the thresholds (per-call `min_vaf`/`min_depth`, or the server defaults) to widen the net.
+
 ### Region Format
 
 Regions can be specified as:

@@ -9,6 +9,7 @@ import {
     INSERT_SIZE_THRESHOLDS,
     SOFT_CLIP_STYLE,
     displayPos,
+    formatRulerLabel,
     svColor,
     svTypeLabel,
 } from "./constants";
@@ -224,10 +225,12 @@ export class Renderer {
         ctx.strokeStyle = '#9ca3af';
         ctx.lineWidth = 1;
 
-        // Draw region label
+        // Draw region label, and reserve its width as a left gutter so tick labels don't
+        // collide with the contig name in the corner (they share the same baseline).
         ctx.fillStyle = '#6b7280';
         ctx.font = 'bold 10px sans-serif';
         ctx.fillText(data.contig, 4, 12);
+        const contigLabelRight = 4 + ctx.measureText(data.contig).width + 6;
 
         ctx.font = '10px monospace';
         ctx.fillStyle = '#374151';
@@ -236,16 +239,17 @@ export class Renderer {
         for (let pos = startTick; pos <= this.state.viewport.end; pos += tickInterval) {
             const x = (pos - this.state.viewport.start) * scale;
 
-            // Tick mark
+            // Tick mark (always drawn; only the label is gated on space)
             ctx.beginPath();
             ctx.moveTo(x, height - 6);
             ctx.lineTo(x, height);
             ctx.stroke();
 
-            // Label (1-based for display; tick placement stays on raw 0-based pos)
-            const label = this.formatPosition(displayPos(pos));
+            // Label (1-based for display; tick placement stays on raw 0-based pos).
+            // Skip labels that would overlap the contig gutter (left) or overflow (right).
+            const label = formatRulerLabel(displayPos(pos), tickInterval);
             const labelWidth = ctx.measureText(label).width;
-            if (x + labelWidth < width - 5) {
+            if (x + 2 >= contigLabelRight && x + labelWidth < width - 5) {
                 ctx.fillText(label, x + 2, height - 8);
             }
         }
@@ -268,12 +272,6 @@ export class Renderer {
         if (normalized <= 2) return 2 * magnitude;
         if (normalized <= 5) return 5 * magnitude;
         return 10 * magnitude;
-    }
-
-    private formatPosition(pos: number): string {
-        if (pos >= 1000000) return (pos / 1000000).toFixed(1) + 'M';
-        if (pos >= 1000) return (pos / 1000).toFixed(1) + 'K';
-        return pos.toString();
     }
 
     // ==================== REFERENCE TRACK ====================

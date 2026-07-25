@@ -44,3 +44,25 @@ plan and `docs/ENGINEERING_RETROSPECTIVE.md` for the write-up.
 - Docs lead remote deployment with **Streamable HTTP** (SSE is deprecated by the MCP spec).
 - Test suite is hermetic by default (live-network tests behind a `network` marker); CI installs
   from the frozen `uv.lock`.
+
+### Biological correctness (peer-review round)
+
+A hands-on peer review caught a class the automated review rounds missed: silent output that
+misleads the caller. The unifying fix is **self-describing outputs — every response states the
+configuration that shaped it**. See `docs/ENGINEERING_RETROSPECTIVE.md`.
+
+- **Genome-build correctness** — `search_gene` returned coordinates for a static server build with
+  no tie to the BAM (a GRCh38 locus in a GRCh37 BAM is silently ~0.5–2 Mb off the real gene). It
+  now auto-detects the build from the BAM (`file_path`), allows an explicit `build` override, states
+  `genome_build`/`build_source`, and warns loudly on any mismatch. Also fixed the assembly selector
+  that matched GRCh37's `GCF_000001405.25` as GRCh38.
+- **Self-describing filters** — `get_variants`/`visualize_region`/`jump_to`/`get_region_summary`/
+  `scan_variants` now echo the `applied_filters` (VAF/depth/MAPQ/baseQ, and `max_reads` where reads
+  are shown), so a variant's *absence* is interpretable (filtered vs. truly absent), not silent.
+- **Error vs. absence** — `lookup_clinvar`/`lookup_gnomad` carry an explicit `status`
+  (`found`/`not_found`/`unavailable`/…); a transient gnomAD GraphQL error now propagates instead of
+  collapsing to `None`. In the ACMG scaffold a failed lookup is marked `unavailable` rather than a
+  null "absent" block, so a network blip can't become false rarity (PM2) evidence.
+- **Ruler rendering** — position-ruler tick labels stay distinct at every zoom (were collapsing to
+  `1.1K` repeated) and no longer collide with the contig label; extracted a tested
+  `formatRulerLabel`.

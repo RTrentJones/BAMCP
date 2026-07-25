@@ -4,9 +4,37 @@ A living strengths/weaknesses assessment + prioritized focus, refreshed after th
 remediation ([`engineering-review-response.md`](engineering-review-response.md)) and 17 rounds of
 adversarial review. Update the checkboxes and the "state" line as work lands.
 
-**State (`main`, refreshed 2026-07-23):** 759 tests / ~90% coverage · 9.3k lines Python (40 files) ·
-3.6k lines viewer TS · deployed to prod, verify-gated, healthy. The external review scored it
-**7.5/10** (security + LLM-evals both **4.5**, the two weakest axes).
+**State (`main`, refreshed 2026-07-25):** ~820 Python tests + viewer vitest / ~90% coverage ·
+~9.6k lines Python · 3.6k lines viewer TS · deployed to prod, verify-gated, healthy. The external
+review scored it **7.5/10** (security + LLM-evals both **4.5**, the two weakest axes). A later
+hands-on **peer review** then caught a class the 17 review rounds missed — a silent genome-build
+mismatch — now closed (see "Biological correctness" below).
+
+## Biological correctness (peer-review round) — closed
+
+A peer review using the tool for real analysis found `search_gene` returned **GRCh38** coordinates
+against a **GRCh37** BAM — a silent ~0.5–2 Mb offset, so the analysis was of anonymous intergenic
+sequence, and the resulting empty ClinVar/gnomAD hits read as false "benign" evidence. The unifying
+defect was **silent output that misleads the caller**. Fixed in four shipped phases, each with
+regression tests:
+
+- [x] **Phase 0 — build correctness** (#50): `search_gene` auto-detects the build from the BAM
+  (explicit override allowed), states `genome_build`/`build_source`, and warns loudly on mismatch;
+  fixed the assembly-selector that matched GRCh37's `.25` as GRCh38.
+- [x] **Phase 1 — self-describing filters** (#51): every variant response echoes the `applied_filters`
+  it used, so a variant's *absence* is interpretable (filtered vs. truly absent), not silent.
+- [x] **Phase 2 — error vs. absence** (#52): ClinVar/gnomAD lookups carry an explicit `status`; a
+  failed lookup is `unavailable`, never a null "absent" block — so a network blip can't become false
+  rarity (PM2) evidence in the ACMG scaffold.
+- [x] **Phase 3 — ruler rendering** (#53): position-ruler tick labels stay distinct at every zoom
+  (were collapsing to `1.1K` repeated) and no longer collide with the contig label.
+
+**The durable guardrail is a design rule, not a single test: _self-describing outputs — every
+response states the configuration that shaped it_** (build + source, applied filters, lookup status).
+When output carries its own provenance, a wrong assumption surfaces as a visible field instead of a
+silent offset. Remaining deferred: surface the detected build in `visualize_region`/`get_region_summary`
+payloads; a GRCh37-fixture biological-correctness eval (search a gene → visualize → assert reads land
+on it); optional `BAMCP_GENOME_BUILD` in prod infra.
 
 ## Scorecard delta (external review → now)
 
@@ -38,10 +66,10 @@ adversarial review. Update the checkboxes and the "state" line as work lands.
 ## Focus next (prioritized)
 
 ### Tier 1 — depth + eval credibility (highest signal-per-effort)
-- [ ] **1. Port the ACMG feature** from the stale `repo-performance-eval-review` branch —
-  `classify_variant` tool + evidence fusion + ACMG scoring eval. Directly answers "scientific breadth
-  is too narrow" with a differentiated clinical feature. Dedicated port (coupled to a serialization
-  refactor `build_enhanced_variants` + `tool_specs.py`; stale against ~15 PRs). **← in progress**
+- [x] **1. Port the ACMG feature** (#49) — `classify_variant` tool + evidence fusion + ACMG scoring
+  eval. Shipped, and hardened in Phase 2 (error-vs-absence) so a failed lookup can't tilt a
+  classification. Directly answers "scientific breadth is too narrow" with a differentiated clinical
+  feature.
 - [ ] **2. Finish eval credibility** (Deferred 3b/3c): implement `MCPStdioRouter` (real MCP transport)
   + a small human-labeled benchmark + judge-swap agreement. Port `tool_specs.py` (real tool schemas)
   alongside ACMG — it's a shared prerequisite.

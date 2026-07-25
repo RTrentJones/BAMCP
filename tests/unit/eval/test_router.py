@@ -50,8 +50,9 @@ async def test_known_tool_returns_text(small_bam_path, cfg):
 async def test_search_gene_missing_symbol():
     router = InProcessRouter()
     result = await router.call("search_gene", {})
-    assert result.ok is False
-    assert "symbol" in (result.error or "").lower()
+    # search_gene now routes through handle_search_gene, which returns an error payload.
+    assert result.ok is True
+    assert "symbol" in result.text.lower()
 
 
 @pytest.mark.unit
@@ -78,13 +79,12 @@ async def test_cleanup_cache_path():
 @pytest.mark.unit
 async def test_search_gene_caught_exception(monkeypatch):
     """search_gene wraps client failures as RouterResult errors."""
-    from bamcp.eval import router as router_mod
 
     class BoomClient:
-        async def search(self, symbol):
+        async def search(self, symbol, build=None):
             raise RuntimeError("network down")
 
-    monkeypatch.setattr(router_mod, "get_gene_client", lambda config: BoomClient())
+    monkeypatch.setattr("bamcp.core.tools.get_gene_client", lambda config: BoomClient())
     result = await InProcessRouter().call("search_gene", {"symbol": "TP53"})
     assert result.ok is False
     assert "network down" in (result.error or "")
@@ -92,13 +92,11 @@ async def test_search_gene_caught_exception(monkeypatch):
 
 @pytest.mark.unit
 async def test_search_gene_not_found(monkeypatch):
-    from bamcp.eval import router as router_mod
-
     class EmptyClient:
-        async def search(self, symbol):
+        async def search(self, symbol, build=None):
             return None
 
-    monkeypatch.setattr(router_mod, "get_gene_client", lambda config: EmptyClient())
+    monkeypatch.setattr("bamcp.core.tools.get_gene_client", lambda config: EmptyClient())
     result = await InProcessRouter().call("search_gene", {"symbol": "BOGUS"})
     assert result.ok is True
     assert "not found" in result.text
@@ -106,8 +104,6 @@ async def test_search_gene_not_found(monkeypatch):
 
 @pytest.mark.unit
 async def test_search_gene_returns_region(monkeypatch):
-    from bamcp.eval import router as router_mod
-
     class Hit:
         symbol = "TP53"
         name = "tumor protein p53"
@@ -115,17 +111,19 @@ async def test_search_gene_returns_region(monkeypatch):
         start = 7670000
         end = 7680000
         strand = "-"
+        build = "GRCh38"
 
     class HitClient:
-        async def search(self, symbol):
+        async def search(self, symbol, build=None):
             return Hit()
 
-    monkeypatch.setattr(router_mod, "get_gene_client", lambda config: HitClient())
+    monkeypatch.setattr("bamcp.core.tools.get_gene_client", lambda config: HitClient())
     result = await InProcessRouter().call("search_gene", {"symbol": "TP53"})
     assert result.ok is True
     parsed = json.loads(result.text)
     assert parsed["symbol"] == "TP53"
     assert parsed["region"] == "chr17:7670000-7680000"
+    assert parsed["genome_build"] == "GRCh38"
 
 
 @pytest.mark.unit

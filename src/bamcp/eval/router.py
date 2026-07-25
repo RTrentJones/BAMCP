@@ -20,7 +20,6 @@ from ..analysis.acmg import handle_classify_variant
 from ..analysis.curation import handle_get_variant_curation_summary
 from ..config import BAMCPConfig
 from ..core.tools import (
-    get_gene_client,
     handle_get_coverage,
     handle_get_region_summary,
     handle_get_variants,
@@ -29,6 +28,7 @@ from ..core.tools import (
     handle_lookup_clinvar,
     handle_lookup_gnomad,
     handle_scan_variants,
+    handle_search_gene,
     handle_visualize_region,
 )
 
@@ -67,6 +67,7 @@ _HANDLERS: dict[str, Callable] = {
     "scan_variants": handle_scan_variants,
     "classify_variant": handle_classify_variant,
     "get_variant_curation_summary": handle_get_variant_curation_summary,
+    "search_gene": handle_search_gene,
 }
 
 
@@ -82,13 +83,10 @@ class InProcessRouter:
 
     def list_tools(self) -> list[str]:
         names = list(_HANDLERS.keys())
-        names.append("search_gene")
         names.append("cleanup_cache")
         return names
 
     async def call(self, name: str, arguments: dict[str, Any]) -> RouterResult:
-        if name == "search_gene":
-            return await self._call_search_gene(arguments)
         if name == "cleanup_cache":
             from ..core.tools import get_cache
 
@@ -114,29 +112,6 @@ class InProcessRouter:
                 if isinstance(candidate, dict):
                     ui_payload = candidate
         return RouterResult(ok=True, text=str(text), ui_payload=ui_payload)
-
-    async def _call_search_gene(self, arguments: dict[str, Any]) -> RouterResult:
-        symbol = arguments.get("symbol", "")
-        if not symbol:
-            return RouterResult(ok=False, text="", error="search_gene requires 'symbol'")
-        try:
-            client = get_gene_client(self.config)
-            result = await client.search(symbol)
-        except Exception as e:  # noqa: BLE001
-            return RouterResult(ok=False, text="", error=f"{type(e).__name__}: {e}")
-        if result is None:
-            return RouterResult(ok=True, text=json.dumps({"error": f"Gene {symbol!r} not found"}))
-        return RouterResult(
-            ok=True,
-            text=json.dumps(
-                {
-                    "symbol": result.symbol,
-                    "name": result.name,
-                    "region": f"{result.chrom}:{result.start}-{result.end}",
-                    "strand": result.strand,
-                }
-            ),
-        )
 
 
 def tool_descriptors(router: ToolRouter) -> list:

@@ -11,7 +11,6 @@ from .config import BAMCPConfig
 from .core.tools import (
     close_external_clients,
     get_cache,
-    get_gene_client,
     handle_get_coverage,
     handle_get_region_summary,
     handle_get_variants,
@@ -20,6 +19,7 @@ from .core.tools import (
     handle_lookup_clinvar,
     handle_lookup_gnomad,
     handle_scan_variants,
+    handle_search_gene,
     handle_visualize_region,
 )
 from .resources import get_viewer_html
@@ -312,27 +312,25 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     @mcp.tool(
         description=(
-            "Search for a gene by symbol and return its genomic coordinates. "
-            "Use this to navigate to a gene's location by name (e.g., BRCA1, TP53)."
+            "Search for a gene by symbol and return its genomic coordinates (e.g. BRCA1, TP53). "
+            "Coordinates are build-specific: pass the BAM's file_path so the build is "
+            "auto-detected and the coordinates line up in that BAM (a GRCh38 locus in a GRCh37 "
+            "BAM is ~0.5-2 Mb off, silently). Optionally set build (GRCh37/GRCh38) to override. "
+            "The response states the coordinates' genome_build and warns on any mismatch."
         ),
     )
-    async def search_gene(symbol: str) -> str:
-        import json
-
-        client = get_gene_client(config)
-        result = await client.search(symbol)
-
-        if result is None:
-            return json.dumps({"error": f"Gene '{symbol}' not found"})
-
-        return json.dumps(
-            {
-                "symbol": result.symbol,
-                "name": result.name,
-                "region": f"{result.chrom}:{result.start}-{result.end}",
-                "strand": result.strand,
-            }
-        )
+    async def search_gene(
+        symbol: str,
+        file_path: str | None = None,
+        build: str | None = None,
+    ) -> str:
+        args: dict = {"symbol": symbol}
+        if file_path is not None:
+            args["file_path"] = file_path
+        if build is not None:
+            args["build"] = build
+        result = await handle_search_gene(args, config)
+        return str(result["content"][0]["text"])
 
     # -- Scanning Tools -------------------------------------------------------
 

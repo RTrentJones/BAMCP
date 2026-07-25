@@ -128,6 +128,103 @@ class TestGeneClient:
 
         await client.close()
 
+    def _mock_two_assemblies(self, httpx_mock):
+        """BRCA1 with both GRCh37 (.25) and GRCh38 (.40) assemblies — GRCh37 listed FIRST."""
+        httpx_mock.add_response(
+            url=re.compile(r".*/esearch\.fcgi.*"), json={"esearchresult": {"idlist": ["672"]}}
+        )
+        httpx_mock.add_response(
+            url=re.compile(r".*/esummary\.fcgi.*"),
+            json={
+                "result": {
+                    "672": {
+                        "name": "BRCA1",
+                        "description": "BRCA1 DNA repair associated",
+                        "genomicinfo": [
+                            {  # GRCh37 first — the old code's GRCh38 branch matched this by prefix
+                                "assemblyaccver": "GCF_000001405.25",
+                                "chraccver": "NC_000017.10",
+                                "chrstart": 41196311,
+                                "chrstop": 41277499,
+                            },
+                            {
+                                "assemblyaccver": "GCF_000001405.40",
+                                "chraccver": "NC_000017.11",
+                                "chrstart": 43044294,
+                                "chrstop": 43125482,
+                            },
+                        ],
+                    }
+                }
+            },
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_search_picks_grch37_assembly(self, httpx_mock):
+        self._mock_two_assemblies(httpx_mock)
+        client = GeneClient()
+        result = await client.search("BRCA1", build="GRCh37")
+        assert result is not None
+        assert result.build == "GRCh37"
+        assert result.start == 41196311  # GRCh37 locus, not the GRCh38 one
+        await client.close()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_search_picks_grch38_not_grch37_prefix(self, httpx_mock):
+        """The fix: a GRCh38 request must NOT match GRCh37's GCF_000001405.25 (listed first)."""
+        self._mock_two_assemblies(httpx_mock)
+        client = GeneClient()
+        result = await client.search("BRCA1", build="GRCh38")
+        assert result is not None
+        assert result.build == "GRCh38"
+        assert result.start == 43044294  # GRCh38 locus — the old code would have returned .25's
+        await client.close()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_search_fallback_reports_actual_build(self, httpx_mock):
+        """When the requested build is absent, coords are labeled with the build returned."""
+        httpx_mock.add_response(
+            url=re.compile(r".*/esearch\.fcgi.*"), json={"esearchresult": {"idlist": ["672"]}}
+        )
+        httpx_mock.add_response(
+            url=re.compile(r".*/esummary\.fcgi.*"),
+            json={
+                "result": {
+                    "672": {
+                        "name": "BRCA1",
+                        "description": "BRCA1",
+                        "genomicinfo": [
+                            {
+                                "assemblyaccver": "GCF_000001405.40",  # only GRCh38 available
+                                "chraccver": "NC_000017.11",
+                                "chrstart": 43044294,
+                                "chrstop": 43125482,
+                            }
+                        ],
+                    }
+                }
+            },
+        )
+        client = GeneClient()
+        result = await client.search("BRCA1", build="GRCh37")  # ask GRCh37, only GRCh38 exists
+        assert result is not None
+        assert result.build == "GRCh38"  # honest: not silently claimed as GRCh37
+        await client.close()
+
+    @pytest.mark.unit
+    def test_build_from_assembly(self):
+        from bamcp.clients.genes import _build_from_assembly
+
+        assert _build_from_assembly("GCF_000001405.25") == "GRCh37"
+        assert _build_from_assembly("GCF_000001405.13") == "GRCh37"
+        assert _build_from_assembly("GCF_000001405.26") == "GRCh38"
+        assert _build_from_assembly("GCF_000001405.40") == "GRCh38"
+        assert _build_from_assembly("GCF_999999999.1") == "unknown"
+        assert _build_from_assembly("garbage") == "unknown"
+
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_search_not_found(self, httpx_mock):

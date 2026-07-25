@@ -901,6 +901,34 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
     return {"content": [{"type": "text", "text": json.dumps(stats)}]}
 
 
+def _read_contigs_sync(file_path: str, reference: str | None, index_path: str | None) -> list[dict]:
+    """Read (name, length) contigs from a BAM/CRAM header. Runs in the parse pool."""
+    mode = "rc" if file_path.endswith(".cram") else "rb"
+    with pysam.AlignmentFile(
+        file_path,
+        mode,  # type: ignore[arg-type]
+        reference_filename=reference,
+        index_filename=index_path,
+    ) as samfile:
+        return [
+            {"name": name, "length": length}
+            for name, length in zip(samfile.references, samfile.lengths, strict=True)
+        ]
+
+
+async def _detect_bam_build(file_path: str, config: BAMCPConfig) -> dict:
+    """Detect a BAM/CRAM's genome build from its header. Returns detect_genome_build()'s dict."""
+    from .reference import detect_genome_build
+
+    validate_path(file_path, config)
+    index_path = await _ensure_cached_index(file_path, config)
+    contigs = await asyncio.wait_for(
+        _run_in_parse_pool(_read_contigs_sync, file_path, config.reference, index_path),
+        timeout=BAM_PARSE_TIMEOUT_SECONDS,
+    )
+    return detect_genome_build(contigs)
+
+
 @telemetry_wrapper("list_contigs")
 async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """List contigs in a BAM/CRAM file and detect genome build."""
@@ -919,22 +947,8 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
 
-    def _list_contigs_sync() -> list[dict]:
-        mode = "rc" if file_path.endswith(".cram") else "rb"
-        # Use context manager to ensure file handles are closed on exception
-        with pysam.AlignmentFile(
-            file_path,
-            mode,  # type: ignore[arg-type]
-            reference_filename=reference,
-            index_filename=index_path,
-        ) as samfile:
-            return [
-                {"name": name, "length": length}
-                for name, length in zip(samfile.references, samfile.lengths, strict=True)
-            ]
-
     contigs = await asyncio.wait_for(
-        _run_in_parse_pool(_list_contigs_sync),
+        _run_in_parse_pool(_read_contigs_sync, file_path, reference, index_path),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
     )
 
@@ -962,6 +976,89 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
             }
         ]
     }
+
+
+@telemetry_wrapper("search_gene")
+async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
+    """Search a gene by symbol and return build-consistent genomic coordinates.
+
+    Coordinates MUST match the build of the BAM being viewed — a GRCh38 locus in a GRCh37 BAM is
+    silently ~0.5-2 Mb off the real gene. Build resolution:
+      1. an explicit ``build`` argument overrides everything;
+      2. else, if ``file_path`` is given, the build is auto-detected from that BAM's header;
+      3. else, the server default (``config.genome_build``) is used.
+    The response always states the coordinates' build, the source of that choice, and a loud
+    warning on any mismatch against the BAM.
+    """
+    from .reference import normalize_build_name
+
+    def _err(msg: str, **extra: Any) -> dict:
+        return {"content": [{"type": "text", "text": json.dumps({"error": msg, **extra})}]}
+
+    symbol = args.get("symbol", "")
+    if not symbol:
+        return _err("search_gene requires 'symbol'")
+
+    file_path = args.get("file_path")
+    requested = normalize_build_name(args["build"]) if args.get("build") else None
+    if args.get("build") and requested is None:
+        return _err(f"Unrecognized build {args['build']!r}; use GRCh37/hg19 or GRCh38/hg38")
+
+    warnings: list[str] = []
+    detected_build: str | None = None
+    if file_path:
+        try:
+            info = await _detect_bam_build(file_path, config)
+            if info.get("build") and info["build"] != "unknown":
+                detected_build = info["build"]
+        except Exception as e:  # noqa: BLE001 — detection is best-effort reconciliation context
+            warnings.append(
+                f"could not detect the BAM's build ({type(e).__name__}); coordinates unreconciled"
+            )
+
+    # Resolution: explicit override > detected-from-BAM > server default.
+    if requested is not None:
+        effective, source = requested, "explicit"
+        if detected_build and detected_build != requested:
+            warnings.append(
+                f"you requested {requested} but the BAM is {detected_build} — returning "
+                f"{requested} coordinates; they will NOT line up in that BAM"
+            )
+    elif detected_build is not None:
+        effective, source = detected_build, "detected-from-bam"
+    else:
+        effective, source = config.genome_build, "server-default"
+        if not file_path:
+            warnings.append(
+                f"no file_path provided to reconcile against; coordinates are {effective} "
+                "(server default) — confirm your BAM's build with list_contigs"
+            )
+
+    result = await get_gene_client(config).search(symbol, build=effective)
+    if result is None:
+        return _err(f"Gene {symbol!r} not found", genome_build=effective)
+
+    # NCBI may not carry the requested assembly → result.build is what we actually got.
+    if result.build != "unknown" and result.build != effective:
+        warnings.append(f"NCBI returned {result.build} coordinates ({effective} unavailable)")
+    if detected_build and result.build != "unknown" and result.build != detected_build:
+        warnings.append(
+            f"MISMATCH: these {result.build} coordinates do NOT match the BAM's "
+            f"{detected_build} build — visualizing them will show the wrong locus"
+        )
+
+    payload: dict[str, Any] = {
+        "symbol": result.symbol,
+        "name": result.name,
+        "region": f"{result.chrom}:{result.start}-{result.end}",
+        "strand": result.strand,
+        "genome_build": result.build,
+        "build_source": source,
+        "bam_build": detected_build,
+    }
+    if warnings:
+        payload["warning"] = "; ".join(warnings)
+    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 
 
 @telemetry_wrapper("jump_to")

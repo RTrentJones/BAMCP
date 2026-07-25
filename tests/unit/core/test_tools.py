@@ -1385,6 +1385,125 @@ class TestHandleLookupGnomad:
         assert "disclaimer" in payload
 
 
+class TestLookupStatusField:
+    """Phase 2: external-DB lookups carry an explicit status so a lookup FAILURE is
+    never confused with a genuine not-found (which would read as false rarity/benign)."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_gnomad_found_status(self, config, monkeypatch):
+        from bamcp.clients import gnomad
+        from bamcp.clients.gnomad import GnomadResult
+
+        async def mock_lookup(self, *_a):
+            return GnomadResult(
+                variant_id="17-7674220-G-A",
+                global_af=1e-05,
+                ac=1,
+                an=100000,
+                homozygote_count=0,
+                populations=[],
+                filters=["PASS"],
+                source="genome",
+            )
+
+        monkeypatch.setattr(gnomad.GnomadClient, "lookup", mock_lookup)
+        result = await handle_lookup_gnomad(
+            {"chrom": "chr17", "pos": 7674220, "ref": "G", "alt": "A"}, config
+        )
+        assert json.loads(result["content"][0]["text"])["status"] == "found"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_gnomad_not_found_status(self, config, monkeypatch):
+        from bamcp.clients import gnomad
+
+        async def mock_lookup(self, *_a):
+            return None
+
+        monkeypatch.setattr(gnomad.GnomadClient, "lookup", mock_lookup)
+        result = await handle_lookup_gnomad(
+            {"chrom": "chr1", "pos": 1, "ref": "A", "alt": "T"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["status"] == "not_found"
+        assert payload["found"] is False
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_gnomad_query_error_is_unavailable_not_absence(self, config, monkeypatch):
+        """The core Phase 2 guard: a transient GraphQL error → 'unavailable', not 'not_found'."""
+        from bamcp.clients import gnomad
+        from bamcp.clients.gnomad import GnomadQueryError
+
+        async def mock_lookup(self, *_a):
+            raise GnomadQueryError("transient")
+
+        monkeypatch.setattr(gnomad.GnomadClient, "lookup", mock_lookup)
+        result = await handle_lookup_gnomad(
+            {"chrom": "chr1", "pos": 100, "ref": "A", "alt": "T"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["status"] == "unavailable"
+        assert payload.get("found") is not False  # must NOT masquerade as a not-found
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_gnomad_network_error_is_unavailable(self, config, monkeypatch):
+        from bamcp.clients import gnomad
+
+        async def mock_lookup(self, *_a):
+            raise ConnectionError("boom")
+
+        monkeypatch.setattr(gnomad.GnomadClient, "lookup", mock_lookup)
+        result = await handle_lookup_gnomad(
+            {"chrom": "chr1", "pos": 100, "ref": "A", "alt": "T"}, config
+        )
+        assert json.loads(result["content"][0]["text"])["status"] == "unavailable"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_clinvar_found_not_found_and_unavailable(self, config, monkeypatch):
+        from bamcp.clients import clinvar
+        from bamcp.clients.clinvar import ClinVarResult
+
+        async def found(self, *_a):
+            return ClinVarResult(
+                variation_id=12345,
+                clinical_significance="Pathogenic",
+                review_status="criteria provided",
+                stars=2,
+                conditions=["X"],
+                last_evaluated="2024",
+                gene="BRCA1",
+                variant_name="NM_x:c.1A>T",
+            )
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", found)
+        r = await handle_lookup_clinvar(
+            {"chrom": "chr17", "pos": 43000000, "ref": "A", "alt": "T"}, config
+        )
+        assert json.loads(r["content"][0]["text"])["status"] == "found"
+
+        async def none(self, *_a):
+            return None
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", none)
+        r = await handle_lookup_clinvar(
+            {"chrom": "chr17", "pos": 43000000, "ref": "A", "alt": "T"}, config
+        )
+        assert json.loads(r["content"][0]["text"])["status"] == "not_found"
+
+        async def boom(self, *_a):
+            raise ConnectionError("down")
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", boom)
+        r = await handle_lookup_clinvar(
+            {"chrom": "chr17", "pos": 43000000, "ref": "A", "alt": "T"}, config
+        )
+        assert json.loads(r["content"][0]["text"])["status"] == "unavailable"
+
+
 class TestLowConfidenceThresholds:
     """Tests for low-confidence variant labeling thresholds."""
 

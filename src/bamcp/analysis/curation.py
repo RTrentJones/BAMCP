@@ -208,7 +208,9 @@ def _format_clinical_context(context: dict) -> str:
     """Render the optional ClinVar/gnomAD context block as text."""
     lines = ["CLINICAL CONTEXT (external, research-grade)"]
     clinvar = context.get("clinvar")
-    if clinvar:
+    if clinvar and clinvar.get("status") == "unavailable":
+        lines.append("  ClinVar: unavailable (lookup failed — not a confirmed absence)")
+    elif clinvar:
         lines.append(
             f"  ClinVar: {clinvar.get('clinical_significance')} "
             f"({clinvar.get('stars')}-star; {clinvar.get('review_status')})"
@@ -216,7 +218,9 @@ def _format_clinical_context(context: dict) -> str:
     else:
         lines.append("  ClinVar: no record found")
     pop = context.get("population_frequency")
-    if pop:
+    if pop and pop.get("status") == "unavailable":
+        lines.append("  gnomAD: unavailable (lookup failed — not a confirmed absence)")
+    elif pop:
         lines.append(
             f"  gnomAD: global_af={pop.get('global_af')} max_pop_af={pop.get('max_pop_af')}"
         )

@@ -18,12 +18,45 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from ..config import BAMCPConfig
 from ..core.serialization import build_enhanced_variants
 
 logger = logging.getLogger(__name__)
+
+
+class _Unavailable:
+    """Sentinel: an external lookup ERRORED, distinct from ``None`` (a genuine not-found).
+
+    A failed ClinVar/gnomAD fetch must not read as "variant absent from the database" —
+    that would let a network blip masquerade as rarity (PM2) or "no pathogenic assertion"
+    evidence. The safe wrappers return this so the scaffold can say "unavailable" instead.
+    """
+
+    __slots__ = ()
+
+
+UNAVAILABLE = _Unavailable()
+
+
+def _external_block(
+    result: Any, builder: Callable[[Any], dict[str, Any]], *, found_status: str = "found"
+) -> dict[str, Any] | None:
+    """Shape an external-evidence block with an explicit lookup ``status``.
+
+    - ``UNAVAILABLE`` → ``{"status": "unavailable"}`` (errored — absence unknown).
+    - ``None`` → ``None`` (genuine not-found; downstream criteria treat this as absence).
+    - a result object → ``builder(result)`` annotated with ``status``.
+    """
+    if result is UNAVAILABLE:
+        return {"status": "unavailable"}
+    if result is None:
+        return None
+    block = builder(result)
+    block["status"] = found_status
+    return block
 
 
 def _max_population_af(gnomad_result: Any) -> tuple[float | None, str | None]:
@@ -48,9 +81,9 @@ async def _lookup_clinvar_safe(config: BAMCPConfig, chrom: str, pos: int, ref: s
 
     try:
         return await get_clinvar_client(config).lookup(chrom, pos, ref, alt)
-    except Exception as e:  # noqa: BLE001 — degrade to "no data" rather than fail fusion
+    except Exception as e:  # noqa: BLE001 — degrade to "unavailable" rather than fail fusion
         logger.warning("ClinVar lookup failed during fusion: %s", e)
-        return None
+        return UNAVAILABLE
 
 
 async def _lookup_gnomad_safe(config: BAMCPConfig, chrom: str, pos: int, ref: str, alt: str):
@@ -60,9 +93,9 @@ async def _lookup_gnomad_safe(config: BAMCPConfig, chrom: str, pos: int, ref: st
 
     try:
         return await get_gnomad_client(config).lookup(chrom, pos, ref, alt)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 — degrade to "unavailable" rather than fail fusion
         logger.warning("gnomAD lookup failed during fusion: %s", e)
-        return None
+        return UNAVAILABLE
 
 
 def _observation_from_variant(target: dict | None) -> dict[str, Any]:
@@ -92,32 +125,34 @@ async def clinical_context(
 
     Concurrent ClinVar + gnomAD lookups, shaped like the ``clinvar`` and
     ``population_frequency`` blocks of :func:`assemble_evidence`. Used by the
-    curation tool's optional clinical bridge. Degrades to ``None`` blocks when a
-    source has no record or errors.
+    curation tool's optional clinical bridge. A block is ``None`` for a genuine
+    not-found and ``{"status": "unavailable"}`` when the source's lookup errored.
     """
     clinvar_result, gnomad_result = await asyncio.gather(
         _lookup_clinvar_safe(config, chrom, pos, ref, alt),
         _lookup_gnomad_safe(config, chrom, pos, ref, alt),
     )
 
-    clinvar_block: dict[str, Any] | None = None
-    if clinvar_result is not None:
-        clinvar_block = {
-            "clinical_significance": clinvar_result.clinical_significance,
-            "review_status": clinvar_result.review_status,
-            "stars": clinvar_result.stars,
-            "conditions": clinvar_result.conditions,
-        }
+    clinvar_block = _external_block(
+        clinvar_result,
+        lambda r: {
+            "clinical_significance": r.clinical_significance,
+            "review_status": r.review_status,
+            "stars": r.stars,
+            "conditions": r.conditions,
+        },
+    )
 
-    pop_block: dict[str, Any] | None = None
-    if gnomad_result is not None:
-        max_af, max_pop = _max_population_af(gnomad_result)
-        pop_block = {
-            "global_af": gnomad_result.global_af,
+    def _pop(r: Any) -> dict[str, Any]:
+        max_af, max_pop = _max_population_af(r)
+        return {
+            "global_af": r.global_af,
             "max_pop_af": max_af,
             "max_pop": max_pop,
-            "homozygote_count": gnomad_result.homozygote_count,
+            "homozygote_count": r.homozygote_count,
         }
+
+    pop_block = _external_block(gnomad_result, _pop)
 
     return {"clinvar": clinvar_block, "population_frequency": pop_block}
 
@@ -146,7 +181,9 @@ async def assemble_evidence(
     Returns:
         A dict with ``variant``, ``observation``, ``clinvar``, and
         ``population_frequency`` (and ``gene_context`` when ``gene`` is given).
-        External blocks are ``None`` when the variant is absent from that source.
+        External blocks are ``None`` for a genuine not-found and
+        ``{"status": "unavailable"}`` when that source's lookup errored (so absence is
+        never confused with a failed fetch).
     """
     from ..core.tools import _fetch_region_with_timeout
 
@@ -177,28 +214,30 @@ async def assemble_evidence(
 
     clinvar_result, gnomad_result = await asyncio.gather(clinvar_coro, gnomad_coro)
 
-    clinvar_block: dict[str, Any] | None = None
-    if clinvar_result is not None:
-        clinvar_block = {
-            "clinical_significance": clinvar_result.clinical_significance,
-            "review_status": clinvar_result.review_status,
-            "stars": clinvar_result.stars,
-            "conditions": clinvar_result.conditions,
-            "last_evaluated": clinvar_result.last_evaluated,
-            "gene": clinvar_result.gene,
-        }
+    clinvar_block = _external_block(
+        clinvar_result,
+        lambda r: {
+            "clinical_significance": r.clinical_significance,
+            "review_status": r.review_status,
+            "stars": r.stars,
+            "conditions": r.conditions,
+            "last_evaluated": r.last_evaluated,
+            "gene": r.gene,
+        },
+    )
 
-    pop_block: dict[str, Any] | None = None
-    if gnomad_result is not None:
-        max_af, max_pop = _max_population_af(gnomad_result)
-        pop_block = {
-            "global_af": gnomad_result.global_af,
+    def _pop(r: Any) -> dict[str, Any]:
+        max_af, max_pop = _max_population_af(r)
+        return {
+            "global_af": r.global_af,
             "max_pop_af": max_af,
             "max_pop": max_pop,
-            "homozygote_count": gnomad_result.homozygote_count,
-            "filters": gnomad_result.filters,
-            "source": gnomad_result.source,
+            "homozygote_count": r.homozygote_count,
+            "filters": r.filters,
+            "source": r.source,
         }
+
+    pop_block = _external_block(gnomad_result, _pop)
 
     evidence: dict[str, Any] = {
         "variant": {

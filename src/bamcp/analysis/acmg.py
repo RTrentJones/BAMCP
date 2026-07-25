@@ -46,6 +46,18 @@ CLASSIFICATION_OPTIONS = [
 
 def _frequency_criteria(pop: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Population-frequency criteria (PM2/BS1/BA1), with the observed AF attached."""
+    if pop is not None and pop.get("status") == "unavailable":
+        # The gnomAD lookup ERRORED — absence is unknown. Emitting PM2 "absence supports
+        # rarity" here would turn a network blip into pathogenic-leaning evidence, the exact
+        # circular trap this guards against.
+        return [
+            {
+                "code": "PM2_supporting",
+                "description": "Absent from / extremely rare in population databases.",
+                "evaluate_with": "gnomAD is UNAVAILABLE (the lookup failed), NOT confirmed "
+                "absent. Do NOT apply PM2 on absence — retry the lookup before using this line.",
+            }
+        ]
     if not pop:
         return [
             {
@@ -81,13 +93,24 @@ def _frequency_criteria(pop: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 def _clinical_criteria(clinvar: dict[str, Any] | None) -> list[dict[str, Any]]:
     """ClinVar-derived criteria (PS1/PP5/BP6), gated on review quality."""
+    if clinvar is not None and clinvar.get("status") == "unavailable":
+        # Lookup ERRORED — not an authoritative "no assertion". Don't let a failed fetch
+        # read as benign/absent evidence.
+        return [
+            {
+                "code": "PS1/PP5",
+                "description": "Established pathogenic assertion for this variant.",
+                "evaluate_with": "ClinVar is UNAVAILABLE (the lookup failed) — this evidence "
+                "line could not be retrieved. Retry before use; do not infer anything from it.",
+            }
+        ]
     if not clinvar:
         return [
             {
                 "code": "PS1/PP5",
                 "description": "Established pathogenic assertion for this variant.",
-                "evaluate_with": "No ClinVar record was returned; this line of evidence is "
-                "unavailable. Do not invent a ClinVar classification.",
+                "evaluate_with": "No ClinVar record was found for this variant (genuinely not "
+                "in ClinVar). Do not invent a ClinVar classification.",
             }
         ]
     sig = clinvar.get("clinical_significance", "")
@@ -217,7 +240,9 @@ def _format_classify_text(evidence: dict[str, Any], scaffold: dict[str, Any]) ->
 
     lines.append("")
     lines.append("CLINVAR:")
-    if cln:
+    if cln and cln.get("status") == "unavailable":
+        lines.append("  UNAVAILABLE — lookup failed (not a confirmed absence).")
+    elif cln:
         lines.append(
             f"  {cln.get('clinical_significance')} ({cln.get('stars')}-star; "
             f"{cln.get('review_status')})"
@@ -227,7 +252,9 @@ def _format_classify_text(evidence: dict[str, Any], scaffold: dict[str, Any]) ->
 
     lines.append("")
     lines.append("GNOMAD:")
-    if pop:
+    if pop and pop.get("status") == "unavailable":
+        lines.append("  UNAVAILABLE — lookup failed (not confirmed absent; do not infer rarity).")
+    elif pop:
         lines.append(f"  global_af={pop.get('global_af')} max_pop_af={pop.get('max_pop_af')}")
     else:
         lines.append("  No gnomAD record found.")

@@ -108,7 +108,11 @@ class GnomadClient:
             alt: Alternate allele.
 
         Returns:
-            GnomadResult if found, None otherwise.
+            GnomadResult if found, None for a genuine not-found.
+
+        Raises:
+            GnomadQueryError: on a transient GraphQL error — do NOT treat as absence.
+                Not cached, so the next lookup retries.
         """
         cache_key = (chrom, pos, ref, alt)
 
@@ -124,13 +128,11 @@ class GnomadClient:
             if cached is not MISS:
                 return cached  # type: ignore[return-value]
 
-            try:
-                result = await self._do_lookup(chrom, pos, ref, alt)
-            except GnomadQueryError as e:
-                # Transient GraphQL error — return not-found for this call but DON'T cache it,
-                # so the next lookup retries instead of replaying the error for the TTL.
-                logger.debug("%s", e)
-                return None
+            # A transient GraphQL error propagates (GnomadQueryError) so the caller can report
+            # it as "unavailable" — distinct from a genuine not-found (None). It is raised BEFORE
+            # cache.set, so it is never cached: the next lookup retries instead of replaying the
+            # error as absence for the TTL.
+            result = await self._do_lookup(chrom, pos, ref, alt)
             await self._cache.set(cache_key, result)
             return result
 

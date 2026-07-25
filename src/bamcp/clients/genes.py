@@ -23,6 +23,25 @@ class GeneInfo:
     start: int
     end: int
     strand: str
+    # The genome build the returned coordinates are actually in. Callers MUST reconcile this
+    # against the build of the BAM they intend to view — a GRCh38 locus in a GRCh37 BAM is
+    # ~0.5-2 Mb off the real gene, silently.
+    build: str = "unknown"
+
+
+# NCBI's human primary assembly is GCF_000001405.<minor>: GRCh37 is .13-.25, GRCh38 is .26+.
+# (The old check `"GCF_000001405" in assembly` for GRCh38 also matched GRCh37's .25.)
+def _build_from_assembly(assembly: str) -> str:
+    """Map an NCBI assembly accession (e.g. GCF_000001405.40) to a genome build."""
+    if not assembly.startswith("GCF_000001405."):
+        return "unknown"
+    try:
+        minor = int(assembly.rsplit(".", 1)[-1])
+    except ValueError:
+        return "unknown"
+    if minor <= 25:
+        return "GRCh37"
+    return "GRCh38"
 
 
 class GeneClient:
@@ -49,15 +68,20 @@ class GeneClient:
         self.genome_build = genome_build
         self._client = httpx.AsyncClient(timeout=timeout)
 
-    async def search(self, symbol: str) -> GeneInfo | None:
+    async def search(self, symbol: str, build: str | None = None) -> GeneInfo | None:
         """Look up gene coordinates by symbol.
 
         Args:
             symbol: Gene symbol (e.g., "BRCA1", "TP53").
+            build: Target genome build for the coordinates (overrides the client default).
 
         Returns:
-            GeneInfo with coordinates, or None if not found.
+            GeneInfo with coordinates (``.build`` states which build they are in), or None if
+            not found. If no assembly matches the requested build, coordinates for whatever
+            assembly NCBI returned are given and ``.build`` reflects that — never silently the
+            requested build.
         """
+        target_build = build or self.genome_build
         # Step 1: Search for gene ID
         search_params: dict = {
             "db": "gene",
@@ -118,21 +142,21 @@ class GeneClient:
         if not genomic_info:
             return None
 
-        # Find the coordinate set for our target build
+        # Find the coordinate set for the target build (by assembly accession, not a loose
+        # substring). Track the build the chosen coordinates are ACTUALLY in.
         coords = None
+        actual_build = "unknown"
         for info in genomic_info:
-            # Check if this matches our genome build
-            assembly = info.get("assemblyaccver", "")
-            if self.genome_build == "GRCh38" and "GCF_000001405" in assembly:
+            if _build_from_assembly(info.get("assemblyaccver", "")) == target_build:
                 coords = info
-                break
-            if self.genome_build == "GRCh37" and "GCF_000001405.25" in assembly:
-                coords = info
+                actual_build = target_build
                 break
 
-        # Fall back to first available if no exact match
+        # No assembly matched the requested build → fall back to the first entry, but report the
+        # build it is genuinely in (never claim it is the requested build).
         if coords is None and genomic_info:
             coords = genomic_info[0]
+            actual_build = _build_from_assembly(coords.get("assemblyaccver", ""))
 
         if coords is None:
             return None
@@ -159,6 +183,7 @@ class GeneClient:
             start=start,
             end=end,
             strand=strand,
+            build=actual_build,
         )
 
     def _accession_to_chrom(self, accession: str) -> str:

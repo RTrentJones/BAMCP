@@ -2444,3 +2444,104 @@ class TestMediumRoadmapCoverage:
         rebuilt = get_services(cfg)
         assert rebuilt is not stale_services  # guard rejected the stale entry
         assert rebuilt.config is cfg
+
+
+class TestSearchGeneBuildResolution:
+    """Build resolution for search_gene: auto-detect from BAM, override, mismatch warnings."""
+
+    def _client(self, monkeypatch, returns_build):
+        """Patch the gene client to record the build it's queried with and return GeneInfo."""
+        import bamcp.core.tools as tm
+        from bamcp.clients.genes import GeneInfo
+
+        captured: dict = {}
+
+        class _Client:
+            async def search(self, symbol, build=None):
+                captured["queried_build"] = build
+                return GeneInfo("BRCA1", "BRCA1", "chr17", 100, 200, "+", build=returns_build)
+
+        monkeypatch.setattr(tm, "get_gene_client", lambda config: _Client())
+        return captured
+
+    def _detect(self, monkeypatch, build):
+        import bamcp.core.tools as tm
+
+        async def _fake(file_path, config):
+            return {"build": build, "confidence": "high", "evidence": []}
+
+        monkeypatch.setattr(tm, "_detect_bam_build", _fake)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_auto_detect_from_bam(self, monkeypatch):
+        import json as _json
+
+        from bamcp.core.tools import handle_search_gene
+
+        self._detect(monkeypatch, "GRCh37")
+        captured = self._client(monkeypatch, returns_build="GRCh37")
+        r = await handle_search_gene({"symbol": "BRCA1", "file_path": "sample.bam"}, BAMCPConfig())
+        p = _json.loads(r["content"][0]["text"])
+        assert captured["queried_build"] == "GRCh37"  # queried NCBI with the detected build
+        assert p["genome_build"] == "GRCh37"
+        assert p["build_source"] == "detected-from-bam"
+        assert p["bam_build"] == "GRCh37"
+        assert "warning" not in p
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_explicit_override_warns_on_bam_mismatch(self, monkeypatch):
+        import json as _json
+
+        from bamcp.core.tools import handle_search_gene
+
+        self._detect(monkeypatch, "GRCh37")
+        captured = self._client(monkeypatch, returns_build="GRCh38")
+        r = await handle_search_gene(
+            {"symbol": "BRCA1", "file_path": "sample.bam", "build": "GRCh38"}, BAMCPConfig()
+        )
+        p = _json.loads(r["content"][0]["text"])
+        assert captured["queried_build"] == "GRCh38"  # explicit override wins
+        assert p["build_source"] == "explicit"
+        assert "requested GRCh38 but the BAM is GRCh37" in p["warning"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_critical_mismatch_when_returned_build_differs(self, monkeypatch):
+        import json as _json
+
+        from bamcp.core.tools import handle_search_gene
+
+        # BAM is GRCh37 but NCBI only had GRCh38 coords → the loud MISMATCH warning.
+        self._detect(monkeypatch, "GRCh37")
+        self._client(monkeypatch, returns_build="GRCh38")
+        r = await handle_search_gene({"symbol": "BRCA1", "file_path": "sample.bam"}, BAMCPConfig())
+        p = _json.loads(r["content"][0]["text"])
+        assert "MISMATCH" in p["warning"]
+        assert "GRCh37" in p["warning"] and "GRCh38" in p["warning"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_no_filepath_uses_server_default_with_note(self, monkeypatch):
+        import json as _json
+
+        from bamcp.core.tools import handle_search_gene
+
+        captured = self._client(monkeypatch, returns_build="GRCh38")
+        r = await handle_search_gene({"symbol": "BRCA1"}, BAMCPConfig())  # GRCh38 default
+        p = _json.loads(r["content"][0]["text"])
+        assert captured["queried_build"] == "GRCh38"
+        assert p["build_source"] == "server-default"
+        assert "no file_path" in p["warning"] and "list_contigs" in p["warning"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_unrecognized_build_errors(self, monkeypatch):
+        import json as _json
+
+        from bamcp.core.tools import handle_search_gene
+
+        r = await handle_search_gene({"symbol": "BRCA1", "build": "hg99"}, BAMCPConfig())
+        p = _json.loads(r["content"][0]["text"])
+        assert "error" in p and "hg99" in p["error"]

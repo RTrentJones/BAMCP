@@ -276,8 +276,15 @@ Returns coverage statistics without visualization.
 | `lookup_clinvar` | Look up variant in ClinVar | `chrom`, `pos`, `ref`, `alt` | — |
 | `lookup_gnomad` | Look up variant in gnomAD | `chrom`, `pos`, `ref`, `alt` | — |
 | `get_variant_curation_summary` | Detailed curation with artifact risk | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference` |
-| `search_gene` | Search gene by symbol (NCBI) | `symbol` | — |
+| `search_gene` | Search gene by symbol (NCBI); returns build-consistent coordinates | `symbol` | `file_path`, `build` |
 | `cleanup_cache` | Clean up session's index cache | — | — |
+
+> **Genome build & `search_gene`.** Gene coordinates are build-specific — a GRCh38 locus in a
+> GRCh37 BAM is silently ~0.5–2 Mb off the real gene. Pass the BAM's **`file_path`** to
+> `search_gene` and it auto-detects the build from the header and returns matching coordinates
+> (or set **`build`** to override). The response states the coordinates' `genome_build` and warns
+> on any mismatch. Without a `file_path`, coordinates use the server default (`BAMCP_GENOME_BUILD`,
+> default GRCh38) — confirm your BAM's build with `list_contigs` first.
 
 #### VCF as the primary variant source
 

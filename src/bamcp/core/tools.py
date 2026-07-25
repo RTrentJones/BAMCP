@@ -269,6 +269,49 @@ _LLM_COORDINATE_SYSTEM = "1-based-inclusive"
 # Where get_variants sources its variants from (see handle_get_variants).
 _VARIANT_SOURCES = ("auto", "vcf", "bamcp")
 
+# Self-describing output: every variant-producing response echoes the thresholds it
+# actually applied, so a variant's *absence* is interpretable (filtered out vs. truly
+# not present) instead of silent. This closes the same "silent behavior misleads the
+# caller" gap as the genome-build fix — an aggressive min_vaf/min_depth can drop a real
+# variant and, without this, the empty result reads as a confident reference call.
+_FILTER_ABSENCE_NOTE = (
+    "A candidate variant's absence at a site may reflect these applied filters rather "
+    "than a true reference call; loosen them (e.g. min_vaf/min_depth) to see more."
+)
+
+
+def _applied_filters(
+    config: BAMCPConfig, args: dict[str, Any], *, include_max_reads: bool
+) -> dict[str, Any]:
+    """The read/variant thresholds actually applied to this response.
+
+    ``min_vaf``/``min_depth`` honor per-call overrides; ``min_mapq``/``min_baseq`` are
+    operator config. ``max_reads`` gates how many reads are *displayed* (viewer tools),
+    so it's included only where reads are returned — not for readless variant calls.
+    """
+    filters: dict[str, Any] = {
+        "min_vaf": args.get("min_vaf", config.min_vaf),
+        "min_depth": args.get("min_depth", config.min_depth),
+        "min_mapq": config.min_mapq,
+        "min_baseq": config.min_baseq,
+    }
+    if include_max_reads:
+        filters["max_reads"] = config.max_reads
+    return filters
+
+
+def _format_filters_line(filters: dict[str, Any]) -> str:
+    """Compact human-readable rendering of :func:`_applied_filters` for text summaries."""
+    parts = [
+        f"VAF≥{filters['min_vaf']}",
+        f"depth≥{filters['min_depth']}",
+        f"MAPQ≥{filters['min_mapq']}",
+        f"baseQ≥{filters['min_baseq']}",
+    ]
+    if "max_reads" in filters:
+        parts.append(f"≤{filters['max_reads']} reads shown")
+    return ", ".join(parts)
+
 
 def _cache_key(
     file_path: str,
@@ -863,6 +906,8 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         "variant_source": variant_source,
         "coordinate_system": _LLM_COORDINATE_SYSTEM,
         "variant_type": "candidate",
+        "applied_filters": _applied_filters(config, args, include_max_reads=False),
+        "filter_note": _FILTER_ABSENCE_NOTE,
         "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
     }
 
@@ -1089,9 +1134,12 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     data = await _fetch_region_with_timeout(
         file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
     )
+    filters = _applied_filters(config, args, include_max_reads=True)
     payload = serialize_region_data(data)
     payload["coordinate_system"] = _INTERNAL_COORDINATE_SYSTEM
     payload["variant_type"] = "candidate"
+    payload["applied_filters"] = filters
+    payload["filter_note"] = _FILTER_ABSENCE_NOTE
     payload["disclaimer"] = _CANDIDATE_VARIANT_DISCLAIMER
     payload["file_path"] = file_path  # For client-side re-queries
     # Preserve the full data-source context so the viewer's pan/zoom/detail refetches carry it.
@@ -1105,12 +1153,12 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     if effective_vcf is not None:
         payload["vcf_path"] = effective_vcf
 
-    # Return summary text in content (for LLM context), full data only in _meta
+    # Return summary text in content (for LLM context), full data only in _meta.
     reads_count = len(data.reads)
     variants_count = len(data.variants)
     summary = (
         f"Jumped to {data.contig}:{position}: {reads_count} reads, "
-        f"{variants_count} candidate variants"
+        f"{variants_count} candidate variants (filters: {_format_filters_line(filters)})"
     )
     return {
         "content": [{"type": "text", "text": summary}],
@@ -1144,9 +1192,12 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     data = await _fetch_region_with_timeout(
         file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
     )
+    filters = _applied_filters(config, args, include_max_reads=True)
     payload = serialize_region_data(data)
     payload["coordinate_system"] = _INTERNAL_COORDINATE_SYSTEM
     payload["variant_type"] = "candidate"
+    payload["applied_filters"] = filters
+    payload["filter_note"] = _FILTER_ABSENCE_NOTE
     payload["disclaimer"] = _CANDIDATE_VARIANT_DISCLAIMER
     payload["file_path"] = file_path  # For client-side re-queries
     # Preserve the full data-source context so the viewer's pan/zoom/detail refetches carry it.
@@ -1160,12 +1211,14 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     if effective_vcf is not None:
         payload["vcf_path"] = effective_vcf
 
-    # Return summary text in content (for LLM context), full data only in _meta
+    # Return summary text in content (for LLM context), full data only in _meta.
+    # Echo the applied filters here too — the LLM reasons over this text, not _meta.
     reads_count = len(data.reads)
     variants_count = len(data.variants)
     summary = (
         f"Region {data.contig}:{data.start}-{data.end}: "
-        f"{reads_count} reads, {variants_count} candidate variants"
+        f"{reads_count} reads, {variants_count} candidate variants "
+        f"(filters: {_format_filters_line(filters)})"
     )
     return {
         "content": [{"type": "text", "text": summary}],
@@ -1204,11 +1257,14 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     mean_cov = round(sum(coverage) / len(coverage), 2) if coverage else 0
     max_cov = max(coverage) if coverage else 0
 
+    filters = _applied_filters(config, args, include_max_reads=True)
     summary_lines = [
         f"Region: {data.contig}:{data.start}-{data.end}",
         f"Reads: {len(data.reads)}",
         f"Coverage: mean={mean_cov}x, max={max_cov}x",
         f"Candidate variants detected: {len(data.variants)}",
+        f"Filters applied: {_format_filters_line(filters)}",
+        _FILTER_ABSENCE_NOTE,
         f"Coordinate system: {_LLM_COORDINATE_SYSTEM}",
         _CANDIDATE_VARIANT_DISCLAIMER,
     ]
@@ -1472,6 +1528,8 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
                         "count": len(variants),
                         "coordinate_system": _LLM_COORDINATE_SYSTEM,
                         "variant_type": "candidate",
+                        "applied_filters": _applied_filters(config, args, include_max_reads=False),
+                        "filter_note": _FILTER_ABSENCE_NOTE,
                         "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
                     }
                 ),

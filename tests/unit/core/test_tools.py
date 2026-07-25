@@ -16,6 +16,9 @@ from bamcp.constants import (
 from bamcp.core.parsers import AlignedRead, RegionData
 from bamcp.core.serialization import serialize_region_data
 from bamcp.core.tools import (
+    _FILTER_ABSENCE_NOTE,
+    _applied_filters,
+    _format_filters_line,
     _format_genotypes,
     _format_variant_line,
     close_external_clients,
@@ -2545,3 +2548,129 @@ class TestSearchGeneBuildResolution:
         r = await handle_search_gene({"symbol": "BRCA1", "build": "hg99"}, BAMCPConfig())
         p = _json.loads(r["content"][0]["text"])
         assert "error" in p and "hg99" in p["error"]
+
+
+class TestAppliedFiltersHelpers:
+    """Unit tests for the self-describing filter helpers (pure, no I/O)."""
+
+    @pytest.mark.unit
+    def test_applied_filters_readless_omits_max_reads(self):
+        cfg = BAMCPConfig()
+        f = _applied_filters(cfg, {}, include_max_reads=False)
+        assert f == {
+            "min_vaf": cfg.min_vaf,
+            "min_depth": cfg.min_depth,
+            "min_mapq": cfg.min_mapq,
+            "min_baseq": cfg.min_baseq,
+        }
+        assert "max_reads" not in f
+
+    @pytest.mark.unit
+    def test_applied_filters_reads_include_max_reads(self):
+        cfg = BAMCPConfig()
+        f = _applied_filters(cfg, {}, include_max_reads=True)
+        assert f["max_reads"] == cfg.max_reads
+
+    @pytest.mark.unit
+    def test_applied_filters_honors_per_call_overrides(self):
+        cfg = BAMCPConfig()
+        f = _applied_filters(cfg, {"min_vaf": 0.42, "min_depth": 7}, include_max_reads=False)
+        assert f["min_vaf"] == 0.42
+        assert f["min_depth"] == 7
+        # min_mapq/min_baseq are operator config, not per-call — unchanged.
+        assert f["min_mapq"] == cfg.min_mapq
+
+    @pytest.mark.unit
+    def test_format_filters_line_shows_thresholds(self):
+        line = _format_filters_line(
+            {"min_vaf": 0.1, "min_depth": 5, "min_mapq": 20, "min_baseq": 15}
+        )
+        assert "VAF≥0.1" in line
+        assert "depth≥5" in line
+        assert "MAPQ≥20" in line
+        assert "reads shown" not in line  # no max_reads key → not mentioned
+
+    @pytest.mark.unit
+    def test_format_filters_line_includes_max_reads_when_present(self):
+        line = _format_filters_line(
+            {"min_vaf": 0.1, "min_depth": 5, "min_mapq": 20, "min_baseq": 15, "max_reads": 500}
+        )
+        assert "≤500 reads shown" in line
+
+
+class TestSelfDescribingFilters:
+    """Every variant-producing response echoes the filters it applied (Phase 1)."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_get_variants_payload_has_applied_filters(self, small_bam_path, config):
+        result = await handle_get_variants(
+            {"file_path": small_bam_path, "region": "chr1:90-200"}, config
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["applied_filters"]["min_vaf"] == config.min_vaf
+        assert payload["applied_filters"]["min_depth"] == config.min_depth
+        assert payload["applied_filters"]["min_mapq"] == config.min_mapq
+        # Readless call — max_reads does not gate it, so it must not be advertised.
+        assert "max_reads" not in payload["applied_filters"]
+        assert payload["filter_note"] == _FILTER_ABSENCE_NOTE
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_get_variants_applied_filters_reflect_overrides(self, small_bam_path, config):
+        result = await handle_get_variants(
+            {
+                "file_path": small_bam_path,
+                "region": "chr1:90-200",
+                "min_vaf": 0.33,
+                "min_depth": 9,
+            },
+            config,
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["applied_filters"]["min_vaf"] == 0.33
+        assert payload["applied_filters"]["min_depth"] == 9
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_visualize_region_payload_and_text(self, small_bam_path, config):
+        result = await handle_visualize_region(
+            {"file_path": small_bam_path, "region": "chr1:90-200"}, config
+        )
+        payload = result["_meta"]["ui/init"]
+        # Viewer tool shows reads → max_reads is a real filter here.
+        assert payload["applied_filters"]["max_reads"] == config.max_reads
+        assert payload["filter_note"] == _FILTER_ABSENCE_NOTE
+        # The LLM reasons over the content text, not _meta — filters must appear there too.
+        assert "filters:" in result["content"][0]["text"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_jump_to_payload_has_applied_filters(self, small_bam_path, config):
+        result = await handle_jump_to({"file_path": small_bam_path, "position": 150}, config)
+        payload = result["_meta"]["ui/init"]
+        assert payload["applied_filters"]["max_reads"] == config.max_reads
+        assert "filters:" in result["content"][0]["text"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_region_summary_text_states_filters(self, small_bam_path, config):
+        result = await handle_get_region_summary(
+            {"file_path": small_bam_path, "region": "chr1:90-200"}, config
+        )
+        text = result["content"][0]["text"]
+        assert "Filters applied:" in text
+        assert _FILTER_ABSENCE_NOTE in text
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_scan_variants_payload_has_applied_filters(self, small_bam_path, config_with_ref):
+        result = await handle_scan_variants(
+            {"file_path": small_bam_path, "contig": "chr1"}, config_with_ref
+        )
+        payload = json.loads(result["content"][0]["text"])
+        # Guard against the reference-required early return.
+        assert "error" not in payload
+        assert payload["applied_filters"]["min_vaf"] == config_with_ref.min_vaf
+        assert "max_reads" not in payload["applied_filters"]
+        assert payload["filter_note"] == _FILTER_ABSENCE_NOTE

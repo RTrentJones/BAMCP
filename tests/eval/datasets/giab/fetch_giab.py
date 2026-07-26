@@ -55,15 +55,40 @@ _UCSC_CHROM = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/chromosomes/{chro
 _HERE = Path(__file__).resolve().parent
 _BASES = ("A", "C", "G", "T")
 
+# Q30, a realistic Illumina per-base substitution rate. This is the single
+# source of truth for the default: the committed manifest and the numbers in
+# GIAB_RESULTS.md were produced at this rate, and `make giab-benchmark` does not
+# override it, so a divergent default would silently regenerate a noisier BAM
+# than the published results describe.
+_DEFAULT_ERROR_RATE = 0.001
+
 
 @dataclass(frozen=True)
 class TruthSNV:
-    """A single real GIAB truth SNV, 0-based (matching BAMCP's coordinates)."""
+    """A single real GIAB truth SNV.
 
-    pos0: int  # 0-based reference position
+    Stored 0-based because that is the coordinate space the read simulation
+    works in (pysam's ``reference_start``, and the per-base indexing in
+    ``simulate_reads``). It is **not** the coordinate space the manifest is
+    written in — see :attr:`pos1`.
+    """
+
+    pos0: int  # 0-based reference position (simulation space)
     ref: str
     alt: str
     zygosity: str  # "het" or "hom"
+
+    @property
+    def pos1(self) -> int:
+        """1-based position, matching what ``get_variants`` reports.
+
+        The truth-set scorer compares manifest positions against tool output
+        with an exact ``(chrom, pos, ref, alt)`` match and no tolerance, and
+        ``core/tools.py::_one_based`` converts detector positions to 1-based at
+        the LLM-facing boundary. So the manifest must be 1-based; anything else
+        silently scores recall 0.0 rather than failing loudly.
+        """
+        return self.pos0 + 1
 
 
 # ── Downloads (curl: it already works through the sandbox proxy) ───────────
@@ -114,12 +139,18 @@ def _in_intervals(pos: int, starts: list[int], intervals: list[tuple[int, int]])
 
 def fetch_truth_snvs(
     chrom: str, start: int, end: int, intervals: list[tuple[int, int]]
-) -> list[TruthSNV]:
-    """Stream the GIAB truth VCF and return PASS biallelic SNVs inside the BED."""
+) -> tuple[list[TruthSNV], int]:
+    """Stream the GIAB truth VCF for PASS biallelic SNVs inside the BED.
+
+    Returns ``(snvs, skipped_indels)``. The indel count is reported rather than
+    silently dropped: an unstated skip would make the truth set look complete
+    when it is SNV-only.
+    """
     import pysam  # local import: pysam is heavy and only needed here
 
     starts = [iv[0] for iv in intervals]
     out: list[TruthSNV] = []
+    skipped_indels = 0
     vf = pysam.VariantFile(TRUTH_VCF)
     try:
         for rec in vf.fetch(chrom, start, end):
@@ -127,10 +158,15 @@ def fetch_truth_snvs(
                 continue
             ref, alt = rec.ref, rec.alts[0]
             if len(ref) != 1 or len(alt) != 1:
-                continue  # SNVs only — indel read-simulation is future work
+                # SNVs only — indel read-simulation is future work.
+                if _in_intervals(rec.pos - 1, starts, intervals):
+                    skipped_indels += 1
+                continue
             if ref.upper() not in _BASES or alt.upper() not in _BASES:
                 continue
-            pos0 = rec.pos - 1  # VCF is 1-based; BAMCP reports 0-based
+            # VCF is 1-based; convert to the 0-based space the simulation uses.
+            # The manifest converts back via TruthSNV.pos1.
+            pos0 = rec.pos - 1
             if not _in_intervals(pos0, starts, intervals):
                 continue
             gt = rec.samples[0].get("GT") if rec.samples else None
@@ -138,7 +174,7 @@ def fetch_truth_snvs(
             out.append(TruthSNV(pos0=pos0, ref=ref.upper(), alt=alt.upper(), zygosity=zygosity))
     finally:
         vf.close()
-    return out
+    return out, skipped_indels
 
 
 # ── Reference ──────────────────────────────────────────────────────────────
@@ -310,16 +346,21 @@ def write_manifest(
         "variant_sites:",
     ]
     for t in truth:
+        # pos1: the scorer matches manifest positions against get_variants output,
+        # which is 1-based (core/tools.py::_one_based).
         lines.append(
-            f"  - {{chrom: {chrom}, pos: {t.pos0}, ref: {t.ref}, alt: {t.alt}, "
+            f"  - {{chrom: {chrom}, pos: {t.pos1}, ref: {t.ref}, alt: {t.alt}, "
             f"category: {t.zygosity}}}"
         )
     lines.append("")
     lines.append("negative_regions:")
     if negatives:
         for n_start, n_end in negatives:
+            # The note is quoted: an unquoted comma would make YAML parse the
+            # tail as a second key ("no truth SNV": null) inside the mapping.
             lines.append(
-                f"  - {{region: '{chrom}:{n_start}-{n_end}', note: high-confidence, no truth SNV}}"
+                f"  - {{region: '{chrom}:{n_start}-{n_end}', "
+                f"note: 'high-confidence, no truth SNV'}}"
             )
     else:
         lines.append("  []")
@@ -342,7 +383,7 @@ def generate(
     *,
     depth: int = 30,
     read_len: int = 100,
-    error_rate: float = 0.005,
+    error_rate: float = _DEFAULT_ERROR_RATE,
     seed: int = 1,
     data_dir: Path | None = None,
 ) -> dict[str, object]:
@@ -358,9 +399,11 @@ def generate(
         raise SystemExit(f"No high-confidence intervals in {region}")
 
     print("2/5 truth SNVs (streaming VCF)")
-    truth = fetch_truth_snvs(chrom, start, end, intervals)
+    truth, skipped_indels = fetch_truth_snvs(chrom, start, end, intervals)
     if not truth:
         raise SystemExit(f"No truth SNVs in {region}")
+    if skipped_indels:
+        print(f"  note: {skipped_indels} in-BED indel truth records skipped (SNV-only)")
 
     print("3/5 reference")
     ref = ensure_reference(chrom, data_dir)
@@ -398,6 +441,7 @@ def generate(
     summary = {
         "region": region,
         "truth_snvs": len(truth),
+        "skipped_indels": skipped_indels,
         "het": sum(1 for t in truth if t.zygosity == "het"),
         "hom": sum(1 for t in truth if t.zygosity == "hom"),
         "negative_regions": len(negatives),
@@ -414,7 +458,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--region", default="chr20:1000000-1060000")
     p.add_argument("--depth", type=int, default=30)
     p.add_argument("--read-len", type=int, default=100)
-    p.add_argument("--error-rate", type=float, default=0.005)
+    p.add_argument("--error-rate", type=float, default=_DEFAULT_ERROR_RATE)
     p.add_argument("--seed", type=int, default=1)
     args = p.parse_args(argv)
     generate(

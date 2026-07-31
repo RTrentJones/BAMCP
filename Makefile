@@ -61,8 +61,11 @@ eval-smoke:
 
 # Real GIAB benchmark (network-gated, not in CI). Builds the slice then scores
 # it at a realistic calling operating point. See tests/eval/datasets/giab/.
+# Every generation parameter is explicit here, so this target and the committed
+# manifest cannot drift apart the way the error rate silently did.
 giab-benchmark:
-	python tests/eval/datasets/giab/fetch_giab.py --region chr20:1000000-1060000
+	python tests/eval/datasets/giab/fetch_giab.py --region chr20:1000000-1060000 \
+		--depth 30 --read-len 100 --error-rate 0.001 --seed 1
 	python -m bamcp.eval.truthset --manifest tests/eval/datasets/giab/manifest.yaml \
 		--min-vaf 0.2 --min-depth 8 --min-mapq 20 --max-reads 50000 \
 		--min-recall 0.90 --min-precision 0.90

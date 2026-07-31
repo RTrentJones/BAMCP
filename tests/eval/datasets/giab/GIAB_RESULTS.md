@@ -6,14 +6,46 @@ counterpart to the deterministic `synthetic_v1` gate: `synthetic_v1` proves the
 harness and guards regressions on every PR; this shows the caller's behavior on
 authentic variant coordinates, alleles, and zygosity.
 
-Reproduce:
+Reproduce (or just `make giab-benchmark`, which pins every generation
+parameter):
 
 ```bash
-python tests/eval/datasets/giab/fetch_giab.py --region chr20:1000000-1060000 --depth 30 --error-rate 0.001
+python tests/eval/datasets/giab/fetch_giab.py --region chr20:1000000-1060000 \
+  --depth 30 --read-len 100 --error-rate 0.001 --seed 1
 python -m bamcp.eval.truthset --manifest tests/eval/datasets/giab/manifest.yaml \
   --min-vaf 0.2 --min-depth 8 --min-mapq 20 --max-reads 50000 \
   --min-recall 0.90 --min-precision 0.90
 ```
+
+## Coordinate-basis correction (2026-07-26)
+
+**Every number below was unreproducible between #29 and this correction.** The
+numbers themselves were correct when first published — at that time both the
+manifest and `get_variants` reported 0-based positions, so they agreed. #29
+("report 1-based positions from the variant tools") moved the tool output to
+1-based and migrated `synthetic_v1`'s manifest, but not this dataset's. Because
+the scorer matches `(chrom, pos, ref, alt)` **exactly, with no tolerance**, the
+two sides then disagreed by one at every single site.
+
+The failure was silent in the worst way — it looked like a caller regression
+rather than a coordinate-space mismatch:
+
+```
+variant detection  P=0.000 R=0.000 F1=0.000  (tp=0 fp=66 fn=66)
+  missing:  chr20:1002294:G>A ...
+  spurious: chr20:1002295:G>A ...
+```
+
+Same 66 variants on both lists, one apart. The manifest is now regenerated
+1-based (`TruthSNV.pos1`), the results below reproduce exactly as originally
+published, and `test_manifest_positions_are_one_based` fails against the old
+writer so this cannot recur.
+
+Note the asymmetry that made this easy to get wrong, which still holds: BAMCP's
+region *strings* are 0-based half-open (`parse_region` hands `start`/`end`
+straight to pysam), while reported variant *positions* are 1-based. So
+`detection_region` and `negative_regions` in this manifest are correct as
+0-based; only `variant_sites[].pos` needed the shift.
 
 ## Dataset
 
@@ -24,6 +56,7 @@ python -m bamcp.eval.truthset --manifest tests/eval/datasets/giab/manifest.yaml 
 | Reference | UCSC hg38 chr20 |
 | Region | chr20:1,000,000–1,060,000 (60 kb) |
 | Truth SNVs (in high-conf BED) | 66 (59 hom, 7 het) |
+| Indel truth records in BED | 7 — skipped, SNV-only (reported by the generator) |
 | Reads | simulated, 30× coverage, 100 bp, base-error rate 0.001 (~Q30), seed 1 |
 
 **This is semi-synthetic over real biology.** The reference sequence and the
@@ -67,8 +100,10 @@ Be precise about what these numbers do and do not say:
   error profiles, mismapping in segmental duplications, reference bias, or
   alignment artifacts. Those require a real HG001 alignment (a ~300 GB file),
   which is out of scope for a portable, reproducible benchmark.
-- **SNVs only.** Indel read-simulation is not implemented; indel truth records
-  are skipped (and counted) rather than mis-simulated.
+- **SNVs only.** Indel read-simulation is not implemented, so the **7** indel
+  truth records inside this BED slice are skipped rather than mis-simulated.
+  The generator now prints that count — previously the skip was real but the
+  count was not, so the truth set read as complete when it is SNV-only.
 - Because reads are simulated cleanly, precision at point B is an *upper bound*
   — real reads would introduce failure modes this benchmark cannot see.
 

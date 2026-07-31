@@ -1,374 +1,256 @@
-# BAMCP
+# CLAUDE.md
 
-Interactive BAM/CRAM variant visualization MCP server with MCP Apps UI.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+BAMCP — interactive BAM/CRAM variant visualization MCP server with an MCP Apps UI.
 
 ## Architecture
 
+Entry point: `src/bamcp/__main__.py` — reads `BAMCPConfig.from_env()`, creates the FastMCP
+server, adds HTTP middleware, runs with the selected transport.
+
 ```
-FastMCP server (server.py)
-  ├── core/
-  │   ├── tools.py        — tool handler orchestration + cache helpers
-  │   ├── parsers.py      — pysam BAM/CRAM parsing, read extraction
-  │   ├── validation.py   — input validation, SSRF prevention
-  │   ├── serialization.py — RegionData → JSON serialization
-  │   ├── cache.py        — remote BAM index file cache
-  │   └── reference.py    — genome build detection
-  ├── analysis/
-  │   ├── evidence.py     — variant evidence, artifact risk scoring
-  │   └── curation.py     — curation summaries, recommendations
-  ├── clients/
-  │   ├── clinvar.py      — NCBI E-utilities API client
-  │   ├── gnomad.py       — gnomAD GraphQL API client
-  │   ├── genes.py        — NCBI gene search client
-  │   └── ttl_cache.py    — shared BoundedTTLCache utility
-  ├── middleware/
-  │   ├── auth.py         — OAuth 2.0 provider
-  │   ├── ratelimit.py    — sliding-window rate limiting
-  │   └── security.py     — security headers
-  ├── resources.py        — UI resource provider
-  ├── config.py           — all settings from env vars
-  └── constants.py        — shared constants
+src/bamcp/
+  server.py        — FastMCP setup, tool/resource registration, auth wiring
+  config.py        — BAMCPConfig dataclass with from_env()
+  constants.py     — shared defaults, thresholds, bins
+  tool_specs.py    — JSON-schema specs per tool (get_tool_spec)
+  resources.py     — get_viewer_html(): serves the bundled static/dist/viewer.html
+  core/
+    tools.py         — tool handlers + cache helpers
+    parsers.py       — fetch_region(): pysam parsing, reads, coverage, variant detection
+    validation.py    — region/path/URL validation, SSRF prevention
+    serialization.py — serialize_region_data(): RegionData → JSON + evidence
+    cache.py         — BAMIndexCache: file cache for remote BAM index files (TTL)
+    reference.py     — genome build registry, detect_genome_build()
+  analysis/
+    evidence.py      — variant evidence, artifact risk scoring, confidence
+    curation.py      — curation summaries + recommendations
+    acmg.py          — ACMG criteria scoring
+    fusion.py        — multi-source evidence fusion
+  clients/
+    clinvar.py, gnomad.py, genes.py — async NCBI / gnomAD GraphQL / NCBI gene clients
+    ttl_cache.py     — BoundedTTLCache (shared LRU + TTL)
+  middleware/
+    auth.py          — BAMCPAuthProvider (in-memory OAuth 2.0)
+    ratelimit.py     — sliding-window IP rate limiting
+    security.py      — security response headers
+    telemetry.py     — configure_telemetry() (optional OTel)
+  eval/              — evaluation harness: truthset (deterministic gate), runner, router,
+                       grader, metrics, report, compare, providers, renderer, schema, cli
+  static/            — viewer TS/Vite app (see "Viewer UI")
 ```
-
-**Entry point**: `src/bamcp/__main__.py` — reads `BAMCPConfig.from_env()`, creates FastMCP server, runs with selected transport.
-
-## Key Modules
-
-| Subpackage | Module | Role |
-|------------|--------|------|
-| root | `server.py` | FastMCP setup, tool/resource registration, auth wiring |
-| root | `config.py` | `BAMCPConfig` dataclass with `from_env()` classmethod |
-| root | `constants.py` | Shared constants (defaults, thresholds, bins) |
-| root | `resources.py` | `get_viewer_html()` — serves bundled HTML from `static/viewer.html` |
-| `core/` | `tools.py` | Tool handlers (visualize, variants, coverage, contigs, jump, summary, ClinVar, gnomAD) |
-| `core/` | `parsers.py` | `fetch_region()` — pysam BAM/CRAM parsing, read extraction, coverage, variant detection |
-| `core/` | `validation.py` | Input validation for regions, paths, URLs (SSRF prevention), variant params |
-| `core/` | `serialization.py` | `serialize_region_data()` — RegionData to JSON with evidence enhancement |
-| `core/` | `cache.py` | `BAMIndexCache` — file-based cache for remote BAM index files with TTL |
-| `core/` | `reference.py` | Genome build registry, `detect_genome_build()`, `get_public_reference_url()` |
-| `analysis/` | `evidence.py` | Variant evidence computation, artifact risk scoring, confidence levels |
-| `analysis/` | `curation.py` | Curation summaries, recommendations, `handle_get_variant_curation_summary()` |
-| `clients/` | `clinvar.py` | `ClinVarClient` — async NCBI E-utilities client for variant clinical significance |
-| `clients/` | `gnomad.py` | `GnomadClient` — async gnomAD GraphQL client for population allele frequencies |
-| `clients/` | `genes.py` | `GeneClient` — NCBI gene search by symbol |
-| `clients/` | `ttl_cache.py` | `BoundedTTLCache` — shared LRU cache with TTL eviction |
-| `middleware/` | `auth.py` | `BAMCPAuthProvider` (in-memory OAuth 2.0), `build_auth_settings()` |
-| `middleware/` | `ratelimit.py` | `RateLimitMiddleware` — sliding-window IP rate limiting |
-| `middleware/` | `security.py` | `SecurityHeadersMiddleware` — security response headers |
-
-## Registered Tools
-
-| Tool | Description |
-|------|-------------|
-| `visualize_region` | View aligned reads with interactive MCP Apps visualization (returns UI + data). Auto-detects compact mode for large regions. |
-| `get_variants` | Detect and return candidate variants in a region. `variant_source` (`auto`/`vcf`/`bamcp`) selects the source: `vcf` makes a caller's VCF authoritative and attaches BAMCP read-level evidence at each site; `auto` overlays a VCF on local candidates; `bamcp` is local-only. |
-| `get_coverage` | Calculate depth of coverage statistics |
-| `list_contigs` | List chromosomes/contigs and detect genome build (GRCh37/GRCh38) with suggested public reference URL |
-| `jump_to` | Jump to a specific genomic position with configurable window (returns UI + data) |
-| `get_region_summary` | Text-only region summary for LLM reasoning (no UI) |
-| `lookup_clinvar` | Look up variant in ClinVar for clinical significance and conditions |
-| `lookup_gnomad` | Look up variant in gnomAD for population allele frequency data |
-| `get_variant_curation_summary` | Detailed curation summary for a variant with artifact risk assessment |
-| `search_gene` | Search for a gene by symbol and return genomic coordinates (uses NCBI) |
-| `cleanup_cache` | Clean up session's BAM index cache files |
-
-## Transport Modes
-
-Controlled by `BAMCP_TRANSPORT` env var:
-- `stdio` (default) — standard MCP stdio transport
-- `sse` — Server-Sent Events over HTTP
-- `streamable-http` — Streamable HTTP transport
-
-HTTP transports use `BAMCP_HOST` (default `0.0.0.0`) and `BAMCP_PORT` (default `8000`).
-
-## Authentication
-
-Opt-in via `BAMCP_AUTH_ENABLED=true`. In-memory OAuth 2.0 authorization server implementing `OAuthAuthorizationServerProvider`. Supports dynamic client registration, authorization code flow, token refresh, and revocation.
-
-Related env vars: `BAMCP_ISSUER_URL`, `BAMCP_RESOURCE_SERVER_URL`, `BAMCP_REQUIRED_SCOPES`, `BAMCP_TOKEN_EXPIRY`.
-
-## Configuration
-
-All settings via environment variables. See `BAMCPConfig` in `src/bamcp/config.py`.
-
-Core: `BAMCP_REFERENCE`, `BAMCP_MAX_READS`, `BAMCP_DEFAULT_WINDOW`, `BAMCP_MIN_VAF`, `BAMCP_MIN_DEPTH`, `BAMCP_MIN_MAPQ`
-
-Transport: `BAMCP_TRANSPORT`, `BAMCP_HOST`, `BAMCP_PORT`
-
-Auth: `BAMCP_AUTH_ENABLED`, `BAMCP_ISSUER_URL`, `BAMCP_RESOURCE_SERVER_URL`, `BAMCP_REQUIRED_SCOPES`, `BAMCP_TOKEN_EXPIRY`
-
-External databases: `BAMCP_NCBI_API_KEY`, `BAMCP_CLINVAR_ENABLED`, `BAMCP_GNOMAD_ENABLED`, `BAMCP_GNOMAD_DATASET`, `BAMCP_GENOME_BUILD`
-
-Cache: `BAMCP_CACHE_DIR` (default: `~/.cache/bamcp`), `BAMCP_CACHE_TTL` (default: 86400 seconds / 24 hours)
-
-Security: `BAMCP_ALLOWED_DIRECTORIES`, `BAMCP_ALLOW_REMOTE_FILES`, `BAMCP_ALLOWED_REMOTE_HOSTS`, `BAMCP_TRUSTED_HOSTS`, `BAMCP_RATE_LIMIT` (default: 60 req/min/IP)
-
-## Genome Build Detection
-
-The `list_contigs` tool auto-detects genome build (GRCh37 or GRCh38) by comparing chr1 length:
-
-| Build | chr1 Length | Notes |
-|-------|-------------|-------|
-| GRCh38 | 248,956,422 | Current human reference |
-| GRCh37 | 249,250,621 | Older build, still common |
-
-When no local reference is configured, the tool suggests public UCSC FASTA URLs that pysam can use remotely:
-- GRCh38: `https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz`
-- GRCh37: `https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz`
-
-**Workflow**: Call `list_contigs` first on new BAM files to detect the build, then use the suggested reference URL or ask the user for their preferred reference.
 
 ## Commands
 
 ```bash
-make install      # pip install -e ".[dev]"
-make test         # pytest (unit + integration, ignores e2e)
-make test-e2e     # playwright install chromium && pytest tests/e2e/
-make lint         # ruff format --check && ruff check
-make format       # ruff format && ruff check --fix
-make typecheck    # mypy src
-make docker-build # docker compose --profile prod build && --profile dev build
-make docker-test  # docker compose --profile dev run --rm test && lint
-make coverage     # pytest with --cov-report=html
-make clean        # remove build artifacts
+make install          # build-viewer + pip install -e ".[dev]"
+make build-viewer     # cd src/bamcp/static && npm install && npm run build
+make test             # pytest (unit + integration, ignores e2e)
+make test-network     # live-network tier only (excluded from the default suite)
+make test-e2e         # playwright install chromium && pytest tests/e2e/
+make lint             # ruff format --check AND ruff check
+make format           # ruff format && ruff check --fix
+make typecheck        # mypy src
+make coverage         # HTML coverage report
+make coverage-strict  # coverage with --cov-fail-under=85 (the CI bar)
+make eval-smoke       # deterministic ground-truth gate (required ship-gate)
+make giab-benchmark   # real GIAB benchmark — network-gated, not in CI
+make render-viewer    # render the viewer to a PNG (.render-dev/last.png)
+make docker-build / docker-test / clean
 ```
 
-## Test Conventions
+`./dev_server.py` launches the server under the MCP Inspector (http://localhost:6274).
 
-- Markers: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.e2e`
-- Async tests use `pytest-asyncio` with `asyncio_mode = "auto"`
-- Fixtures in `tests/fixtures/` (small.bam, ref.fa, empty.bam)
-- Fixture generator: `tests/create_fixtures.py` (creates test BAM/FASTA with known reads)
-- HTTP mocking: `pytest-httpx` for ClinVar/gnomAD API tests
-- Coverage threshold: 80% (fail_under in pyproject.toml)
-- E2E tests use Playwright (sync API, run separately from async tests)
+## CI gates (get these wrong and the push fails)
+
+`.github/workflows/ci.yml` runs `lockfile`, `lint`, `test` (3.10/3.11/3.12), `eval-smoke`,
+`frontend`, `e2e`, `docker`.
+
+- **`uv.lock` must stay in sync.** Any `pyproject.toml` edit requires re-running `uv lock`
+  — the `lockfile` job runs `uv lock --check` and fails otherwise.
+- **`make lint` is two commands.** `ruff format --check` runs *before* `ruff check`; running
+  only `ruff check` passes locally and then fails CI on formatting.
+- **Coverage has two bars.** `fail_under = 80` in pyproject, but CI runs `make coverage-strict`
+  (**85%**) on 3.12. Target 85.
+- **`make eval-smoke` is a required ship-gate**, in both `ci.yml` and `greenlight-build.yml`.
+  It needs `python tests/create_fixtures.py` to have run and the `[eval]` extra installed.
+- **The frontend has its own gate.** In `src/bamcp/static/`: `npm run typecheck`, `npm run lint`
+  (eslint), `npm test` (vitest), `npm run build` — all four run in CI.
+- **mypy targets Python 3.12** (not the 3.10 floor). New imports from the `[eval]` or
+  `[telemetry]` optional extras need an entry in `[[tool.mypy.overrides]]` or `make typecheck`
+  fails on the CI lint job, which installs `[dev]` only.
+- **The viewer bundle is part of the ship-gate.** `test_resources` asserts the built
+  `static/dist/viewer.html` exists, so `make build-viewer` must have run.
+
+`pre-commit` is configured (ruff-format + ruff `--fix`): `pip install pre-commit && pre-commit install`.
+
+## Registered tools
+
+Thirteen tools, all registered in `server.py`:
+
+| Tool | Notes |
+|------|-------|
+| `visualize_region` | Reads + UI. Auto-detects compact mode for large regions. |
+| `jump_to` | Jump to a position with a configurable window (UI + data). |
+| `get_variants` | `variant_source` (`auto`/`vcf`/`bamcp`) selects the source: `vcf` makes a caller's VCF authoritative and attaches BAMCP read-level evidence per site; `auto` overlays a VCF on local candidates; `bamcp` is local-only. |
+| `scan_variants` | Scan a broader region for candidate variants. |
+| `get_coverage` | Depth-of-coverage statistics. |
+| `list_contigs` | Contigs + genome build detection + suggested public reference URL. |
+| `get_region_summary` | Text-only summary for LLM reasoning (no UI). |
+| `get_variant_curation_summary` | Curation summary with artifact risk assessment. |
+| `classify_variant` | ACMG classification via evidence fusion (`analysis/acmg.py`, `fusion.py`). |
+| `lookup_clinvar` / `lookup_gnomad` | Clinical significance / population allele frequency. |
+| `search_gene` | Gene symbol → coordinates. Build-aware: auto-detects from the BAM. |
+| `cleanup_cache` | Clean the session's BAM index cache files. |
+
+**Every variant response echoes its `applied_filters`** — absence of a variant must stay
+distinguishable from "filtered out". Preserve that when touching variant output.
+
+## Configuration
+
+All settings come from `BAMCP_*` env vars. The authoritative list is the dataclass itself:
+`@src/bamcp/config.py` — read it rather than relying on a copy here.
+
+Transport is `BAMCP_TRANSPORT`: `stdio` (default), `sse`, or `streamable-http`. HTTP transports
+use `BAMCP_HOST` (default `0.0.0.0`) / `BAMCP_PORT` (default `8000`).
+
+Auth is opt-in via `BAMCP_AUTH_ENABLED=true` — an in-memory OAuth 2.0 authorization server
+implementing `OAuthAuthorizationServerProvider` (dynamic client registration, auth code flow,
+refresh, revocation).
+
+## Genome build
+
+`list_contigs` auto-detects GRCh37 vs GRCh38 from chr1 length and suggests a public UCSC FASTA
+URL when no local reference is configured (see `core/reference.py`).
+
+**Workflow rule: call `list_contigs` first on a new BAM to pin the build.** A build mismatch is
+silent and shifts coordinates by ~0.5–2 Mb, which reads as false "benign" evidence downstream.
+`search_gene` auto-detects the build from the BAM and warns loudly on mismatch — keep it that way.
 
 ## Security
 
-### HTTP Middleware Stack (for SSE/streamable-http transports)
-
-When running with HTTP transports, `__main__.py` adds Starlette middleware:
-1. **`TrustedHostMiddleware`** — DNS rebinding protection (configured via `BAMCP_TRUSTED_HOSTS`)
-2. **`SecurityHeadersMiddleware`** (`middleware/security.py`) — X-Content-Type-Options, X-Frame-Options, CSP, etc.
-3. **`RateLimitMiddleware`** (`middleware/ratelimit.py`) — sliding-window IP rate limiting (default: 60 req/min/IP)
-
-### SSRF Prevention
+HTTP middleware (SSE / streamable-http only), added in `__main__.py`:
+`TrustedHostMiddleware` (DNS rebinding, `BAMCP_TRUSTED_HOSTS`) → `SecurityHeadersMiddleware` →
+`RateLimitMiddleware` (default 60 req/min/IP).
 
 `validate_remote_url()` in `core/validation.py` resolves hostnames and blocks private/internal IPs:
-- `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (RFC 1918)
-- `169.254.0.0/16` (cloud metadata endpoints)
-- IPv6 private, loopback, link-local
+`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` (cloud metadata),
+and IPv6 private/loopback/link-local. Optional allowlist via `BAMCP_ALLOWED_REMOTE_HOSTS`.
 
-Optional domain allowlist via `BAMCP_ALLOWED_REMOTE_HOSTS`.
+Input validation: regions against `REGION_PATTERN`, paths ≤2048 chars, regions ≤100 chars,
+only `.bam`/`.cram` for local files, error messages sanitized (never leak config).
 
-### Input Validation
+`mcp>=1.23.0` is a hard floor (CVE-2025-66416 DNS rebinding fix).
 
-- Region strings validated against `REGION_PATTERN` regex
-- File paths limited to 2048 chars, regions to 100 chars
-- Only `.bam` and `.cram` file extensions accepted for local files
-- Error messages sanitized (no config details leaked)
+Prod compose hardening: `cap_drop: [ALL]`, `no-new-privileges`, `read_only`, `memory: 2g`, non-root.
 
-### Container Hardening
+## Viewer UI
 
-Prod docker-compose: `cap_drop: [ALL]`, `no-new-privileges`, `read_only`, `memory: 2g`, non-root user.
+TypeScript/Vite app in `src/bamcp/static/`. Sources: `viewer.html`, `client.ts` (MCP Apps SDK
+wrapper), `mcp-app.ts` (app logic), `renderer.ts` (canvas), `state.ts`, `data-store.ts`,
+`types.ts`, `constants.ts` (+ `constants.test.ts` for vitest).
 
-### MCP SDK Pin
-
-`mcp>=1.23.0` required (CVE-2025-66416 DNS rebinding fix).
-
-## Deployment
-
-### Container image + deploy (prod)
-
-Deploy is owned by Greenlight, not this repo — there is **no `deploy.yml` here** (the
-legacy `v*`-tag → OCIR workflow was retired in favor of the wrapper pipeline). On every
-push to `main`:
-
-1. **`.github/workflows/greenlight-build.yml`** — ship-gate (`make test` + `make
-   eval-smoke`), then builds the arm64 image natively and pushes it to GHCR
-   (`ghcr.io/rtrentjones/bamcp:prod` moving tag + `:<sha>` immutable), then fires
-   `repository_dispatch(deploy-bamcp)` at the wrapper repo (`RTrentJones/RTrentJones.dev`)
-   via `GREENLIGHT_DISPATCH_TOKEN`.
-2. The wrapper's **`greenlight-deploy-bamcp.yml`** runs the `oci-deploy-verify` composite:
-   restart the OCI Container Instance to re-pull `:prod`, verify prod is actually serving
-   the new image, then post a `greenlight/deploy-bamcp` commit status back here. The OCI
-   creds + verify token live on the wrapper (`TF_VAR_OCI_*`, `BAMCP_VERIFY_TOKEN`), so this
-   repo only needs `GREENLIGHT_DISPATCH_TOKEN`.
-
-### Public Access via Cloudflare Tunnel
-
-The container instance runs on a private subnet with no public IP. External access (e.g., Claude Desktop) is provided via a Cloudflare Tunnel:
-
-```
-Internet (HTTPS) → Cloudflare Edge → Tunnel → cloudflared sidecar → BAMCP (localhost:8000)
-```
-
-- `cloudflared` runs as a sidecar container in the same OCI Container Instance
-- Outbound-only connection — no inbound firewall rules, no public IP, no load balancer
-- Cloudflare terminates TLS; traffic to BAMCP is plain HTTP over localhost
-- Setup: `./scripts/setup-cloudflared.sh` (recreates container instance with sidecar)
-- Additional secret: `CLOUDFLARE_TUNNEL_TOKEN`
-
-### Entrypoint
-
-`docker/entrypoint.sh` respects cloud-provider `PORT` env var (falls back to `BAMCP_PORT`).
-
-## Docker
-
-- `Dockerfile` — production image (slim, no test tooling, ARM64 compatible)
-- `Dockerfile.dev` — development image (includes pytest, playwright, ruff, mypy)
-- `docker-compose.yml` — profiles: `dev` (test+lint services), `beta`, `prod`
-- `docker/entrypoint.sh` — entrypoint script with PORT override and pre-flight health check
-- `docker/healthcheck.py` — health check (imports bamcp, verifies server creation)
-
-## Project Structure
-
-```
-src/bamcp/
-  __init__.py, __main__.py, server.py, config.py, constants.py, resources.py
-  core/
-    parsers.py, tools.py, validation.py, serialization.py, cache.py, reference.py
-  analysis/
-    evidence.py, curation.py
-  clients/
-    clinvar.py, gnomad.py, genes.py, ttl_cache.py
-  middleware/
-    auth.py, ratelimit.py, security.py
-  static/
-    viewer.html, client.ts, mcp-app.ts, renderer.ts, state.ts, types.ts, constants.ts
-tests/
-  conftest.py, create_fixtures.py, fixtures/
-  unit/
-    core/
-      test_parsers.py, test_tools.py, test_config.py, test_cache.py,
-      test_reference.py, test_validation.py
-    clients/
-      test_clinvar.py, test_gnomad.py, test_genes.py
-    middleware/
-      test_auth.py, test_ratelimit.py, test_security_headers.py
-    test_resources.py
-  integration/
-    test_server.py, test_integration.py, test_docker.py
-  e2e/
-    conftest.py, test_viewer_e2e.py
-docker/
-  entrypoint.sh, healthcheck.py
-.github/
-  workflows/ci.yml, workflows/greenlight-build.yml, workflows/eval-nightly.yml,
-  workflows/security.yml, pull_request_template.md, ISSUE_TEMPLATE/
-```
-
-## Viewer UI Build Process
-
-The interactive viewer is a TypeScript/Vite application in `src/bamcp/static/`.
-
-**Build steps:**
 ```bash
 cd src/bamcp/static
-npm install          # Install dependencies (first time only)
-npm run build        # Compile TypeScript + bundle with Vite → dist/viewer.html
+npm install && npm run build   # → dist/viewer.html
+npm run dev                    # Vite dev server
+npm run typecheck && npm run lint && npm test   # what CI runs
 ```
 
-**Development:**
-```bash
-npm run dev          # Start Vite dev server with hot reload
-```
+**Never hand-edit anything in `src/bamcp/static/dist/`** — no `cat`, no `echo`, no manual copies.
+Edit the source and run `npm run build`; Vite inlines the SDK and bundles everything.
 
-**CRITICAL - What NOT to do:**
-- NEVER manually edit files in `src/bamcp/static/dist/` — always edit source files and rebuild
-- NEVER copy files into `dist/` manually — Vite bundles everything automatically
-- NEVER use `cat` or `echo` to modify dist files — use `npm run build`
+After any `static/` edit, close the visual loop: run the **`render-viewer` skill** (or
+`make render-viewer`) and `Read` the resulting PNG to confirm the change did what you intended.
 
-**Source files:**
-- `viewer.html` — HTML template with UI structure
-- `client.ts` — MCP Apps SDK client wrapper (BAMCPClient)
-- `mcp-app.ts` — Main application logic (BAMCPViewer)
-- `renderer.ts` — Canvas-based read/coverage/variant rendering
-- `state.ts` — Viewport and settings state management
-- `types.ts` — TypeScript type definitions
-- `constants.ts` — Color schemes and constants
+### MCP Apps SDK
 
-**How bundling works:**
-- Vite inlines the MCP Apps SDK into the HTML
-- `get_viewer_html()` in `resources.py` serves `dist/viewer.html` if it exists
-- Falls back to source `viewer.html` (won't work in sandboxed iframe)
+`callServerTool()` returns its result via the **Promise**, not a callback:
 
-## MCP Apps SDK Integration
-
-The viewer uses `@modelcontextprotocol/ext-apps` to communicate with the MCP host.
-
-**Key SDK methods:**
-| Method | Purpose | Return |
-|--------|---------|--------|
-| `callServerTool()` | Directly invoke MCP server tool | `Promise<CallToolResult>` — result via Promise |
-| `sendMessage()` | Send message to LLM (unreliable for tool calls) | `Promise<{isError?}>` |
-| `updateModelContext()` | Update model context with viewer state | `Promise<{}>` |
-
-**Common mistake:**
 ```typescript
-// WRONG: Assumes result comes via callback
+// WRONG — ontoolresult will NOT fire for callServerTool
 await app.callServerTool({ name: 'tool', arguments: {} });
-// ontoolresult will NOT fire for callServerTool
 
-// CORRECT: Use the Promise return value
+// CORRECT
 const result = await app.callServerTool({ name: 'tool', arguments: {} });
 if (result.structuredContent) { handleData(result.structuredContent); }
 ```
 
-**Notification callbacks (`ontoolresult`, `ontoolinput`):**
-- These fire for tool calls initiated by the HOST (LLM calling tools)
-- They do NOT fire for `callServerTool` calls initiated by the APP
+`ontoolresult` / `ontoolinput` fire only for tool calls initiated by the **host** (the LLM),
+never for calls the app makes itself.
 
-## Key Features & Test Cases
+### Non-obvious viewer behavior
 
-### 1. Region Visualization (`visualize_region` tool)
-- **Feature**: Render aligned reads with coverage track, reference sequence, and variant calls
-- **Compact mode**: Regions >500bp auto-omit sequences to reduce payload size
-- **Test**: `tests/unit/core/test_tools.py::test_visualize_region*`, `tests/e2e/test_viewer_e2e.py`
+- Regions >500 bp auto-omit sequences (compact mode) to shrink the payload.
+- At zoom scale ≥10, `checkAndRequestSequences()` auto-fetches missing sequences via
+  `callServerTool('visualize_region')`, with a "Load Detail" button as a 3s fallback.
 
-### 2. Auto-fetch Sequences on Zoom
-- **Feature**: When zoomed to scale ≥10 (base-level), auto-fetch sequences if missing
-- **Trigger**: `checkAndRequestSequences()` in `mcp-app.ts`
-- **Uses**: `callServerTool('visualize_region')` for direct tool invocation
-- **Fallback**: "Load Detail" button after 3s timeout
-- **Test**: Manual — zoom into large region, bases should appear automatically
+## Tests
 
-### 3. Variant Detection & Evidence
-- **Feature**: Call SNVs/indels with VAF, depth, strand bias, MAPQ histograms
-- **Artifact risk**: Position-in-read bias, strand bias detection
-- **Test**: `tests/unit/core/test_parsers.py::test_variant*`, `tests/unit/core/test_tools.py::test_get_variant*`
+- Markers: `unit`, `integration`, `network`, `e2e`. Async tests use `pytest-asyncio`
+  (`asyncio_mode = "auto"`).
+- **The default suite is hermetic.** `addopts` carries `-m 'not network'`, so live-external-call
+  tests are excluded by default and never flake offline. Run them explicitly with
+  `make test-network` (a command-line `-m` overrides the default).
+- E2E uses Playwright's **sync** API — it conflicts with pytest-asyncio's loop, so it runs
+  separately (`tests/e2e/`, excluded from `addopts`).
+- Fixtures in `tests/fixtures/` (`small.bam`, `ref.fa`, `empty.bam`, `comprehensive.bam` +
+  `comprehensive_ref.fa`), generated by `tests/create_fixtures.py`.
+- HTTP mocking via `pytest-httpx` for the ClinVar/gnomAD clients.
+- Eval truth sets live in `tests/eval/datasets/` (`synthetic_v1`, `indel_v1`, `acmg_v1`, `giab`),
+  each with a `manifest.yaml`. Floors are enforced in code (`TruthsetReport.meets_floors`) *and*
+  in the CI step, so changing them is a reviewed change. Methodology: `@EVALS.md`.
 
-### 4. External Database Lookups
-- **ClinVar**: Clinical significance via NCBI E-utilities
-- **gnomAD**: Population allele frequency via GraphQL API
-- **Test**: `tests/unit/clients/test_clinvar.py`, `tests/unit/clients/test_gnomad.py` (uses `pytest-httpx` mocking)
+## Repo etiquette
 
-### 5. Genome Build Detection
-- **Feature**: Auto-detect GRCh37/GRCh38 from chr1 length
-- **Suggests**: Public UCSC reference FASTA URLs
-- **Test**: `tests/unit/core/test_reference.py`
+- **`main`-only — there is no `develop` branch here.** Work on a `feat/*`/`fix/*` branch, open a
+  PR against `main`.
+- Commits follow conventional style with the PR number: `fix(viewer): distinct ruler tick
+  labels at zoom (#53)`.
+- **Merging to `main` deploys straight to prod** (see below). There is no beta gate in this repo;
+  the `beta`/`preview` docker-compose profiles are local-only.
 
-### 6. Remote BAM Support
-- **Feature**: Stream BAM/CRAM from HTTP/S3 URLs with cached index files
-- **Cache**: Session-isolated, 24h TTL by default
-- **Test**: `tests/unit/core/test_cache.py`
+## Deployment
 
-## Archived Planning Documents
+Deploy is owned by Greenlight, not this repo — there is **no `deploy.yml` here**. On every push
+to `main`:
 
-Located in `archived/` folder:
+1. **`.github/workflows/greenlight-build.yml`** — ship-gate (`make test` + `make eval-smoke`),
+   then builds the arm64 image natively and pushes to GHCR
+   (`ghcr.io/rtrentjones/bamcp:prod` moving tag + `:<sha>` immutable), then fires
+   `repository_dispatch(deploy-bamcp)` at the wrapper repo (`RTrentJones/RTrentJones.dev`)
+   via `GREENLIGHT_DISPATCH_TOKEN`.
+2. The wrapper's **`greenlight-deploy-bamcp.yml`** runs the `oci-deploy-verify` composite:
+   restart the OCI Container Instance to re-pull `:prod`, verify prod is serving the new image,
+   then post a `greenlight/deploy-bamcp` commit status back here. OCI creds + the verify token
+   live on the wrapper; this repo only needs `GREENLIGHT_DISPATCH_TOKEN`.
 
-- `BAMCP_Strategy.md` — MCP Apps architecture, viewer design, ClinVar/gnomAD integration roadmap
-- `BAMCP_EVAL_HARNESS.md` — LLM genomic reasoning evaluation framework
-- `BAMCP_IMPLEMENTATION_PLAN.md` — Original implementation schedule
+The container runs on a private OCI subnet with no public IP. External access is via a
+**Cloudflare Tunnel** — a `cloudflared` sidecar in the same Container Instance, outbound-only
+(no inbound rules, no public IP, no load balancer). Setup: `./scripts/setup-cloudflared.sh`
+(recreates the instance with the sidecar); needs `CLOUDFLARE_TUNNEL_TOKEN`.
 
-## Greenlight loop (deploy → verify → promote)
+`docker/entrypoint.sh` respects a cloud-provider `PORT` env var, falling back to `BAMCP_PORT`.
 
-This repo uses Greenlight. Ship changes through the deploy-verify-promote skill:
-branch → change → deploy preview → `greenlight verify` → beta → verify → `greenlight promote` → prod → verify.
+## Docker
 
-Agentic kit:
-- Skill: `.claude/skills/deploy-verify-promote/SKILL.md` (the loop).
-- MCP servers: `.mcp.json` recommends the relevant providers — run `/mcp` to authenticate.
-    Vercel is OAuth; Supabase needs `SUPABASE_ACCESS_TOKEN` (+ `SUPABASE_PROJECT_REF`) in your env.
-- Best-practice skills (one-time, user scope):
-    `claude plugin marketplace add cloudflare/skills && claude plugin install cloudflare@cloudflare`
+`Dockerfile` (prod, slim, ARM64) · `Dockerfile.dev` (adds pytest/playwright/ruff/mypy) ·
+`docker-compose.yml` profiles: `dev` (test + lint services), `beta`, `preview`, `prod` ·
+`docker/healthcheck.py` (imports bamcp, verifies server creation).
+
+## Further reading
+
+- `@docs/ROADMAP.md` — living strengths/weaknesses + current priorities. Update it as work lands.
+- `@EVALS.md` — evaluation methodology · `@SAFETY.md` — the overconfidence guard.
+- `@docs/engineering-review-response.md`, `@docs/ENGINEERING_RETROSPECTIVE.md` — why things are
+  the way they are.
+- `archived/` — superseded planning docs. Historical only; don't treat as current design.
+
+## Greenlight loop
+
+This repo is a Greenlight tool consumed as a submodule by `RTrentJones.dev`. The generic
+deploy→verify→promote model is in `.claude/skills/deploy-verify-promote/SKILL.md`, and
+per-provider detail in `.claude/skills/provider-*`. BAMCP's cell of that matrix is
+**oci, direct-to-prod on `main`** — the ship-gate in `greenlight-build.yml` is the safety net
+that a promote step would otherwise provide.

@@ -1051,6 +1051,33 @@ class TestHandleListContigs:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_no_guidance_when_caller_supplied_a_reference(
+        self, small_bam_path, ref_fasta_path, monkeypatch
+    ):
+        """Don't tell a caller to supply a reference they just supplied.
+
+        The suggestion gates on the EFFECTIVE reference, not only
+        config.reference — an explicit `reference` argument was already used to
+        read this header, so emitting a suggestion (or a note saying "supply
+        your own") is advice the caller has already taken.
+        """
+        import bamcp.core.tools as tools_mod
+
+        # chr-prefixed GRCh37 — the one build/style pair with no verified URL,
+        # so without this fix the note would fire.
+        monkeypatch.setattr(
+            tools_mod, "_read_contigs_sync", lambda *a, **k: [{"name": "chr1", "length": 249250621}]
+        )
+        result = await handle_list_contigs(
+            {"file_path": small_bam_path, "reference": ref_fasta_path}, BAMCPConfig()
+        )
+        payload = json.loads(result["content"][0]["text"])
+
+        assert payload["suggested_reference_url"] is None
+        assert payload["reference_note"] is None
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_works_with_missing_config_default_reference(self, small_bam_path):
         """A missing operator-set BAMCP_REFERENCE must not break the discovery path for a BAM.
 

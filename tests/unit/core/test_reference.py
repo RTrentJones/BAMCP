@@ -266,3 +266,31 @@ class TestContigStyle:
     @pytest.mark.unit
     def test_empty_contigs_default_to_unprefixed(self):
         assert contig_style([]) == CONTIG_STYLE_NOCHR
+
+    @pytest.mark.unit
+    def test_decoys_cannot_outvote_the_build_defining_contig(self):
+        """Style comes from chr1/1, not a majority over unrelated contigs.
+
+        A mixed-reference header carries unprefixed decoy/pathogen/HLA contigs
+        beside chr-prefixed chromosomes. Under a majority vote this header is
+        1-of-3 prefixed and lands on "nochr", which suggests a FASTA whose
+        chromosome is named "1" — and that fails the moment the caller asks for
+        chr1. The build is detected from chr1, so the style must be too.
+        """
+        contigs = [
+            {"name": "chr1", "length": 248956422},
+            {"name": "hs37d5", "length": 35477943},
+            {"name": "NC_007605", "length": 171823},
+        ]
+        assert detect_genome_build(contigs)["build"] == "GRCh38"
+        assert contig_style(contigs) == CONTIG_STYLE_CHR
+
+    @pytest.mark.unit
+    def test_unprefixed_build_contig_wins_over_chr_prefixed_extras(self):
+        """The mirror case: primary contig is "1" despite chr-prefixed extras."""
+        contigs = [
+            {"name": "1", "length": 249250621},
+            {"name": "chrUn_gl000220", "length": 161802},
+            {"name": "chrEBV", "length": 171823},
+        ]
+        assert contig_style(contigs) == CONTIG_STYLE_NOCHR

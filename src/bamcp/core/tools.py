@@ -1074,14 +1074,17 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
     # Detect genome build from contig lengths
     build_info = detect_genome_build(contigs)
 
-    # Suggest public reference URL if no reference configured. The suggestion must
-    # match the BAM's contig naming — a "chr1"-style FASTA cannot serve a BAM whose
-    # contigs are "1" — and when no verified reference exists for that style we say
-    # so instead of offering one that fails to open.
+    # Suggest a public reference URL only when there is no EFFECTIVE reference —
+    # `reference` above, not just config.reference. A caller who passed a valid
+    # `reference` argument already has one (it was just used to read this header),
+    # so telling them to supply one is advice they have already taken. The
+    # suggestion must also match the BAM's contig naming — a "chr1"-style FASTA
+    # cannot serve a BAM whose contigs are "1" — and when no verified reference
+    # exists for that style we say so instead of offering one that fails to open.
     style = contig_style(contigs)
     suggested_url = None
     reference_note = None
-    if not config.reference and build_info["build"] != "unknown":
+    if not reference and build_info["build"] != "unknown":
         suggested_url = get_public_reference_url(build_info["build"], style)
         if suggested_url is None:
             reference_note = (

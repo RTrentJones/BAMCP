@@ -89,15 +89,33 @@ def normalize_build_name(name: str) -> str | None:
 
 
 def contig_style(contigs: list[dict]) -> str:
-    """Return the naming style a BAM's contigs use.
+    """Return the naming style of the BAM's *build-defining* contig.
 
     A suggested reference is only usable if its contig names match the BAM's:
-    ``fasta.fetch("1", ...)`` against a UCSC-style FASTA raises KeyError. Judge by
-    majority so a stray unprefixed decoy (hs37d5, NC_007605) in an otherwise
-    chr-prefixed header does not flip the answer.
+    ``fasta.fetch("1", ...)`` against a UCSC-style FASTA raises KeyError. Decide
+    from the same literal contig :func:`detect_genome_build` keys off — ``chr1``
+    vs ``1`` — so the suggestion is guaranteed to serve the chromosome the build
+    was detected from.
+
+    Deliberately NOT a majority vote over every contig. Mixed-reference headers
+    carry unprefixed decoy/pathogen/HLA contigs (``hs37d5``, ``NC_007605``,
+    ``HLA-A*01:01``) alongside chr-prefixed chromosomes, so a majority is decided
+    by contigs nobody will fetch: a header of ``chr1`` plus two unprefixed decoys
+    counts 1-of-3 prefixed and lands on "nochr", which suggests a FASTA whose
+    chromosome is named ``1`` — and that fails the moment the caller asks for
+    ``chr1``. Whether a majority happens to agree is incidental; this doesn't
+    depend on it.
     """
-    prefixed = sum(1 for c in contigs if str(c.get("name", "")).startswith("chr"))
-    return CONTIG_STYLE_CHR if prefixed * 2 > len(contigs) else CONTIG_STYLE_NOCHR
+    names = {str(c.get("name", "")) for c in contigs}
+    if "chr1" in names:
+        return CONTIG_STYLE_CHR
+    if "1" in names:
+        return CONTIG_STYLE_NOCHR
+    # No chr1/1 at all (non-human, or unusual naming). detect_genome_build returns
+    # "unknown" here so no suggestion is emitted anyway; fall back to the shape of
+    # the header purely so the reported style is still informative.
+    prefixed = sum(1 for n in names if n.startswith("chr"))
+    return CONTIG_STYLE_CHR if prefixed * 2 > len(names) else CONTIG_STYLE_NOCHR
 
 
 def get_public_reference_url(build: str, style: str | None = None) -> str | None:

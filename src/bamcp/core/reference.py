@@ -2,19 +2,60 @@
 
 from __future__ import annotations
 
-# Known genome builds with detection signatures and public references
+# Contig naming styles. A reference is only usable for a BAM that names its
+# contigs the same way: fetching "1" from a "chr1"-style FASTA raises KeyError.
+CONTIG_STYLE_CHR = "chr"  # UCSC-style: chr1, chr2, chrM
+CONTIG_STYLE_NOCHR = "nochr"  # Ensembl/1000G-style: 1, 2, MT
+
+# Known genome builds with detection signatures and public references.
+#
+# Every URL here MUST be openable by pysam.FastaFile for RANDOM ACCESS, which
+# requires both:
+#   1. an uncompressed FASTA, or one compressed with BGZF ("bgzip") — plain gzip
+#      is not seekable and htslib rejects it; and
+#   2. a faidx index served next to it (`.fai`, plus `.gzi` for bgzip).
+#
+# The UCSC bigZips files this registry used to advertise
+# (hg19.fa.gz / hg38.fa.gz) satisfy NEITHER — they are plain gzip (gzip FLG byte
+# 0x00, no FEXTRA/BC subfield) and have no published `.fai`. Handing one to
+# pysam fails with a bare "error when opening file <url>", so `list_contigs`
+# was steering callers straight into an error that no argument could fix.
+# Re-verify (HTTP 206 on all three) before changing any URL below.
 GENOME_BUILDS: dict[str, dict] = {
     "GRCh38": {
         "aliases": ["hg38", "grch38", "grch38.p14", "grch38.p13"],
         "chr1_length": 248956422,
         "description": "Human genome build 38 (Dec 2013)",
-        "fasta_url": "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz",
+        "fasta_urls": {
+            # bgzip + .fai + .gzi
+            CONTIG_STYLE_NOCHR: (
+                "https://ftp.ensembl.org/pub/current_fasta/homo_sapiens/dna_index/"
+                "Homo_sapiens.GRCh38.dna.toplevel.fa.gz"
+            ),
+            # uncompressed FASTA + .fai
+            CONTIG_STYLE_CHR: (
+                "https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/"
+                "GRCh38_reference_genome/GRCh38_full_analysis_set_plus_decoy_hla.fa"
+            ),
+        },
     },
     "GRCh37": {
         "aliases": ["hg19", "grch37", "b37", "hs37d5"],
         "chr1_length": 249250621,
         "description": "Human genome build 37 (Feb 2009)",
-        "fasta_url": "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz",
+        "fasta_urls": {
+            # bgzip + .fai + .gzi — the reference the 1000 Genomes phase-3 BAMs
+            # were actually aligned against, so contigs line up exactly.
+            CONTIG_STYLE_NOCHR: (
+                "https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/"
+                "phase2_reference_assembly_sequence/hs37d5.fa.gz"
+            ),
+            # No public UCSC-style GRCh37 FASTA publishes a faidx index beside it
+            # (hg19.fa.gz and the analysisSet .fa.gz are both plain gzip, no .fai),
+            # so there is nothing here that would actually open. None is honest;
+            # a URL that always fails is what caused this bug.
+            CONTIG_STYLE_CHR: None,
+        },
     },
 }
 
@@ -47,19 +88,38 @@ def normalize_build_name(name: str) -> str | None:
     return None
 
 
-def get_public_reference_url(build: str) -> str | None:
-    """Get public FASTA URL for a genome build.
+def contig_style(contigs: list[dict]) -> str:
+    """Return the naming style a BAM's contigs use.
+
+    A suggested reference is only usable if its contig names match the BAM's:
+    ``fasta.fetch("1", ...)`` against a UCSC-style FASTA raises KeyError. Judge by
+    majority so a stray unprefixed decoy (hs37d5, NC_007605) in an otherwise
+    chr-prefixed header does not flip the answer.
+    """
+    prefixed = sum(1 for c in contigs if str(c.get("name", "")).startswith("chr"))
+    return CONTIG_STYLE_CHR if prefixed * 2 > len(contigs) else CONTIG_STYLE_NOCHR
+
+
+def get_public_reference_url(build: str, style: str | None = None) -> str | None:
+    """Get a public, index-backed FASTA URL for a genome build.
 
     Args:
-        build: Build name or alias (e.g., "GRCh38", "hg38")
+        build: Build name or alias (e.g., "GRCh38", "hg38").
+        style: Contig naming style the BAM uses — ``CONTIG_STYLE_CHR`` or
+            ``CONTIG_STYLE_NOCHR`` (see :func:`contig_style`). Defaults to
+            ``CONTIG_STYLE_NOCHR``.
 
     Returns:
-        URL to a public FASTA file, or None if build not recognized.
+        URL to a public FASTA that pysam can actually open (see GENOME_BUILDS),
+        or None if the build is unrecognized or no verified reference exists for
+        that naming style. None means "nothing safe to suggest" — callers should
+        say so rather than falling back to a URL that will fail to open.
     """
     canonical = normalize_build_name(build)
-    if canonical and canonical in GENOME_BUILDS:
-        return str(GENOME_BUILDS[canonical]["fasta_url"])
-    return None
+    if not canonical or canonical not in GENOME_BUILDS:
+        return None
+    url = GENOME_BUILDS[canonical]["fasta_urls"].get(style or CONTIG_STYLE_NOCHR)
+    return str(url) if url else None
 
 
 def detect_genome_build(contigs: list[dict]) -> dict:

@@ -676,6 +676,55 @@ async def _fetch_region_with_timeout(
     vcf_path: str | None = None,
     vcf_primary: bool = False,
 ) -> RegionData:
+    """Fetch region data, converting a parse timeout into a diagnosable error.
+
+    Every ``asyncio.wait_for`` under this call raises a bare ``asyncio.TimeoutError``,
+    whose ``str()`` is the EMPTY STRING. FastMCP renders a failed tool call as
+    ``f"Error executing tool {name}: {exc}"``, so a timeout reached the caller as
+    literally ``"Error executing tool visualize_region:"`` — no exception type, no
+    region, no hint. That is unactionable, and it is what made this failure so hard
+    to place: the tools that open a remote reference (visualize_region,
+    get_region_summary) time out on the first, cold call while get_coverage — whose
+    readless path never opens the FASTA — kept working, which reads like an
+    unrelated per-tool bug. Re-raise with the context needed to tell "too slow" from
+    "broken", and note that a retry is usually warm enough to succeed.
+    """
+    try:
+        return await _fetch_region_data(
+            file_path,
+            region,
+            reference,
+            config,
+            min_vaf=min_vaf,
+            min_depth=min_depth,
+            mode=mode,
+            vcf_path=vcf_path,
+            vcf_primary=vcf_primary,
+        )
+    except asyncio.TimeoutError as e:
+        detail = (
+            "; the remote reference FASTA's index is fetched on first use and is often "
+            "the slow part — retrying usually succeeds once it is warm"
+            if reference and "://" in reference
+            else ""
+        )
+        raise TimeoutError(
+            f"Timed out after {BAM_PARSE_TIMEOUT_SECONDS:g}s reading {region} "
+            f"(mode={mode}){detail}."
+        ) from e
+
+
+async def _fetch_region_data(
+    file_path: str,
+    region: str,
+    reference: str | None,
+    config: BAMCPConfig,
+    min_vaf: float | None = None,
+    min_depth: int | None = None,
+    mode: str = "full",
+    vcf_path: str | None = None,
+    vcf_primary: bool = False,
+) -> RegionData:
     """Fetch region data from BAM/CRAM file with timeout protection.
 
     Args:
@@ -997,7 +1046,12 @@ async def _detect_bam_build(file_path: str, config: BAMCPConfig) -> dict:
 @telemetry_wrapper("list_contigs")
 async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """List contigs in a BAM/CRAM file and detect genome build."""
-    from .reference import detect_genome_build, get_public_reference_url
+    from .reference import (
+        CONTIG_STYLE_CHR,
+        contig_style,
+        detect_genome_build,
+        get_public_reference_url,
+    )
 
     file_path = args["file_path"]
     validate_path(file_path, config)
@@ -1020,10 +1074,22 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
     # Detect genome build from contig lengths
     build_info = detect_genome_build(contigs)
 
-    # Suggest public reference URL if no reference configured
+    # Suggest public reference URL if no reference configured. The suggestion must
+    # match the BAM's contig naming — a "chr1"-style FASTA cannot serve a BAM whose
+    # contigs are "1" — and when no verified reference exists for that style we say
+    # so instead of offering one that fails to open.
+    style = contig_style(contigs)
     suggested_url = None
+    reference_note = None
     if not config.reference and build_info["build"] != "unknown":
-        suggested_url = get_public_reference_url(build_info["build"])
+        suggested_url = get_public_reference_url(build_info["build"], style)
+        if suggested_url is None:
+            reference_note = (
+                f"No public {build_info['build']} FASTA with a faidx index is known for "
+                f"{'chr-prefixed' if style == CONTIG_STYLE_CHR else 'unprefixed'} contigs. "
+                "Supply your own via the 'reference' argument or BAMCP_REFERENCE — it must be "
+                "uncompressed or bgzip-compressed (not plain gzip) and have a .fai beside it."
+            )
 
     return {
         "content": [
@@ -1033,8 +1099,10 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
                     {
                         "contigs": contigs,
                         "genome_build": build_info,
+                        "contig_style": style,
                         "reference_configured": config.reference is not None,
                         "suggested_reference_url": suggested_url,
+                        "reference_note": reference_note,
                         "coordinate_system": _INTERNAL_COORDINATE_SYSTEM,
                     }
                 ),

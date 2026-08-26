@@ -375,3 +375,20 @@ class TestConfigValidation:
         ]
         # Auth off → left untouched.
         assert BAMCPConfig(auth_enabled=False).required_scopes is None
+
+    @pytest.mark.unit
+    def test_blank_reference_env_is_treated_as_absent(self, monkeypatch):
+        """`BAMCP_REFERENCE=` (set but empty) must read as no reference at all.
+
+        os.environ.get returns "" for a set-but-empty var. "" is falsy everywhere
+        the reference is *used*, so the FASTA was silently skipped — but it is not
+        None, so `config.reference is not None` claimed one was configured. That
+        made list_contigs report reference_configured=true *and* emit a
+        suggested_reference_url (mutually exclusive by construction) while
+        reference_sequence came back null with no error to explain it.
+        """
+        monkeypatch.setenv("BAMCP_REFERENCE", "")
+        assert BAMCPConfig.from_env().reference is None
+
+        monkeypatch.setenv("BAMCP_REFERENCE", "/data/hg38.fa")
+        assert BAMCPConfig.from_env().reference == "/data/hg38.fa"

@@ -159,7 +159,15 @@ class BAMCPConfig:
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
         return cls(
-            reference=os.environ.get("BAMCP_REFERENCE"),
+            # `or None`: os.environ.get returns "" for a var that is SET BUT EMPTY
+            # (e.g. `BAMCP_REFERENCE=` in a compose file or unit). "" is falsy
+            # everywhere the reference is *used*, so the FASTA was silently skipped —
+            # but it is not None, so `config.reference is not None` reported one as
+            # configured. list_contigs then claimed reference_configured=true while
+            # also emitting a suggested_reference_url (mutually exclusive by
+            # construction), and reference_sequence came back null with nothing to
+            # explain it. Same idiom as verify_token below.
+            reference=env.get("BAMCP_REFERENCE") or None,
             max_reads=int(env.get("BAMCP_MAX_READS", str(DEFAULT_MAX_READS))),
             default_window=int(env.get("BAMCP_DEFAULT_WINDOW", str(DEFAULT_WINDOW_SIZE))),
             min_vaf=float(env.get("BAMCP_MIN_VAF", str(DEFAULT_MIN_VAF))),

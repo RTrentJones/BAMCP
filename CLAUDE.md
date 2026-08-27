@@ -121,8 +121,17 @@ refresh, revocation).
 
 ## Genome build
 
-`list_contigs` auto-detects GRCh37 vs GRCh38 from chr1 length and suggests a public UCSC FASTA
-URL when no local reference is configured (see `core/reference.py`).
+`list_contigs` auto-detects GRCh37 vs GRCh38 from chr1 length and suggests a public FASTA URL
+when no local reference is configured (see `core/reference.py`).
+
+**Any reference URL must be openable by pysam for random access**, which means uncompressed or
+**bgzip**-compressed (never plain gzip) *and* carrying a faidx index (`.fai`, plus `.gzi` for
+bgzip) at the same URL. The UCSC `bigZips` files (`hg19.fa.gz`, `hg38.fa.gz`) satisfy neither and
+fail with a bare `error when opening file` — `GENOME_BUILDS` used to advertise them, which sent
+callers into an unfixable error. Re-verify (HTTP 206 on the FASTA, `.fai`, and `.gzi`) before
+changing any URL there. The suggestion is also **contig-naming-aware**: a `chr1`-style FASTA
+cannot serve a BAM whose contigs are `1`, so the registry keeps one URL per naming style and
+returns `None` (plus a `reference_note`) rather than suggesting a mismatch.
 
 **Workflow rule: call `list_contigs` first on a new BAM to pin the build.** A build mismatch is
 silent and shifts coordinates by ~0.5–2 Mb, which reads as false "benign" evidence downstream.

@@ -1,5 +1,6 @@
 """Unit tests for bamcp.tools module."""
 
+import asyncio
 import json
 
 import pytest
@@ -1005,6 +1006,75 @@ class TestHandleListContigs:
         assert "contigs" in payload
         contigs = payload["contigs"]
         assert len(contigs) == 2
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_suggestion_matches_contig_naming(self, small_bam_path, monkeypatch):
+        """The suggested reference must match the BAM's contig naming style.
+
+        A "chr1"-style FASTA cannot serve a BAM whose contigs are "1" — the fetch
+        raises KeyError — so the suggestion is naming-aware.
+        """
+        import bamcp.core.tools as tools_mod
+
+        # GRCh37 chr1 length, unprefixed naming.
+        monkeypatch.setattr(
+            tools_mod, "_read_contigs_sync", lambda *a, **k: [{"name": "1", "length": 249250621}]
+        )
+        result = await handle_list_contigs({"file_path": small_bam_path}, BAMCPConfig())
+        payload = json.loads(result["content"][0]["text"])
+
+        assert payload["contig_style"] == "nochr"
+        assert payload["suggested_reference_url"] is not None
+        # Never suggest a UCSC bigZips FASTA: plain gzip, no .fai, cannot be opened.
+        assert "bigZips" not in payload["suggested_reference_url"]
+        assert payload["reference_note"] is None
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_no_verified_reference_says_so_instead_of_guessing(
+        self, small_bam_path, monkeypatch
+    ):
+        """chr-prefixed GRCh37 has no verified indexed public FASTA — explain, don't guess."""
+        import bamcp.core.tools as tools_mod
+
+        monkeypatch.setattr(
+            tools_mod, "_read_contigs_sync", lambda *a, **k: [{"name": "chr1", "length": 249250621}]
+        )
+        result = await handle_list_contigs({"file_path": small_bam_path}, BAMCPConfig())
+        payload = json.loads(result["content"][0]["text"])
+
+        assert payload["contig_style"] == "chr"
+        assert payload["suggested_reference_url"] is None
+        assert payload["reference_note"] is not None
+        assert "faidx" in payload["reference_note"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_no_guidance_when_caller_supplied_a_reference(
+        self, small_bam_path, ref_fasta_path, monkeypatch
+    ):
+        """Don't tell a caller to supply a reference they just supplied.
+
+        The suggestion gates on the EFFECTIVE reference, not only
+        config.reference — an explicit `reference` argument was already used to
+        read this header, so emitting a suggestion (or a note saying "supply
+        your own") is advice the caller has already taken.
+        """
+        import bamcp.core.tools as tools_mod
+
+        # chr-prefixed GRCh37 — the one build/style pair with no verified URL,
+        # so without this fix the note would fire.
+        monkeypatch.setattr(
+            tools_mod, "_read_contigs_sync", lambda *a, **k: [{"name": "chr1", "length": 249250621}]
+        )
+        result = await handle_list_contigs(
+            {"file_path": small_bam_path, "reference": ref_fasta_path}, BAMCPConfig()
+        )
+        payload = json.loads(result["content"][0]["text"])
+
+        assert payload["suggested_reference_url"] is None
+        assert payload["reference_note"] is None
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -2793,3 +2863,47 @@ class TestSelfDescribingFilters:
         assert payload["applied_filters"]["min_vaf"] == config_with_ref.min_vaf
         assert "max_reads" not in payload["applied_filters"]
         assert payload["filter_note"] == _FILTER_ABSENCE_NOTE
+
+
+class TestFetchRegionTimeoutMessage:
+    """A parse timeout must reach the caller with a diagnosable message.
+
+    asyncio.TimeoutError stringifies to "", and FastMCP renders a failed call as
+    f"Error executing tool {name}: {exc}" — so a timeout surfaced as literally
+    "Error executing tool visualize_region:" with no type, region, or hint. That
+    empty string is what made this failure so hard to place.
+    """
+
+    @pytest.mark.unit
+    async def test_timeout_message_is_not_empty(self, monkeypatch):
+        import bamcp.core.tools as tools_mod
+
+        async def _boom(*args, **kwargs):
+            raise asyncio.TimeoutError()
+
+        monkeypatch.setattr(tools_mod, "_fetch_region_data", _boom)
+
+        with pytest.raises(TimeoutError) as exc_info:
+            await tools_mod._fetch_region_with_timeout("/x.bam", "chr1:1-100", None, BAMCPConfig())
+
+        message = str(exc_info.value)
+        assert message.strip(), "timeout must not stringify to an empty message"
+        assert "chr1:1-100" in message
+        assert "Timed out" in message
+
+    @pytest.mark.unit
+    async def test_remote_reference_timeout_mentions_the_warm_retry(self, monkeypatch):
+        """A remote reference is the usual cold-start culprit — say so."""
+        import bamcp.core.tools as tools_mod
+
+        async def _boom(*args, **kwargs):
+            raise asyncio.TimeoutError()
+
+        monkeypatch.setattr(tools_mod, "_fetch_region_data", _boom)
+
+        with pytest.raises(TimeoutError) as exc_info:
+            await tools_mod._fetch_region_with_timeout(
+                "/x.bam", "chr1:1-100", "https://example.com/ref.fa.gz", BAMCPConfig()
+            )
+
+        assert "retrying" in str(exc_info.value)

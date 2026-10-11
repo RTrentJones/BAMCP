@@ -104,5 +104,11 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD python /app/docker/healthcheck.py || exit 1
 
+# Deploy identity: the commit this image was built from, served at /__version so Greenlight's
+# verify gate can prove the running container is the build CI just shipped. Declared last so a
+# per-commit value never invalidates the cached layers above. Unset (local builds) → sha: null.
+ARG GREENLIGHT_SHA=""
+ENV GREENLIGHT_SHA=${GREENLIGHT_SHA}
+
 ENTRYPOINT ["/app/docker/entrypoint.sh"]
 CMD ["python", "-m", "bamcp"]

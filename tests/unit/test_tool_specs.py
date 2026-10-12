@@ -37,3 +37,31 @@ def test_specs_are_wellformed_json_schema():
 def test_get_tool_spec_returns_none_for_unknown():
     assert get_tool_spec("does_not_exist") is None
     assert get_tool_spec("get_variants") is not None
+
+
+def _server_schemas() -> dict[str, dict]:
+    from bamcp.config import BAMCPConfig
+    from bamcp.server import create_server
+
+    server = create_server(BAMCPConfig())
+    return {name: tool.parameters for name, tool in server._tool_manager._tools.items()}
+
+
+@pytest.mark.unit
+def test_specs_cover_exactly_the_server_tools():
+    assert set(TOOL_SPECS) == set(_server_schemas())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", sorted(TOOL_SPECS))
+def test_spec_parameters_match_server_schema(name):
+    """Parity: every spec's properties/required must equal what FastMCP exposes.
+
+    The specs set additionalProperties False, so a parameter the server accepts but the spec
+    omits is one the eval model can never pass (and vice versa: a spec-only parameter is one
+    the real server rejects). Comparing names alone let these drift before.
+    """
+    server_schema = _server_schemas()[name]
+    spec_schema = TOOL_SPECS[name]["input_schema"]
+    assert set(spec_schema["properties"]) == set(server_schema.get("properties", {})), name
+    assert set(spec_schema.get("required", [])) == set(server_schema.get("required", [])), name

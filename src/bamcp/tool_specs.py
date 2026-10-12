@@ -4,9 +4,11 @@ Single source of truth for the LLM-facing description and parameter schema of
 each BAMCP tool. The FastMCP server (``server.py``) derives its schemas from
 function signatures; this registry mirrors those so the eval harness exposes the
 *same* descriptions and parameter schemas a real MCP client would see — instead
-of the placeholder ``{additionalProperties: true}`` it used before. Keeping the
-two in sync is a documentation/fidelity concern; a test asserts the registry
-covers every routed tool.
+of the placeholder ``{additionalProperties: true}`` it used before. Because each
+schema sets ``additionalProperties: False``, a parameter missing here is one the
+eval model can never pass — so ``tests/unit/test_tool_specs.py`` asserts, for every
+tool, that the property and required sets match the schema FastMCP derives from
+``server.py``. Add or rename a parameter in both places.
 
 Each entry is ``{"description": str, "input_schema": <JSON Schema object>}``.
 """
@@ -18,6 +20,13 @@ from typing import Any
 _STR = {"type": "string"}
 _INT = {"type": "integer"}
 _NUM = {"type": "number"}
+_VCF_PATH = {**_STR, "description": "Optional VCF/BCF of the caller's variant calls"}
+_VARIANT_SOURCE = {
+    **_STR,
+    "enum": ["auto", "vcf", "bamcp"],
+    "description": "auto: BAMCP candidates with the VCF overlaid; vcf: the VCF is "
+    "authoritative (requires vcf_path); bamcp: BAMCP candidates only",
+}
 
 
 def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -39,6 +48,8 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "file_path": _STR,
                 "region": {**_STR, "description": "e.g. chr1:1000-2000"},
                 "reference": _STR,
+                "vcf_path": _VCF_PATH,
+                "variant_source": _VARIANT_SOURCE,
                 "min_vaf": _NUM,
                 "min_depth": _INT,
             },
@@ -61,7 +72,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "jump_to": {
         "description": "Jump to a specific genomic position and view the surrounding reads in "
-        "the interactive viewer.",
+        "the interactive viewer. If contig is omitted, the BAM's first contig is used.",
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -69,6 +80,8 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "contig": _STR,
                 "window": _INT,
                 "reference": _STR,
+                "vcf_path": _VCF_PATH,
+                "variant_source": _VARIANT_SOURCE,
             },
             ["file_path", "position"],
         ),
@@ -77,7 +90,13 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": "Visualize aligned reads in a genomic region with the interactive MCP "
         "Apps viewer. Auto-detects compact mode for large regions.",
         "input_schema": _obj(
-            {"file_path": _STR, "region": _STR, "reference": _STR},
+            {
+                "file_path": _STR,
+                "region": _STR,
+                "reference": _STR,
+                "vcf_path": _VCF_PATH,
+                "variant_source": _VARIANT_SOURCE,
+            },
             ["file_path", "region"],
         ),
     },
@@ -85,7 +104,13 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": "Get a text summary of a genomic region (read count, coverage, and each "
         "variant with confidence, artifact risk, and strand balance) for LLM reasoning. No UI.",
         "input_schema": _obj(
-            {"file_path": _STR, "region": _STR, "reference": _STR},
+            {
+                "file_path": _STR,
+                "region": _STR,
+                "reference": _STR,
+                "vcf_path": _VCF_PATH,
+                "variant_source": _VARIANT_SOURCE,
+            },
             ["file_path", "region"],
         ),
     },
@@ -128,8 +153,9 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "scan_variants": {
         "description": "Scan an entire contig for variants using fast coverage-based detection. "
-        "Requires a reference genome. Returns up to 500 variants ranked by VAF. Use list_contigs "
-        "first to detect the genome build and get a reference URL.",
+        "Requires a reference genome. Returns up to 500 variants ranked by VAF. If contig is "
+        "omitted, the BAM's first contig is scanned. Use list_contigs first to detect the genome "
+        "build and get a reference URL.",
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -143,11 +169,20 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "search_gene": {
         "description": "Search for a gene by symbol (e.g. BRCA1, TP53) and return its genomic "
-        "coordinates. Use this to navigate to a gene's location by name.",
-        "input_schema": _obj({"symbol": _STR}, ["symbol"]),
+        "coordinates. Coordinates are build-specific: pass the BAM's file_path so the build is "
+        "auto-detected, or set build (GRCh37/GRCh38) to override.",
+        "input_schema": _obj(
+            {
+                "symbol": _STR,
+                "file_path": _STR,
+                "build": {**_STR, "description": "GRCh37/hg19 or GRCh38/hg38"},
+            },
+            ["symbol"],
+        ),
     },
     "cleanup_cache": {
-        "description": "Clean up this session's cached BAM index files.",
+        "description": "Clear the server's downloaded BAM index files and region cache "
+        "(single-client stdio servers only; shared HTTP servers expire their cache by TTL).",
         "input_schema": _obj({}, []),
     },
     "classify_variant": {

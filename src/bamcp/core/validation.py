@@ -21,11 +21,15 @@ CHROM_PATTERN = re.compile(r"^(chr)?(\d{1,2}|[XYM]|MT)$", re.IGNORECASE)
 # Pattern for valid allele strings (only ACGTN)
 ALLELE_PATTERN = re.compile(r"^[ACGTN]+$", re.IGNORECASE)
 
-# Pattern for valid genomic region strings (e.g., chr1:1000-2000 or chr1:1,000-2,000)
+# Pattern for valid genomic region strings (e.g., chr1:1000-2000 or chr1:1,000-2,000).
+# The contig follows the SAM spec's reference-name grammar ([0-9A-Za-z!#$%&+./:;?@^_|~-]
+# then [0-9A-Za-z!#$%&*+./:;=?@^_|~-]*), so non-primary and non-human contigs (chrUn_*,
+# GL000*, chrEBV, HLA-A*01:01:01:01, ...) are accepted; whitespace, quotes, brackets,
+# backslashes and control characters are not. The contig may itself contain ':' (HLA), so the
+# coordinates are anchored to the END of the string — split on the last ':' when parsing.
 REGION_PATTERN = re.compile(
-    r"^(chr)?(\d{1,2}|[XYM]|MT):(\d{1,3}(?:,\d{3})*|\d{1,11})-"
-    r"(\d{1,3}(?:,\d{3})*|\d{1,11})$",
-    re.IGNORECASE,
+    r"^[0-9A-Za-z!#$%&+./:;?@^_|~-][0-9A-Za-z!#$%&*+./:;=?@^_|~-]*:"
+    r"(\d{1,3}(?:,\d{3})*|\d{1,11})-(\d{1,3}(?:,\d{3})*|\d{1,11})\Z"
 )
 
 # Input length limits

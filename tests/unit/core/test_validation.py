@@ -342,7 +342,29 @@ class TestValidateRegion:
         assert not REGION_PATTERN.match("chr1")
         assert not REGION_PATTERN.match("chr1:abc-def")
         assert not REGION_PATTERN.match("")
-        assert not REGION_PATTERN.match("chrABC:1-2")
+        assert not REGION_PATTERN.match("chr 1:1-2")  # whitespace
+        assert not REGION_PATTERN.match("*chr1:1-2")  # '*' cannot lead a SAM name
+        assert not REGION_PATTERN.match("chr1<x>:1-2")  # brackets
+        assert not REGION_PATTERN.match("chr1\\x:1-2")  # backslash
+        assert not REGION_PATTERN.match("chr1\n:1-2")  # control character
+        assert not REGION_PATTERN.match(":1-2")  # empty contig
+        assert not REGION_PATTERN.match("chr1:1-2\n")  # trailing newline (no `$` loophole)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "region",
+        [
+            "chrUn_KI270742v1:1-100",
+            "GL000220.1:1-100",
+            "chrEBV:1-100",
+            "chr1_KI270706v1_random:1-100",
+            "HLA-A*01:01:01:01:1-100",
+            "NC_000001.11:1,000-2,000",
+        ],
+    )
+    def test_region_pattern_accepts_sam_spec_contigs(self, region):
+        """Non-primary / non-human contigs (SAM reference-name grammar) are valid regions."""
+        validate_region(region)
 
 
 class TestChromosomePattern:

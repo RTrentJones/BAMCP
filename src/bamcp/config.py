@@ -76,7 +76,7 @@ class BAMCPConfig:
     allow_remote_files: bool = False
     allowed_remote_hosts: list[str] | None = None
     trusted_hosts: list[str] | None = None
-    rate_limit: int = 60  # requests per minute per IP
+    rate_limit: int = 120  # requests per minute per IP (every MCP JSON-RPC POST counts)
     # IPs/CIDRs of trusted reverse proxies. X-Forwarded-For is honored ONLY when the direct peer
     # is one of these (default: loopback, since the cloudflared tunnel sidecar is co-located).
     # Otherwise XFF is ignored and the direct socket IP is used — an untrusted client cannot spoof
@@ -208,7 +208,7 @@ class BAMCPConfig:
                 h.strip() for h in env.get("BAMCP_TRUSTED_HOSTS", "").split(",") if h.strip()
             ]
             or None,
-            rate_limit=int(env.get("BAMCP_RATE_LIMIT", "60")),
+            rate_limit=int(env.get("BAMCP_RATE_LIMIT", "120")),
             rate_limit_trusted_proxies=[
                 p.strip()
                 for p in env.get("BAMCP_RATE_LIMIT_TRUSTED_PROXIES", "").split(",")

@@ -761,9 +761,9 @@ class TestScanVariantsChunked:
 
     @pytest.mark.unit
     def test_nonexistent_contig(self, small_bam_path, ref_fasta_path):
-        """Should return empty list for nonexistent contig."""
-        variants = scan_variants_chunked(small_bam_path, "chrZ", ref_fasta_path)
-        assert variants == []
+        """An unknown contig is an error, never a silent empty "no variants" result."""
+        with pytest.raises(ValueError, match="not found in the alignment header"):
+            scan_variants_chunked(small_bam_path, "chrZ", ref_fasta_path)
 
     @pytest.mark.unit
     def test_respects_min_vaf(self, small_bam_path, ref_fasta_path):

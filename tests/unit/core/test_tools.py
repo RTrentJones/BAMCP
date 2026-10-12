@@ -1981,14 +1981,15 @@ class TestHandleScanVariants:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_nonexistent_contig_empty(self, small_bam_path, config_with_ref):
-        """Should return empty list for nonexistent contig."""
+    async def test_nonexistent_contig_is_an_error(self, small_bam_path, config_with_ref):
+        """An unknown contig returns an error, not an empty result that reads as
+        "scanned, no variants"."""
         result = await handle_scan_variants(
             {"file_path": small_bam_path, "contig": "chrZ"}, config_with_ref
         )
         payload = json.loads(result["content"][0]["text"])
-        assert payload["variants"] == []
-        assert payload["count"] == 0
+        assert "chrZ" in payload["error"]
+        assert "variants" not in payload
 
 
 class TestMediumRoadmapCoverage:
@@ -2751,6 +2752,9 @@ class TestAppliedFiltersHelpers:
             "min_depth": cfg.min_depth,
             "min_mapq": cfg.min_mapq,
             "min_baseq": cfg.min_baseq,
+            # Fixed read exclusions + overlap policy are always echoed.
+            "excluded_reads": ["unmapped", "secondary", "supplementary", "duplicate", "qcfail"],
+            "overlapping_mates": "both_counted",
         }
         assert "max_reads" not in f
 

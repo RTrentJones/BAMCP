@@ -53,6 +53,10 @@ class RegionData:
     coverage: list[int]
     variants: list[dict]
     reference_sequence: str | None = None
+    # True when the max_reads cap stopped read extraction early: ``reads`` is then a
+    # prefix of the region's reads, so read-derived evidence is incomplete (coverage
+    # and candidate VAF/depth come from uncapped passes and are unaffected).
+    reads_truncated: bool = False
 
 
 # Maximum region size to prevent DoS via unbounded memory allocation
@@ -575,8 +579,13 @@ def annotate_vcf_snv_support(
     min_mapq: int = 0,
     min_baseq: int = 0,
     index_filename: str | None = None,
+    sources: tuple[str, ...] = ("vcf",),
 ) -> list[dict]:
     """Attach truncation-free read-level support + per-read metrics to VCF SNVs (in place).
+
+    ``sources`` selects which variants are annotated; :func:`fetch_region` also passes
+    ``("bamcp",)`` to score its own SNV candidates from the pileup when the
+    ``max_reads`` cap truncated the read list their evidence would otherwise use.
 
     Pileups each VCF SNV site — htslib sees every read there, so this is immune to
     the ``max_reads`` cap that limits the serialized read list — and, for reads
@@ -587,7 +596,9 @@ def annotate_vcf_snv_support(
     quality/position/MAPQ histograms and mean quality. Indels/SVs are untouched
     (single-base support can't corroborate them).
     """
-    snvs = [v for v in variants if v.get("source") == "vcf" and len(v["ref"]) == 1 == len(v["alt"])]
+    snvs = [
+        v for v in variants if v.get("source") in sources and len(v["ref"]) == 1 == len(v["alt"])
+    ]
     if not snvs:
         return variants
 
@@ -736,12 +747,14 @@ def fetch_region(
                 ref_seq = fasta.fetch(contig, start, end)
 
         read_count = 0
+        reads_truncated = False
         for read in samfile.fetch(contig, start, end):
             if not read_passes_filters(read, min_mapq):
                 continue
 
             read_count += 1
             if read_count > max_reads:
+                reads_truncated = True
                 break
 
             mismatches: list[dict] = []
@@ -838,6 +851,21 @@ def fetch_region(
             (cov_A, cov_C, cov_G, cov_T), ref_seq, contig, start, min_vaf, min_depth, gap_depth
         )
         variants.extend(indels)
+        if reads_truncated:
+            # The candidates' VAF/depth come from uncapped count_coverage, but their
+            # strand/quality evidence would come from the capped read list — silently
+            # zero for any site past the cap. Pileup the SNV sites instead (htslib sees
+            # every read); serialization scores them from this support.
+            annotate_vcf_snv_support(
+                bam_path,
+                region,
+                reference_path,
+                variants,
+                min_mapq,
+                min_baseq,
+                index_filename,
+                sources=("bamcp",),
+            )
 
     return RegionData(
         contig=contig,
@@ -847,6 +875,7 @@ def fetch_region(
         coverage=coverage,
         variants=variants,
         reference_sequence=ref_seq,
+        reads_truncated=reads_truncated,
     )
 
 
@@ -1117,7 +1146,51 @@ def _detect_indels_if_small(
     )
 
 
-def scan_variants_chunked(
+@dataclass
+class ScanResult:
+    """A contig scan's candidates plus what was (and wasn't) scanned.
+
+    ``scanned_start``/``scanned_end`` are internal 0-based half-open; the tool layer
+    renders them 1-based. ``total_candidates`` counts candidates before the
+    ``SCAN_VARIANTS_MAX_RESULTS`` cap, so ``results_capped`` is self-describing.
+    """
+
+    contig: str
+    contig_length: int
+    scanned_start: int
+    scanned_end: int
+    variants: list[dict]
+    total_candidates: int
+    results_capped: bool
+    truncated_by_max_region: bool
+
+
+def _deletion_depth_at(
+    samfile: pysam.AlignmentFile, contig: str, positions: list[int], min_mapq: int
+) -> dict[int, int]:
+    """Count reads carrying a deletion at each of ``positions`` (spliced skips excluded).
+
+    The scan's SNV candidates come from count_coverage, whose A/C/G/T-only denominator
+    understates depth inside deletions. Rather than pileup a whole chromosome, pileup
+    only short intervals around the candidates and add the deletion depth back — the
+    same gap_depth correction get_variants applies via detect_indels.
+    """
+    wanted = set(positions)
+    counts: dict[int, int] = {}
+    for iv_start, iv_stop in _merge_snv_intervals(positions, SNV_PILEUP_MERGE_GAP):
+        for column in _pileup(samfile, contig, iv_start, iv_stop):
+            pos = column.reference_pos
+            if pos not in wanted:
+                continue
+            counts[pos] = sum(
+                1
+                for pread in column.pileups
+                if pread.is_del and read_passes_filters(pread.alignment, min_mapq)
+            )
+    return counts
+
+
+def scan_contig(
     bam_path: str,
     contig: str,
     reference_path: str,
@@ -1128,37 +1201,26 @@ def scan_variants_chunked(
     min_baseq: int = 0,
     max_region: int = 250_000_000,
     index_filename: str | None = None,
-) -> list[dict]:
-    """Scan an entire contig for variants using fast coverage-based detection.
+) -> ScanResult:
+    """Scan a contig for SNV candidates using fast coverage-based detection.
 
     Uses pysam's count_coverage (C implementation) in chunks — no read
-    extraction — so scanning a full human chromosome is feasible.
+    extraction — so scanning a full human chromosome is feasible. SNV-only: indels
+    need a per-read pileup that is too slow at chromosome scale. Candidate VAF/depth
+    include reads deleted at the site (as get_variants does), and N/IUPAC reference
+    bases are skipped.
 
-    Args:
-        bam_path: Path to BAM/CRAM file.
-        contig: Contig to scan (e.g. "chr13").
-        reference_path: Path to reference FASTA (required).
-        chunk_size: Window size per iteration.
-        min_vaf: Minimum variant allele frequency.
-        min_depth: Minimum read depth.
-        min_mapq: Minimum mapping quality filter.
-        min_baseq: Minimum base quality for coverage/candidate variant counts.
-        max_region: Maximum bases to scan (safety limit).
-        index_filename: Path to cached index file for remote BAMs.
-
-    Returns:
-        List of variant dicts sorted by VAF descending, capped at 500.
+    Raises:
+        ValueError: If ``contig`` is not in the alignment header.
     """
     from ..constants import SCAN_VARIANTS_MAX_RESULTS
 
     all_variants: list[dict] = []
 
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        # Get contig length from header
-        contig_lengths = dict(zip(samfile.references, samfile.lengths, strict=False))
-        contig_length = contig_lengths.get(contig)
+        contig_length = _header_lengths(samfile).get(contig)
         if contig_length is None:
-            return []
+            raise ValueError(f"Contig '{contig}' not found in the alignment header")
 
         scan_end = min(contig_length, max_region)
 
@@ -1184,8 +1246,55 @@ def scan_variants_chunked(
                     min_vaf,
                     min_depth,
                 )
+                if chunk_variants:
+                    gaps = _deletion_depth_at(
+                        samfile, contig, sorted({v["position"] for v in chunk_variants}), min_mapq
+                    )
+                    for v in chunk_variants:
+                        gap = gaps.get(v["position"], 0)
+                        if gap:
+                            v["depth"] += gap
+                            v["vaf"] = round(v["alt_count"] / v["depth"], 3)
+                    # Adding deletion depth only lowers VAF: re-apply the threshold.
+                    chunk_variants = [v for v in chunk_variants if v["vaf"] >= min_vaf]
                 all_variants.extend(chunk_variants)
 
     # Sort by VAF descending and cap results
     all_variants.sort(key=lambda v: v["vaf"], reverse=True)
-    return all_variants[:SCAN_VARIANTS_MAX_RESULTS]
+    return ScanResult(
+        contig=contig,
+        contig_length=contig_length,
+        scanned_start=0,
+        scanned_end=scan_end,
+        variants=all_variants[:SCAN_VARIANTS_MAX_RESULTS],
+        total_candidates=len(all_variants),
+        results_capped=len(all_variants) > SCAN_VARIANTS_MAX_RESULTS,
+        truncated_by_max_region=scan_end < contig_length,
+    )
+
+
+def scan_variants_chunked(
+    bam_path: str,
+    contig: str,
+    reference_path: str,
+    chunk_size: int = 50_000,
+    min_vaf: float = 0.1,
+    min_depth: int = 3,
+    min_mapq: int = 0,
+    min_baseq: int = 0,
+    max_region: int = 250_000_000,
+    index_filename: str | None = None,
+) -> list[dict]:
+    """Candidates from :func:`scan_contig`, sorted by VAF descending, capped at 500."""
+    return scan_contig(
+        bam_path,
+        contig,
+        reference_path,
+        chunk_size,
+        min_vaf,
+        min_depth,
+        min_mapq,
+        min_baseq,
+        max_region,
+        index_filename,
+    ).variants

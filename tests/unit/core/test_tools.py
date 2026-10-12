@@ -7,7 +7,6 @@ import pytest
 
 from bamcp.config import BAMCPConfig
 from bamcp.constants import (
-    DEFAULT_CONTIG,
     LOW_CONFIDENCE_MAX_STRAND_BIAS,
     LOW_CONFIDENCE_MIN_DEPTH,
     LOW_CONFIDENCE_MIN_MEAN_QUALITY,
@@ -1159,7 +1158,7 @@ class TestHandleJumpTo:
         )
         # Payload is in _meta.ui/init
         payload = result["_meta"]["ui/init"]
-        assert payload["contig"] == DEFAULT_CONTIG
+        assert payload["contig"] == "chr1"  # first contig in the BAM header
         # Position 150 should be within the returned start-end range
         assert payload["start"] <= 150 <= payload["end"]
 
@@ -1194,7 +1193,7 @@ class TestHandleJumpTo:
         result = await handle_jump_to({"file_path": small_bam_path, "position": 150}, config)
         # Payload is in _meta.ui/init
         payload = result["_meta"]["ui/init"]
-        assert payload["contig"] == DEFAULT_CONTIG
+        assert payload["contig"] == "chr1"  # first contig in the BAM header
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -1945,10 +1944,11 @@ class TestHandleScanVariants:
     @pytest.mark.asyncio
     async def test_requires_reference(self, small_bam_path, config):
         """Should return error when no reference is configured."""
-        result = await handle_scan_variants({"file_path": small_bam_path, "contig": "chr1"}, config)
-        payload = json.loads(result["content"][0]["text"])
-        assert "error" in payload
-        assert "reference" in payload["error"].lower()
+        from bamcp.core.errors import ToolInputError
+
+        # A failure is an error result (raised), not a successful {"error": ...} payload.
+        with pytest.raises(ToolInputError, match="Reference genome required"):
+            await handle_scan_variants({"file_path": small_bam_path, "contig": "chr1"}, config)
 
     @pytest.mark.unit
     @pytest.mark.asyncio

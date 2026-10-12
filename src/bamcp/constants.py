@@ -24,7 +24,6 @@ DEFAULT_MIN_VAF = 0.02
 DEFAULT_MIN_DEPTH = 2
 DEFAULT_MIN_MAPQ = 0
 DEFAULT_MIN_BASEQ = 0
-DEFAULT_CONTIG = "chr1"
 
 # Candidate indel detection runs a pysam pileup pass (costlier than count_coverage).
 # Skip it above this region size so large visualize_region requests stay responsive;

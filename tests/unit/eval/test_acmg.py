@@ -137,3 +137,128 @@ def test_shipped_acmg_manifest_is_valid():
         assert classification_index(c.expected_classification) is not None, (
             c.expected_classification
         )
+
+
+# ── Review fixes: extraction ────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("not pathogenic", None),
+        ("non-pathogenic", None),
+        ("is not considered benign", None),
+        ("Likely-Pathogenic", "Likely Pathogenic"),
+        ("likely  benign", "Likely Benign"),
+    ],
+)
+def test_normalize_handles_negation_and_spelling(raw, expected):
+    assert normalize_classification(raw) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # Fallback scan: the two-word label must win over the word it contains.
+        ("After weighing the evidence this is likely pathogenic.", "Likely Pathogenic"),
+        ("Population data make it likely benign.", "Likely Benign"),
+        # A negated mention is not a verdict.
+        ("It is likely benign and not pathogenic.", "Likely Benign"),
+        ("Overall VUS; this is not pathogenic.", "Uncertain Significance"),
+    ],
+)
+def test_extract_last_mention_is_alias_and_negation_aware(text, expected):
+    assert extract_classification(text) == expected
+
+
+@pytest.mark.unit
+def test_extract_takes_last_explicit_classification_over_echoed_tool_output():
+    text = (
+        'classify_variant returned {"classification": "Pathogenic", "criteria": []}\n'
+        "Reviewing population frequency, I disagree.\n"
+        "classification: Likely Benign"
+    )
+    assert extract_classification(text) == "Likely Benign"
+
+
+@pytest.mark.unit
+def test_extract_final_classification_beats_later_plain_classification():
+    text = "final_classification: **Likely Pathogenic**\n(tool classification: Benign)"
+    assert extract_classification(text) == "Likely Pathogenic"
+
+
+# ── Review fixes: the gate must beat a constant-VUS answer ──────────────────
+
+
+def _shipped_cases():
+    return load_acmg_cases("tests/eval/datasets/acmg_v1/manifest.yaml")
+
+
+@pytest.mark.unit
+def test_constant_vus_baseline_fails_the_gate():
+    from bamcp.eval.acmg import constant_baseline
+
+    cases = _shipped_cases()
+    baseline = constant_baseline(cases)
+    # The old within-one >= 0.5 floor passed this degenerate classifier.
+    assert baseline.within_one_accuracy >= 0.5
+    passed, failures = baseline.meets_floors(baseline)
+    assert not passed
+    assert any("baseline" in f for f in failures)
+    assert any("anchors" in f for f in failures)
+
+
+@pytest.mark.unit
+def test_perfect_classifier_passes_gate_and_reports_anchors():
+    from bamcp.eval.acmg import constant_baseline
+
+    cases = _shipped_cases()
+    report = build_report(
+        (c, score_classification(c.expected_classification, c.expected_classification))
+        for c in cases
+    )
+    assert report.anchors_total >= 4 and report.anchors_correct == report.anchors_total
+    passed, failures = report.meets_floors(constant_baseline(cases))
+    assert passed, failures
+    assert report.as_dict()["anchors_correct"] == report.anchors_total
+
+
+@pytest.mark.unit
+def test_anchor_on_wrong_side_fails_even_with_high_exact_accuracy():
+    from bamcp.eval.acmg import constant_baseline
+
+    cases = _shipped_cases()
+    scored = []
+    flipped = False
+    for c in cases:
+        pred = c.expected_classification
+        if not flipped and normalize_classification(pred) == "Pathogenic":
+            pred, flipped = "Uncertain Significance", True
+        scored.append((c, score_classification(pred, c.expected_classification)))
+    report = build_report(scored)
+    assert report.exact_accuracy > 0.5
+    passed, failures = report.meets_floors(constant_baseline(cases))
+    assert not passed
+    assert failures == [
+        f"B/P anchors on the wrong side: {report.anchors_total - 1}/{report.anchors_total} correct"
+    ]
+
+
+@pytest.mark.unit
+def test_empty_report_fails_gate():
+    from bamcp.eval.acmg import constant_baseline
+
+    empty = build_report([])
+    assert empty.meets_floors(constant_baseline([]))[0] is False
+
+
+@pytest.mark.unit
+def test_format_report_includes_baseline():
+    from bamcp.eval.acmg import _format_report, constant_baseline
+
+    cases = _shipped_cases()
+    baseline = constant_baseline(cases)
+    out = _format_report(baseline, baseline)
+    assert "constant-VUS baseline" in out and "B/P anchors" in out

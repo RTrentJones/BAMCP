@@ -76,60 +76,74 @@ def _external_block(
     return block
 
 
-def _max_population_af(gnomad_result: Any) -> tuple[float | None, str | None]:
-    """Return the highest per-population allele frequency and its population id."""
-    pops = getattr(gnomad_result, "populations", None) or []
-    best_af: float | None = None
-    best_id: str | None = None
-    for pop in pops:
-        af = getattr(pop, "af", None)
-        if af is None:
-            continue
-        if best_af is None or af > best_af:
-            best_af = af
-            best_id = getattr(pop, "id", None)
-    return best_af, best_id
-
-
 def _population_block(r: Any) -> dict[str, Any]:
-    """Shape a gnomAD result. ``filters``/``an``/``ac`` are read tolerantly (``getattr``)
-    so the ACMG frequency criteria can refuse to read a filtered or low-AN site as
-    rarity evidence, whatever subset of fields the client surfaces."""
-    max_af, max_pop = _max_population_af(r)
+    """Shape a gnomAD result. ``max_pop_af`` is the client's gated population maximum
+    (continental groups with adequate AN only), never a raw max over ``populations``:
+    a lone allele in a tiny subgroup must not read as BA1. ``filters``/``an``/``ac`` and
+    ``frequency_reliable`` let the ACMG frequency criteria refuse to read a filtered or
+    low-AN site as rarity evidence. Fields are read tolerantly (``getattr``)."""
     return {
         "global_af": getattr(r, "global_af", None),
-        "max_pop_af": max_af,
-        "max_pop": max_pop,
+        "max_pop_af": getattr(r, "max_pop_af", None),
+        "max_pop": getattr(r, "max_pop", None),
+        "max_pop_an": getattr(r, "max_pop_an", None),
+        "faf95_popmax": getattr(r, "faf95_popmax", None),
         "homozygote_count": getattr(r, "homozygote_count", None),
         "ac": getattr(r, "ac", None),
         "an": getattr(r, "an", None),
         "filters": list(getattr(r, "filters", None) or []),
+        "frequency_reliable": getattr(r, "frequency_reliable", True),
+        "warnings": list(getattr(r, "warnings", None) or []),
         "source": getattr(r, "source", None),
+        "dataset": getattr(r, "dataset", None),
     }
 
 
-async def _lookup_clinvar_safe(config: BAMCPConfig, chrom: str, pos: int, ref: str, alt: str):
+async def _lookup_clinvar_safe(
+    config: BAMCPConfig, chrom: str, pos: int, ref: str, alt: str, build: str | None = None
+):
     if not getattr(config, "clinvar_enabled", True):
         return DISABLED
     from ..core.tools import get_clinvar_client
 
     try:
-        return await get_clinvar_client(config).lookup(chrom, pos, ref, alt)
+        return await get_clinvar_client(config).lookup(chrom, pos, ref, alt, build=build)
     except Exception as e:  # noqa: BLE001 — degrade to "unavailable" rather than fail fusion
         logger.warning("ClinVar lookup failed during fusion: %s", e)
         return UNAVAILABLE
 
 
-async def _lookup_gnomad_safe(config: BAMCPConfig, chrom: str, pos: int, ref: str, alt: str):
+async def _lookup_gnomad_safe(
+    config: BAMCPConfig, chrom: str, pos: int, ref: str, alt: str, build: str | None = None
+):
     if not getattr(config, "gnomad_enabled", True):
         return DISABLED
     from ..core.tools import get_gnomad_client
 
     try:
-        return await get_gnomad_client(config).lookup(chrom, pos, ref, alt)
+        return await get_gnomad_client(config).lookup(chrom, pos, ref, alt, build=build)
     except Exception as e:  # noqa: BLE001 — degrade to "unavailable" rather than fail fusion
         logger.warning("gnomAD lookup failed during fusion: %s", e)
         return UNAVAILABLE
+
+
+async def bam_build(file_path: str, config: BAMCPConfig) -> tuple[str | None, str]:
+    """The BAM's detected assembly for external lookups, as ``(build, source)``.
+
+    ``build`` is None (lookups fall back to the server default) when the header can't
+    be read or doesn't identify an assembly; ``source`` says which, so callers can warn.
+    """
+    from ..core.tools import _detect_bam_build
+
+    try:
+        info = await _detect_bam_build(file_path, config)
+    except Exception as e:  # noqa: BLE001 — the observation path reports read failures
+        logger.warning("Genome build detection failed during fusion: %s", e)
+        return None, "server-default (BAM header unreadable)"
+    detected = info.get("build")
+    if detected and detected != "unknown":
+        return detected, "detected-from-bam"
+    return None, "server-default (build not detectable from BAM)"
 
 
 def _observation_from_variant(
@@ -200,7 +214,7 @@ def _count_alt_reads(data: Any, pos0: int, ref: str, alt: str) -> int:
 
 
 async def clinical_context(
-    config: BAMCPConfig, chrom: str, pos: int, ref: str, alt: str
+    config: BAMCPConfig, chrom: str, pos: int, ref: str, alt: str, build: str | None = None
 ) -> dict[str, Any]:
     """Fetch just the external clinical/population context for a variant.
 
@@ -208,13 +222,14 @@ async def clinical_context(
     ``population_frequency`` blocks of :func:`assemble_evidence`. Used by the
     curation tool's optional clinical bridge. A block is ``None`` for a genuine
     not-found, ``{"status": "unavailable"}`` when the source's lookup errored, and
-    ``{"status": "disabled"}`` when the source is switched off on this server.
+    ``{"status": "disabled"}`` when the source is switched off on this server. ``build``
+    is the assembly the coordinates are in (the BAM's); None means the server default.
     """
     ref = ref.upper()
     alt = alt.upper()
     clinvar_result, gnomad_result = await asyncio.gather(
-        _lookup_clinvar_safe(config, chrom, pos, ref, alt),
-        _lookup_gnomad_safe(config, chrom, pos, ref, alt),
+        _lookup_clinvar_safe(config, chrom, pos, ref, alt, build),
+        _lookup_gnomad_safe(config, chrom, pos, ref, alt, build),
     )
 
     clinvar_block = _external_block(
@@ -286,13 +301,17 @@ async def assemble_evidence(
             logger.warning("BAM observation unavailable during fusion: %s", e)
             return None, "alignment file could not be read"
 
+    # External sources must be queried in the BAM's assembly: a GRCh37 BAM looked up at
+    # GRCh38 coordinates reads as a false "not in ClinVar" / wrong gnomAD variant.
+    build, build_source = await bam_build(file_path, config)
+
     # Run the two network lookups concurrently WITH the local BAM read: schedule all
     # three as tasks up front so they genuinely overlap, and cancel any still pending if
     # one raises unexpectedly (gather alone would leave the siblings running).
     tasks = [
         asyncio.ensure_future(_observe()),
-        asyncio.ensure_future(_lookup_clinvar_safe(config, chrom, pos, ref, alt)),
-        asyncio.ensure_future(_lookup_gnomad_safe(config, chrom, pos, ref, alt)),
+        asyncio.ensure_future(_lookup_clinvar_safe(config, chrom, pos, ref, alt, build)),
+        asyncio.ensure_future(_lookup_gnomad_safe(config, chrom, pos, ref, alt, build)),
     ]
     try:
         observed, clinvar_result, gnomad_result = await asyncio.gather(*tasks)
@@ -334,6 +353,8 @@ async def assemble_evidence(
 
     evidence: dict[str, Any] = {
         "variant": {
+            "build": build,
+            "build_source": build_source,
             "location": f"{chrom}:{pos}",
             "change": f"{ref}>{alt}",
             "chrom": chrom,

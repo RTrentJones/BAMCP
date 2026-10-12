@@ -442,9 +442,10 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     # gracefully when a source has no record.
     clinical_ctx: dict[str, Any] | None = None
     if include_clinical:
-        from .fusion import clinical_context
+        from .fusion import bam_build, clinical_context
 
-        clinical_ctx = await clinical_context(config, chrom, pos, ref, alt)
+        build, _ = await bam_build(file_path, config)
+        clinical_ctx = await clinical_context(config, chrom, pos, ref, alt, build)
         curation_summary["clinical_context"] = clinical_ctx
 
     if output_format == "rubric":

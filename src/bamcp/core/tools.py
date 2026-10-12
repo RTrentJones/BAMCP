@@ -23,8 +23,9 @@ import pysam
 
 from ..analysis.evidence import enhance_vcf_variants
 from ..clients.clinvar import ClinVarClient
-from ..clients.genes import GeneClient
+from ..clients.genes import GeneClient, GeneLookupError
 from ..clients.gnomad import GnomadClient, GnomadQueryError
+from ..clients.ncbi import NCBIUnavailableError, TokenBucketRateLimiter, ncbi_rate_limiter
 from ..config import BAMCPConfig
 from ..constants import (
     BAM_PARSE_TIMEOUT_SECONDS,
@@ -143,6 +144,9 @@ class BAMCPServices:
     _clinvar: ClinVarClient | None = field(default=None, repr=False)
     _gnomad: GnomadClient | None = field(default=None, repr=False)
     _genes: GeneClient | None = field(default=None, repr=False)
+    # ONE token bucket for every NCBI E-utilities caller (ClinVar + Gene): NCBI's
+    # 3 req/s (10 with a key) limit is per caller, not per database.
+    _ncbi_limiter: TokenBucketRateLimiter | None = field(default=None, repr=False)
 
     @classmethod
     def from_config(cls, config: BAMCPConfig) -> BAMCPServices:
@@ -154,14 +158,25 @@ class BAMCPServices:
         cache.cleanup_expired_sessions()
         return cls(config=config, cache=cache)
 
+    def ncbi_rate_limiter(self) -> TokenBucketRateLimiter:
+        if self._ncbi_limiter is None:
+            self._ncbi_limiter = ncbi_rate_limiter(self.config.ncbi_api_key)
+        return self._ncbi_limiter
+
     def clinvar(self) -> ClinVarClient:
         if self._clinvar is None:
-            self._clinvar = ClinVarClient(api_key=self.config.ncbi_api_key)
+            self._clinvar = ClinVarClient(
+                api_key=self.config.ncbi_api_key,
+                genome_build=self.config.genome_build,
+                rate_limiter=self.ncbi_rate_limiter(),
+            )
         return self._clinvar
 
     def gnomad(self) -> GnomadClient:
         if self._gnomad is None:
-            self._gnomad = GnomadClient(dataset=self.config.gnomad_dataset)
+            self._gnomad = GnomadClient(
+                dataset=self.config.gnomad_dataset, genome_build=self.config.genome_build
+            )
         return self._gnomad
 
     def genes(self) -> GeneClient:
@@ -169,6 +184,7 @@ class BAMCPServices:
             self._genes = GeneClient(
                 api_key=self.config.ncbi_api_key,
                 genome_build=self.config.genome_build,
+                rate_limiter=self.ncbi_rate_limiter(),
             )
         return self._genes
 
@@ -186,6 +202,7 @@ class BAMCPServices:
         self._clinvar = None
         self._gnomad = None
         self._genes = None
+        self._ncbi_limiter = None
         self.region_cache.clear()
         self.index_download_locks.clear()
 
@@ -318,6 +335,19 @@ def _lookup_result(payload: dict[str, Any], *, status: str, disclaimer: str) -> 
     payload["status"] = status
     payload.setdefault("disclaimer", disclaimer)
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+
+
+def _lookup_build(args: dict[str, Any], config: BAMCPConfig) -> tuple[str | None, str]:
+    """Resolve a lookup's genome build: explicit ``build`` arg, else the server default.
+
+    Returns ``(canonical_build, source)``; ``canonical_build`` is None for an unrecognized
+    explicit build (the caller reports invalid input rather than querying the wrong assembly).
+    """
+    from ..constants import normalize_genome_build
+
+    if args.get("build"):
+        return normalize_genome_build(args["build"]), "explicit"
+    return normalize_genome_build(config.genome_build), "server-default"
 
 
 _CANDIDATE_VARIANT_DISCLAIMER = (
@@ -1272,11 +1302,30 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     if file_path:
         try:
             info = await _detect_bam_build(file_path, config)
-            if info.get("build") and info["build"] != "unknown":
-                detected_build = info["build"]
-        except Exception as e:  # noqa: BLE001 — detection is best-effort reconciliation context
+        except (ValueError, FileNotFoundError) as e:
+            # A bad / disallowed / missing file_path is a caller error — never silently fall
+            # back to the server default as if no BAM had been named.
+            return _err(f"Invalid file_path: {e}", status=_LOOKUP_INVALID)
+        except Exception as e:  # noqa: BLE001 — unreadable header: reconciliation impossible
+            if requested is None:
+                return _err(
+                    f"could not read the BAM header to detect its build ({type(e).__name__}); "
+                    "pass 'build' explicitly (confirm it with list_contigs)",
+                    status=_LOOKUP_UNAVAILABLE,
+                )
+            info = {}
             warnings.append(
                 f"could not detect the BAM's build ({type(e).__name__}); coordinates unreconciled"
+            )
+        if info.get("build") and info["build"] != "unknown":
+            detected_build = info["build"]
+        elif info:
+            # Detection ran but was inconclusive: whatever build we fall back to is
+            # unreconciled with this BAM, and the caller must hear it.
+            warnings.append(
+                "could not determine the BAM's build from its header; coordinates are "
+                "UNRECONCILED with the BAM — confirm its build with list_contigs"
+                + ("" if requested else " or pass 'build'")
             )
 
     # Resolution: explicit override > detected-from-BAM > server default.
@@ -1297,18 +1346,36 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
                 "(server default) — confirm your BAM's build with list_contigs"
             )
 
-    result = await get_gene_client(config).search(symbol, build=effective)
+    try:
+        result = await get_gene_client(config).search(symbol, build=effective)
+    except GeneLookupError as e:
+        # NCBI unreachable / in-band error: the gene's existence is UNKNOWN, not disproven.
+        logger.warning("Gene lookup unavailable for %s: %s", symbol, e)
+        return _err(
+            "Gene lookup unavailable (NCBI error); retry later",
+            status=_LOOKUP_UNAVAILABLE,
+            reason=str(e),
+            genome_build=effective,
+        )
     if result is None:
-        return _err(f"Gene {symbol!r} not found", genome_build=effective)
+        return _err(f"Gene {symbol!r} not found", status=_LOOKUP_NOT_FOUND, genome_build=effective)
 
     # NCBI may not carry the requested assembly → result.build is what we actually got.
-    if result.build != "unknown" and result.build != effective:
+    if result.build == "unknown":
+        warnings.append(
+            "NCBI did not identify the assembly of these coordinates — they are UNVERIFIED "
+            f"against {effective}; confirm before visualizing"
+        )
+    elif result.build != effective:
         warnings.append(f"NCBI returned {result.build} coordinates ({effective} unavailable)")
-    if detected_build and result.build != "unknown" and result.build != detected_build:
+    if detected_build and result.build != detected_build:
         warnings.append(
             f"MISMATCH: these {result.build} coordinates do NOT match the BAM's "
             f"{detected_build} build — visualizing them will show the wrong locus"
         )
+    note = getattr(result, "note", None)
+    if note:
+        warnings.append(note)
 
     payload: dict[str, Any] = {
         "symbol": result.symbol,
@@ -1318,6 +1385,7 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
         "genome_build": result.build,
         "build_source": source,
         "bam_build": detected_build,
+        "coordinate_system": _LLM_COORDINATE_SYSTEM,
     }
     if warnings:
         payload["warning"] = "; ".join(warnings)
@@ -1513,15 +1581,33 @@ async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> di
             {"error": validation_error}, status=_LOOKUP_INVALID, disclaimer=_CLINVAR_DISCLAIMER
         )
 
+    build, build_source = _lookup_build(args, config)
+    if build is None:
+        return _lookup_result(
+            {"error": f"Unrecognized build {args.get('build')!r}; use GRCh37/hg19 or GRCh38/hg38"},
+            status=_LOOKUP_INVALID,
+            disclaimer=_CLINVAR_DISCLAIMER,
+        )
+    build_info = {"genome_build": build, "build_source": build_source}
+
     client = get_clinvar_client(config)
 
     try:
-        result = await client.lookup(chrom, pos, ref, alt)
-    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
-        # Network/HTTP failure — the lookup is UNAVAILABLE, not an authoritative not-found.
+        result = await client.lookup(chrom, pos, ref, alt, build=build)
+    except NCBIUnavailableError as e:
+        # In-band NCBI error, truncated search, unsupported build: absence NOT established.
+        logger.warning("ClinVar lookup unavailable for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
+        return _lookup_result(
+            {"error": "ClinVar lookup unavailable", "reason": str(e), **build_info},
+            status=_LOOKUP_UNAVAILABLE,
+            disclaimer=_CLINVAR_DISCLAIMER,
+        )
+    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError, ValueError) as e:
+        # Network/HTTP failure (or an unparseable body) — the lookup is UNAVAILABLE, not an
+        # authoritative not-found.
         logger.warning("ClinVar lookup failed for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
         return _lookup_result(
-            {"error": "ClinVar lookup failed"},
+            {"error": "ClinVar lookup failed", **build_info},
             status=_LOOKUP_UNAVAILABLE,
             disclaimer=_CLINVAR_DISCLAIMER,
         )
@@ -1537,13 +1623,16 @@ async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> di
         return _lookup_result(
             {
                 "found": False,
-                "message": f"No ClinVar entry found for {chrom}:{pos} {ref}>{alt}",
+                "message": f"No ClinVar entry found for {chrom}:{pos} {ref}>{alt} ({build})",
+                **build_info,
             },
             status=_LOOKUP_NOT_FOUND,
             disclaimer=_CLINVAR_DISCLAIMER,
         )
 
-    return _lookup_result(asdict(result), status=_LOOKUP_FOUND, disclaimer=_CLINVAR_DISCLAIMER)
+    return _lookup_result(
+        {**asdict(result), **build_info}, status=_LOOKUP_FOUND, disclaimer=_CLINVAR_DISCLAIMER
+    )
 
 
 @telemetry_wrapper("lookup_gnomad")
@@ -1571,11 +1660,20 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
             {"error": validation_error}, status=_LOOKUP_INVALID, disclaimer=_GNOMAD_DISCLAIMER
         )
 
+    build, build_source = _lookup_build(args, config)
+    if build is None:
+        return _lookup_result(
+            {"error": f"Unrecognized build {args.get('build')!r}; use GRCh37/hg19 or GRCh38/hg38"},
+            status=_LOOKUP_INVALID,
+            disclaimer=_GNOMAD_DISCLAIMER,
+        )
+    build_info = {"genome_build": build, "build_source": build_source}
+
     client = get_gnomad_client(config)
 
     try:
-        result = await client.lookup(chrom, pos, ref, alt)
-    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
+        result = await client.lookup(chrom, pos, ref, alt, build=build)
+    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError, ValueError) as e:
         # Network/HTTP failure — the lookup is UNAVAILABLE, not an authoritative not-found.
         logger.warning("gnomAD lookup failed for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
         return _lookup_result(
@@ -1586,9 +1684,10 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
     except GnomadQueryError as e:
         # Transient GraphQL error — the client propagates it (rather than returning None) so we
         # report "unavailable" here instead of a misleading "not found in gnomAD".
+        # GnomadBuildError (no dataset for this build) is a subclass: also unavailable.
         logger.warning("gnomAD query error for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
         return _lookup_result(
-            {"error": "gnomAD lookup failed"},
+            {"error": "gnomAD lookup failed", "reason": str(e), **build_info},
             status=_LOOKUP_UNAVAILABLE,
             disclaimer=_GNOMAD_DISCLAIMER,
         )
@@ -1604,13 +1703,16 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
         return _lookup_result(
             {
                 "found": False,
-                "message": f"No gnomAD entry found for {chrom}:{pos} {ref}>{alt}",
+                "message": f"No gnomAD entry found for {chrom}:{pos} {ref}>{alt} ({build})",
+                **build_info,
             },
             status=_LOOKUP_NOT_FOUND,
             disclaimer=_GNOMAD_DISCLAIMER,
         )
 
-    return _lookup_result(asdict(result), status=_LOOKUP_FOUND, disclaimer=_GNOMAD_DISCLAIMER)
+    return _lookup_result(
+        {**asdict(result), **build_info}, status=_LOOKUP_FOUND, disclaimer=_GNOMAD_DISCLAIMER
+    )
 
 
 @telemetry_wrapper("scan_variants")

@@ -303,7 +303,24 @@ def test_population_block_surfaces_filters_and_an():
         source="genome",
     )
     block = _population_block(r)
-    assert block["an"] == 812 and block["filters"] == ["RF"] and block["max_pop"] == "afr"
+    assert block["an"] == 812 and block["filters"] == ["RF"]
+    # max_pop_af comes only from the client's gated field, never a raw max over
+    # `populations` (a lone allele in a tiny subgroup must not read as BA1).
+    assert block["max_pop_af"] is None and block["max_pop"] is None
+    gated = _population_block(
+        SimpleNamespace(
+            global_af=0.001,
+            populations=[SimpleNamespace(id="adygei_XY", af=0.071)],
+            max_pop_af=0.002,
+            max_pop="afr",
+            max_pop_an=41000,
+            frequency_reliable=False,
+            warnings=["low coverage"],
+        )
+    )
+    assert gated["max_pop_af"] == 0.002 and gated["max_pop"] == "afr"
+    assert gated["max_pop_an"] == 41000
+    assert gated["frequency_reliable"] is False and gated["warnings"] == ["low coverage"]
     # A client surfacing fewer fields still yields a block.
     sparse = _population_block(SimpleNamespace(global_af=0.1))
     assert sparse["filters"] == [] and sparse["an"] is None
@@ -485,3 +502,55 @@ async def test_curation_accepts_lowercase_alleles(offline_cfg, comprehensive_bam
         _curation_args(comprehensive_bam_path, ref="a", alt="t"), offline_cfg
     )
     assert result["content"][0]["text"].startswith("Variant Curation Summary: chr1:1051 A>T")
+
+
+@pytest.mark.unit
+def test_unreliable_frequency_blocks_pm2():
+    from bamcp.analysis.acmg import _frequency_criteria
+
+    pm2 = next(
+        c
+        for c in _frequency_criteria(
+            {"global_af": 0.00001, "frequency_reliable": False, "warnings": ["AN below 2000"]}
+        )
+        if c["code"] == "PM2_supporting"
+    )
+    assert "NOT evidence of rarity" in pm2["evaluate_with"]
+    assert "AN below 2000" in pm2["evaluate_with"]
+
+
+@pytest.mark.unit
+async def test_bam_build_routes_lookups_to_the_bams_assembly(monkeypatch):
+    from bamcp.analysis import fusion
+    from bamcp.config import BAMCPConfig
+    from bamcp.core import tools
+
+    async def grch37(file_path, config):
+        return {"build": "GRCh37"}
+
+    async def unknown(file_path, config):
+        return {"build": "unknown"}
+
+    async def broken(file_path, config):
+        raise OSError("unreadable")
+
+    cfg = BAMCPConfig()
+    monkeypatch.setattr(tools, "_detect_bam_build", grch37)
+    assert await fusion.bam_build("x.bam", cfg) == ("GRCh37", "detected-from-bam")
+    monkeypatch.setattr(tools, "_detect_bam_build", unknown)
+    build, source = await fusion.bam_build("x.bam", cfg)
+    assert build is None and source.startswith("server-default")
+    monkeypatch.setattr(tools, "_detect_bam_build", broken)
+    build, source = await fusion.bam_build("x.bam", cfg)
+    assert build is None and "unreadable" in source
+
+    seen = {}
+
+    class _Client:
+        async def lookup(self, chrom, pos, ref, alt, build=None):
+            seen["build"] = build
+            return None
+
+    monkeypatch.setattr(tools, "get_clinvar_client", lambda config: _Client())
+    await fusion._lookup_clinvar_safe(cfg, "17", 7579472, "G", "C", "GRCh37")
+    assert seen["build"] == "GRCh37"

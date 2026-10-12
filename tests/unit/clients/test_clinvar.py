@@ -9,11 +9,15 @@ from bamcp.clients.clinvar import (
     REVIEW_STARS,
     ClinVarClient,
     ClinVarResult,
+    ClinVarUnavailableError,
+    TokenBucketRateLimiter,
     _build_search_term,
     _parse_entry,
     _select_entry,
+    _span_end,
     _spdi_matches,
 )
+from bamcp.clients.ncbi import NCBIUnavailableError
 
 # -- Sample API response fixtures -------------------------------------------
 
@@ -43,8 +47,31 @@ def _entry(
     gene="TP53",
     traits=("Li-Fraumeni syndrome", "Hereditary cancer-predisposing syndrome"),
     title="NM_000546.6(TP53):c.743G>A (p.Arg248Gln)",
+    loc38=None,
+    loc37=None,
+    oncogenicity="",
 ):
-    """Build an esummary entry in ClinVar's current (germline_classification) schema."""
+    """Build an esummary entry in ClinVar's current (germline_classification) schema.
+
+    Mirrors the live esummary shape: the somatic blocks are always present (empty
+    descriptions when unclassified) and ``variation_loc`` lists the record's span on both
+    assemblies (``(chr, start, stop)``; 1-based, as ClinVar reports them).
+    """
+    locs = []
+    for assembly, loc in (("GRCh38", loc38), ("GRCh37", loc37)):
+        if loc is not None:
+            chrom, start, stop = loc
+            locs.append(
+                {
+                    "status": "current" if assembly == "GRCh38" else "previous",
+                    "assembly_name": assembly,
+                    "chr": chrom,
+                    "start": str(start),
+                    "stop": str(stop),
+                    "ref": "",
+                    "alt": "",
+                }
+            )
     return {
         "uid": uid,
         "title": title,
@@ -54,8 +81,18 @@ def _entry(
             "trait_set": [{"trait_name": t} for t in traits],
             "last_evaluated": "2023-01-15",
         },
+        "clinical_impact_classification": {
+            "description": "",
+            "last_evaluated": "1/01/01 00:00",
+            "review_status": "",
+        },
+        "oncogenicity_classification": {
+            "description": oncogenicity,
+            "last_evaluated": "1/01/01 00:00",
+            "review_status": "criteria provided, single submitter" if oncogenicity else "",
+        },
         "genes": [{"symbol": gene}] if gene else [],
-        "variation_set": [{"canonical_spdi": spdi, "variant_type": "snv"}],
+        "variation_set": [{"canonical_spdi": spdi, "variant_type": "snv", "variation_loc": locs}],
     }
 
 
@@ -86,7 +123,7 @@ class TestBuildSearchTerm:
     @pytest.mark.unit
     def test_basic_search_term(self):
         term = _build_search_term("chr17", 7674220)
-        assert term == "17[Chromosome] AND 7674220[Base Position]"
+        assert term == "17[Chromosome] AND 7674220[chrpos38]"
 
     @pytest.mark.unit
     def test_no_variant_name_clause(self):
@@ -329,8 +366,9 @@ class TestClinVarClient:
             json={"esearchresult": {"count": "3", "retstart": "2", "idlist": ["3"]}},
         )
         client = ClinVarClient()
-        ids = await client._search_ids("chr17", 7674220)
+        ids, truncated = await client._search_ids("chr17", 7674220)
         assert ids == ["1", "2", "3"]
+        assert truncated is False
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -492,3 +530,245 @@ class TestTokenBucketRateLimiter:
 
         limiter = TokenBucketRateLimiter(rate=10.0)
         assert limiter._rate == 10.0
+
+
+# -- Build-aware lookups, honest classifications, in-band errors --------------
+
+# rs1042522 (TP53 c.215C>G): GRCh38 chr17:7676154, GRCh37 chr17:7579472 — shapes from the
+# live esummary (SPDI is GRCh38-only; variation_loc carries both assemblies).
+RS1042522 = _entry(
+    "12351",
+    "NC_000017.11:7676153:G:C",
+    description="Benign",
+    review="reviewed by expert panel",
+    loc38=("17", 7676154, 7676154),
+    loc37=("17", 7579472, 7579472),
+    oncogenicity="Benign",
+)
+
+
+class TestBuildAwareSearch:
+    @pytest.mark.unit
+    def test_grch37_uses_chrpos37(self):
+        assert _build_search_term("chr17", 7579472, "GRCh37") == (
+            "17[Chromosome] AND 7579472[chrpos37]"
+        )
+
+    @pytest.mark.unit
+    def test_indel_searches_reference_span(self):
+        # VCF deletion pos=100 ref=ACG: records sit on the deleted bases after the pad base.
+        assert _span_end(100, "ACG", "A") == 103
+        assert _build_search_term("1", 100, "GRCh38", 103) == "1[Chromosome] AND 100:103[chrpos38]"
+        # insertion: the event lies between pos and pos+1
+        assert _span_end(100, "A", "AT") == 101
+        # SNV / MNV: their own span
+        assert _span_end(100, "A", "G") == 100
+        assert _span_end(100, "AC", "GT") == 101
+
+    @pytest.mark.unit
+    def test_grch37_entry_matched_via_variation_loc(self):
+        section = {"uids": ["12351"], "12351": RS1042522}
+        assert _select_entry(section, 7579472, "G", "C", build="GRCh37", chrom="17") is RS1042522
+        # the GRCh38 coordinate is NOT a GRCh37 match, and vice versa
+        assert _select_entry(section, 7676154, "G", "C", build="GRCh37", chrom="17") is None
+        assert _select_entry(section, 7579472, "G", "C", build="GRCh38") is None
+        assert _select_entry(section, 7676154, "G", "C", build="GRCh38") is RS1042522
+
+    @pytest.mark.unit
+    def test_grch37_record_without_grch37_location_not_guessed(self):
+        entry = _entry("1", "NC_000017.11:7676153:G:C", loc38=("17", 7676154, 7676154))
+        section = {"uids": ["1"], "1": entry}
+        assert _select_entry(section, 7579472, "G", "C", build="GRCh37", chrom="17") is None
+
+    @pytest.mark.unit
+    def test_grch37_wrong_chromosome_not_matched(self):
+        section = {"uids": ["12351"], "12351": RS1042522}
+        assert _select_entry(section, 7579472, "G", "C", build="GRCh37", chrom="chr3") is None
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_grch37_lookup_queries_chrpos37_and_finds_record(self, httpx_mock):
+        httpx_mock.add_response(
+            url=re.compile(r".*/esearch\.fcgi.*chrpos37.*"),
+            json={"esearchresult": {"count": "1", "idlist": ["12351"]}},
+        )
+        httpx_mock.add_response(
+            url=re.compile(r".*/esummary\.fcgi.*"),
+            json={"result": {"uids": ["12351"], "12351": RS1042522}},
+        )
+        client = ClinVarClient()
+        result = await client.lookup("chr17", 7579472, "G", "C", build="hg19")
+        assert result is not None
+        assert result.variation_id == 12351
+        assert result.build == "GRCh37"
+        assert result.clinical_significance == "Benign"
+        await client.close()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_default_build_comes_from_client(self, httpx_mock):
+        httpx_mock.add_response(url=re.compile(r".*/esearch\.fcgi.*chrpos37.*"), json=ESEARCH_EMPTY)
+        client = ClinVarClient(genome_build="GRCh37")
+        assert await client.lookup("17", 7579472, "G", "C") is None
+        await client.close()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_unknown_build_is_unavailable_not_none(self):
+        client = ClinVarClient()
+        with pytest.raises(ClinVarUnavailableError, match="build"):
+            await client.lookup("17", 7579472, "G", "C", build="unknown")
+        await client.close()
+
+
+class TestHonestClassification:
+    @pytest.mark.unit
+    def test_no_germline_classification_is_none_not_vus(self):
+        entry = _entry("9", "NC_000017.11:1:G:A", description="")
+        result = _parse_entry(entry)
+        assert result is not None
+        assert result.clinical_significance is None
+        assert result.classification_type is None
+        assert result.stars == 0
+
+    @pytest.mark.unit
+    def test_somatic_classification_does_not_feed_germline(self):
+        entry = _entry("9", "NC_000017.11:1:G:A", description="", oncogenicity="Oncogenic")
+        result = _parse_entry(entry)
+        assert result is not None
+        assert result.clinical_significance is None
+        assert result.somatic_classifications == {"oncogenicity": "Oncogenic"}
+
+    @pytest.mark.unit
+    def test_germline_and_somatic_kept_apart(self):
+        result = _parse_entry(RS1042522)
+        assert result is not None
+        assert result.clinical_significance == "Benign"
+        assert result.classification_type == "germline"
+        assert result.somatic_classifications == {"oncogenicity": "Benign"}
+
+    @pytest.mark.unit
+    def test_legacy_schema_tagged_legacy(self):
+        entry = {
+            "uid": "5",
+            "clinical_significance": {"description": "Pathogenic"},
+            "review_status": "criteria provided, single submitter",
+        }
+        result = _parse_entry(entry)
+        assert result is not None
+        assert result.classification_type == "legacy"
+        assert result.stars == 1
+
+
+class TestInBandErrors:
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_esearch_error_is_unavailable_and_not_cached(self, httpx_mock):
+        httpx_mock.add_response(
+            url=re.compile(r".*/esearch\.fcgi.*"),
+            json={"esearchresult": {"ERROR": "Search Backend failed"}},
+        )
+        httpx_mock.add_response(url=re.compile(r".*/esearch\.fcgi.*"), json=ESEARCH_EMPTY)
+        client = ClinVarClient()
+        with pytest.raises(NCBIUnavailableError):
+            await client.lookup("17", 7674220, "G", "A")
+        # not cached: the retry reaches NCBI and gets a real answer
+        assert await client.lookup("17", 7674220, "G", "A") is None
+        await client.close()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_unknown_search_field_is_unavailable(self, httpx_mock):
+        httpx_mock.add_response(
+            url=re.compile(r".*/esearch\.fcgi.*"),
+            json={
+                "esearchresult": {
+                    "count": "0",
+                    "idlist": [],
+                    "errorlist": {"phrasesnotfound": [], "fieldsnotfound": ["chrpos38"]},
+                }
+            },
+        )
+        client = ClinVarClient()
+        with pytest.raises(NCBIUnavailableError):
+            await client.lookup("17", 7674220, "G", "A")
+        await client.close()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_phrases_not_found_is_an_ordinary_empty_result(self, httpx_mock):
+        httpx_mock.add_response(
+            url=re.compile(r".*/esearch\.fcgi.*"),
+            json={
+                "esearchresult": {
+                    "count": "0",
+                    "idlist": [],
+                    "errorlist": {"phrasesnotfound": ["099[chrpos38]"], "fieldsnotfound": []},
+                }
+            },
+        )
+        client = ClinVarClient()
+        assert await client.lookup("17", 99, "G", "A") is None
+        await client.close()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_esummary_uid_error_is_unavailable(self, httpx_mock):
+        httpx_mock.add_response(url=re.compile(r".*/esearch\.fcgi.*"), json=ESEARCH_RESPONSE)
+        httpx_mock.add_response(
+            url=re.compile(r".*/esummary\.fcgi.*"),
+            json={
+                "result": {
+                    "uids": ["12345"],
+                    "12345": {"uid": "12345", "error": "cannot get document summary"},
+                }
+            },
+        )
+        client = ClinVarClient()
+        with pytest.raises(NCBIUnavailableError):
+            await client.lookup("17", 7674220, "G", "A")
+        await client.close()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_html_error_page_is_unavailable(self, httpx_mock):
+        httpx_mock.add_response(
+            url=re.compile(r".*/esearch\.fcgi.*"), text="<html>Service Unavailable</html>"
+        )
+        client = ClinVarClient()
+        with pytest.raises(NCBIUnavailableError, match="unparseable"):
+            await client.lookup("17", 7674220, "G", "A")
+        await client.close()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_truncated_search_without_match_is_unavailable(self, httpx_mock, monkeypatch):
+        import bamcp.clients.clinvar as cv
+
+        monkeypatch.setattr(cv, "_MAX_POSITION_RECORDS", 2)
+        httpx_mock.add_response(
+            url=re.compile(r".*/esearch\.fcgi.*"),
+            json={"esearchresult": {"count": "5", "idlist": ["1", "2"]}},
+        )
+        httpx_mock.add_response(
+            url=re.compile(r".*/esummary\.fcgi.*"),
+            json={
+                "result": {
+                    "uids": ["1", "2"],
+                    "1": _entry("1", "NC_000017.11:7674219:G:C"),
+                    "2": _entry("2", "NC_000017.11:7674219:G:T"),
+                }
+            },
+        )
+        client = ClinVarClient()
+        with pytest.raises(ClinVarUnavailableError, match="truncated"):
+            await client.lookup("17", 7674220, "G", "A")
+        await client.close()
+
+
+class TestSharedRateLimiter:
+    @pytest.mark.unit
+    def test_injected_limiter_is_used(self):
+        limiter = TokenBucketRateLimiter(3)
+        client = ClinVarClient(rate_limiter=limiter)
+        assert client._rate_limiter is limiter

@@ -500,3 +500,39 @@ class TestCacheDirFallback:
         monkeypatch.setenv("BAMCP_CACHE_DIR", str(blocker / "cache"))
         with pytest.raises(ValueError, match="BAMCP_CACHE_DIR="):
             BAMCPConfig.from_env()
+
+
+class TestGenomeBuildNormalization:
+    """genome_build is canonicalized so GRCh37 aliases never route to GRCh38 sources."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("raw", "canonical"),
+        [
+            ("hg19", "GRCh37"),
+            ("GRCh37", "GRCh37"),
+            ("grch37", "GRCh37"),
+            ("b37", "GRCh37"),
+            ("hs37d5", "GRCh37"),
+            ("hg38", "GRCh38"),
+            ("GRCh38", "GRCh38"),
+            (" HG38 ", "GRCh38"),
+        ],
+    )
+    def test_aliases_normalized(self, raw, canonical):
+        assert BAMCPConfig(genome_build=raw).genome_build == canonical
+
+    @pytest.mark.unit
+    def test_unknown_build_rejected(self):
+        with pytest.raises(ValueError, match="genome_build"):
+            BAMCPConfig(genome_build="hg99")
+
+    @pytest.mark.unit
+    def test_env_alias_normalized(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BAMCP_GENOME_BUILD", "hg19")
+        monkeypatch.setenv("BAMCP_CACHE_DIR", str(tmp_path))
+        assert BAMCPConfig.from_env().genome_build == "GRCh37"
+
+    @pytest.mark.unit
+    def test_gnomad_dataset_defaults_to_per_build(self):
+        assert BAMCPConfig().gnomad_dataset == "auto"

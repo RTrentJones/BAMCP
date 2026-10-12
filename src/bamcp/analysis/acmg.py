@@ -72,6 +72,9 @@ def _pm2_quality_caveat(pop: dict[str, Any]) -> str | None:
         reasons.append(f"the site FAILED gnomAD QC filters {list(filters)}")
     if isinstance(an, int | float) and an < PM2_MIN_ALLELE_NUMBER:
         reasons.append(f"allele number is low (AN={an} < {PM2_MIN_ALLELE_NUMBER})")
+    if pop.get("frequency_reliable") is False:
+        why = "; ".join(pop.get("warnings") or []) or "gnomAD flagged the frequency"
+        reasons.append(f"the frequency is not reliable ({why})")
     if not reasons:
         return None
     return (
@@ -164,7 +167,9 @@ def _clinical_criteria(clinvar: dict[str, Any] | None) -> list[dict[str, Any]]:
                 "in ClinVar). Do not invent a ClinVar classification. " + _PP5_BP6_SVI_NOTE,
             }
         ]
-    sig = clinvar.get("clinical_significance", "")
+    # The client returns None for a record with no germline classification; never let
+    # that render as a significance (or be read as an implied VUS).
+    sig = clinvar.get("clinical_significance") or "no germline classification"
     stars = clinvar.get("stars", 0)
     return [
         {
@@ -321,7 +326,8 @@ def _format_classify_text(evidence: dict[str, Any], scaffold: dict[str, Any]) ->
         lines.append(f"  {_NOT_QUERIED[cln['status']]} — not a confirmed absence.")
     elif cln:
         lines.append(
-            f"  {cln.get('clinical_significance')} ({cln.get('stars')}-star; "
+            f"  {cln.get('clinical_significance') or 'no germline classification'} "
+            f"({cln.get('stars')}-star; "
             f"{cln.get('review_status')})"
         )
     else:

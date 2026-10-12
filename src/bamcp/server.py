@@ -228,7 +228,9 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     @mcp.tool(
         description=(
             "Look up a variant in ClinVar for clinical significance, review status, "
-            "and associated conditions. Research-grade information, not for clinical use."
+            "and associated conditions. Positions are 1-based in `build` (GRCh37/hg19 or "
+            "GRCh38/hg38; default: server build) — pass the BAM's build from list_contigs. "
+            "Research-grade information, not for clinical use."
         ),
     )
     async def lookup_clinvar(
@@ -236,13 +238,16 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         pos: int,
         ref: str,
         alt: str,
+        build: str | None = None,
     ) -> str:
-        args = _args(chrom=chrom, pos=pos, ref=ref, alt=alt)
+        args = _args(chrom=chrom, pos=pos, ref=ref, alt=alt, build=build)
         return _text(await _run("lookup_clinvar", handle_lookup_clinvar, args))
 
     @mcp.tool(
         description=(
-            "Look up a variant in gnomAD for population allele frequency data. "
+            "Look up a variant in gnomAD for population allele frequency data. Positions are "
+            "1-based in `build` (GRCh37 queries gnomAD v2.1, GRCh38 queries v4; default: server "
+            "build) — pass the BAM's build from list_contigs. "
             "Research-grade information, not for clinical use."
         ),
     )
@@ -251,8 +256,9 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         pos: int,
         ref: str,
         alt: str,
+        build: str | None = None,
     ) -> str:
-        args = _args(chrom=chrom, pos=pos, ref=ref, alt=alt)
+        args = _args(chrom=chrom, pos=pos, ref=ref, alt=alt, build=build)
         return _text(await _run("lookup_gnomad", handle_lookup_gnomad, args))
 
     # -- Phase 3: Curation Tools ---------------------------------------------

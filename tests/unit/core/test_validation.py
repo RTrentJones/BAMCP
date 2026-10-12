@@ -585,3 +585,129 @@ class TestValidateDataSources:
         config = BAMCPConfig(allowed_directories=None)
         # reference/vcf None → only the BAM is validated, no error.
         validate_data_sources(str(bam), config)
+
+
+class TestRemoteUrlHardening:
+    """Review findings: htslib ##idx## smuggling, ports, extensions, non-global IPs."""
+
+    _ALLOWED = BAMCPConfig(allow_remote_files=True, allowed_remote_hosts=["data.example.com"])
+    _SMUGGLED = "https://data.example.com/x.bam##idx##http://169.254.169.254/latest/meta-data/"
+
+    @pytest.mark.unit
+    def test_htslib_idx_suffix_rejected_for_bam(self):
+        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
+            m.return_value = _PUBLIC_IP_ADDRINFO
+            with pytest.raises(ValueError, match="must not contain '#'"):
+                validate_path(self._SMUGGLED, self._ALLOWED)
+        m.assert_not_called()
+
+    @pytest.mark.unit
+    def test_htslib_idx_suffix_rejected_for_reference(self):
+        url = "https://data.example.com/hg38.fa.gz##idx##http://10.0.0.1/hg38.fa.gz.fai"
+        with pytest.raises(ValueError, match="must not contain '#'"):
+            validate_reference_path(url, self._ALLOWED)
+
+    @pytest.mark.unit
+    def test_htslib_idx_suffix_rejected_for_vcf(self):
+        url = "https://data.example.com/calls.vcf.gz##idx##http://10.0.0.1/calls.tbi"
+        with pytest.raises(ValueError, match="must not contain '#'"):
+            validate_variant_file_path(url, self._ALLOWED)
+
+    @pytest.mark.unit
+    def test_plain_fragment_rejected(self):
+        with pytest.raises(ValueError, match="must not contain '#'"):
+            validate_remote_url("https://data.example.com/x.bam#frag", self._ALLOWED)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://data.example.com\\@evil.com/x.bam",
+            "https://data.example.com/x .bam",
+            "https://data.example.com/x\n.bam",
+        ],
+    )
+    def test_parser_differential_characters_rejected(self, url):
+        with pytest.raises(ValueError, match="disallowed characters"):
+            validate_remote_url(url, self._ALLOWED)
+
+    @pytest.mark.unit
+    def test_userinfo_rejected(self):
+        with pytest.raises(ValueError, match="credentials"):
+            validate_remote_url("https://user:pw@data.example.com/x.bam", self._ALLOWED)
+
+    @pytest.mark.unit
+    def test_non_http_scheme_rejected(self):
+        with pytest.raises(ValueError, match="Scheme not supported"):
+            validate_remote_url("file:///etc/passwd", self._ALLOWED)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("port", [22, 6379, 8080, 8443])
+    def test_non_web_port_rejected(self, port):
+        with pytest.raises(ValueError, match=f"port {port} is not allowed"):
+            validate_remote_url(f"https://data.example.com:{port}/x.bam", self._ALLOWED)
+
+    @pytest.mark.unit
+    def test_invalid_port_rejected(self):
+        with pytest.raises(ValueError, match="invalid port"):
+            validate_remote_url("https://data.example.com:99999/x.bam", self._ALLOWED)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("port", [80, 443])
+    def test_explicit_default_ports_allowed(self, port):
+        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
+            m.return_value = _PUBLIC_IP_ADDRINFO
+            validate_remote_url(f"https://data.example.com:{port}/x.bam", self._ALLOWED)
+        assert m.call_args[0][1] == port
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://data.example.com/secret",
+            "https://data.example.com/x.txt",
+            "https://data.example.com/x.bam.bai",
+        ],
+    )
+    def test_remote_bam_requires_alignment_extension(self, url):
+        with pytest.raises(ValueError, match="Unsupported file type"):
+            validate_path(url, self._ALLOWED)
+
+    @pytest.mark.unit
+    def test_signed_remote_cram_url_accepted(self):
+        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
+            m.return_value = _PUBLIC_IP_ADDRINFO
+            validate_path("https://data.example.com/S1.CRAM?X-Amz-Signature=a.bam", self._ALLOWED)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "addr",
+        [
+            "100.64.0.1",  # CGNAT
+            "224.0.0.1",  # multicast
+            "0.0.0.0",  # unspecified
+            "198.18.0.1",  # benchmarking
+            "::",  # IPv6 unspecified
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "ff02::1",  # IPv6 multicast
+            "::ffff:127.0.0.1",  # IPv4-mapped loopback
+            "::ffff:169.254.169.254",  # IPv4-mapped metadata
+        ],
+    )
+    def test_non_global_addresses_blocked(self, addr):
+        assert _is_private_ip(addr) is True
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("addr", ["93.184.216.34", "8.8.8.8", "2606:4700:4700::1111"])
+    def test_global_addresses_allowed(self, addr):
+        assert _is_private_ip(addr) is False
+
+    @pytest.mark.unit
+    def test_cgnat_resolution_blocked_end_to_end(self):
+        config = BAMCPConfig(allow_remote_files=True)
+        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
+            m.return_value = [(2, 1, 6, "", ("100.100.100.200", 443))]
+            with pytest.raises(ValueError, match="private/internal address"):
+                validate_path("https://example.com/x.bam", config)

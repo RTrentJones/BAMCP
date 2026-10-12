@@ -147,7 +147,7 @@ services:
       - BAMCP_ISSUER_URL=http://localhost:8000
       - BAMCP_RESOURCE_SERVER_URL=http://localhost:8000
       - BAMCP_ALLOW_REMOTE_FILES=true
-      - BAMCP_RATE_LIMIT=60
+      - BAMCP_RATE_LIMIT=120
       # read_only root fs: BAMCPConfig.from_env() mkdirs the index cache at start-up (default
       # ~/.cache/bamcp), which would crash with EROFS. Point it at the tmpfs below instead.
       - BAMCP_CACHE_DIR=/home/bamcp/.cache/bamcp

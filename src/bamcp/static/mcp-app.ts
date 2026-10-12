@@ -24,6 +24,7 @@ import {
     toRegionString,
     zoomViewport,
 } from "./constants";
+import { variantKey } from "./data-store";
 import { Renderer } from "./renderer";
 import { StateManager, DEFAULT_SETTINGS } from "./state";
 import {
@@ -521,14 +522,14 @@ class BAMCPViewer {
         this.checkAndFetchViewport();
     }
 
-    /** Debounced variant table re-render for in-view highlighting during pan/zoom. */
+    /** Debounced in-view highlighting of the variant table during pan/zoom. */
     private scheduleVariantTableUpdate(): void {
         if (this.variantTableTimer) {
             clearTimeout(this.variantTableTimer);
         }
         this.variantTableTimer = setTimeout(() => {
             this.variantTableTimer = null;
-            this.renderVariantTable();
+            this.updateVariantInView();
         }, 150);
     }
 
@@ -812,27 +813,14 @@ class BAMCPViewer {
         // variantTable IS the tbody element (id="variant-table")
         this.variantTable.innerHTML = '';
 
-        const vpStart = this.state.viewport.start;
-        const vpEnd = this.state.viewport.end;
-
-        // Count in-view variants for badge
-        const inViewCount = variants.filter(v => v.position >= vpStart && v.position <= vpEnd).length;
-        const totalCount = this.state.store.getAllVariants().length;
-        const badge = document.getElementById('variant-count')!;
-        badge.textContent = inViewCount < variants.length
-            ? `${inViewCount} in view / ${totalCount}`
-            : totalCount.toString();
-
         variants.forEach((v, idx) => {
             const tr = document.createElement('tr');
+            const key = variantKey(v);
             tr.dataset.index = idx.toString();
-            tr.className = idx === this.state.selectedVariantIndex ? 'selected' : '';
+            tr.dataset.key = key;
+            tr.dataset.pos = String(v.position);
+            tr.className = key === this.state.selectedVariantKey ? 'selected' : '';
             if (v.is_low_confidence) tr.classList.add('low-confidence');
-
-            // Mark variants within the current viewport
-            if (v.position >= vpStart && v.position <= vpEnd) {
-                tr.classList.add('in-view');
-            }
 
             // VAF color coding: green ≥40%, orange 20-40%, red <20%
             const vafColor = v.vaf >= 0.4 ? '#22c55e' : v.vaf >= 0.2 ? '#f97316' : '#ef4444';
@@ -898,25 +886,63 @@ class BAMCPViewer {
                     return;
                 }
 
-                this.state.selectedVariantIndex = idx;
-                // Mark this variant as the active one for the DeepVariant
-                // "supports-variant" channel.
-                this.state.settings.activeVariantPosition = v.position;
-                this.state.settings.activeVariantAlt = v.alt;
-                this.renderVariantTable();
-
-                // Show evidence
-                this.showVariantEvidence(v);
-
-                // Jump to variant
-                const span = 100;
-                this.state.viewport.start = v.position - span / 2;
-                this.state.viewport.end = v.position + span / 2;
-                this.renderer.render();
+                this.selectVariant(v, key);
             });
 
             this.variantTable.appendChild(tr);
         });
+
+        this.updateVariantInView();
+    }
+
+    /**
+     * Refresh the in-view highlighting and badge without rebuilding the rows —
+     * this runs on every pan/zoom, where a full rebuild of a large table is costly.
+     */
+    private updateVariantInView(): void {
+        const vpStart = this.state.viewport.start;
+        const vpEnd = this.state.viewport.end;
+        const rows = this.variantTable.children;
+        let inViewCount = 0;
+        for (let i = 0; i < rows.length; i++) {
+            const tr = rows[i] as HTMLElement;
+            const pos = Number(tr.dataset.pos);
+            const inView = pos >= vpStart && pos <= vpEnd;
+            if (inView) inViewCount++;
+            tr.classList.toggle('in-view', inView);
+        }
+        const totalCount = this.state.store.getAllVariants().length;
+        const badge = document.getElementById('variant-count')!;
+        badge.textContent = inViewCount < rows.length
+            ? `${inViewCount} in view / ${totalCount}`
+            : totalCount.toString();
+    }
+
+    /** Select a variant row: highlight it, show evidence, and jump the view to it. */
+    private selectVariant(v: Variant, key: string): void {
+        this.state.selectedVariantKey = key;
+        // Mark this variant as the active one for the DeepVariant
+        // "supports-variant" channel.
+        this.state.settings.activeVariantPosition = v.position;
+        this.state.settings.activeVariantAlt = v.alt;
+        for (const row of Array.from(this.variantTable.children) as HTMLElement[]) {
+            row.classList.toggle('selected', row.dataset.key === key);
+        }
+
+        // Show evidence
+        this.showVariantEvidence(v);
+
+        // Jump to variant, then load what the new view needs: the data tile (the
+        // variant may sit outside the loaded range), sequences at base-level zoom,
+        // and the model context — exactly as a pan/zoom would.
+        const span = 100;
+        const start = Math.max(0, v.position - span / 2);
+        this.state.viewport = { start, end: start + span };
+        this.renderer.render();
+        this.updateVariantInView();
+        this.scheduleContextUpdate();
+        this.checkAndRequestSequences();
+        this.checkAndFetchViewport();
     }
 
     private showTooltip(e: MouseEvent, read: Read | null): void {

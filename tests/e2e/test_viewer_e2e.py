@@ -3358,3 +3358,36 @@ class TestNavigationLimits:
         vp = viewer_page.evaluate("() => viewer.state.viewport")
         assert vp["start"] == 0, vp
         assert vp["end"] == 500, vp
+
+
+class TestVariantRowNavigation:
+    @pytest.mark.e2e
+    def test_row_click_outside_loaded_range_fetches_tile(self, viewer_page: Page):
+        """Jumping to a variant outside the loaded tile must fetch it (not show an empty pileup)."""
+        send_init_data(viewer_page, {**SAMPLE_DATA, "file_path": "/data/x.bam"})
+        _install_fake_host(viewer_page)
+        viewer_page.evaluate(
+            """() => {
+                const v = {contig: 'chr1', position: 5200, ref: 'C', alt: 'G',
+                           vaf: 0.5, depth: 40, alt_count: 20};
+                viewer.state.store.variants.set('chr1:5200:C>G', v);
+                viewer.renderVariantTable();
+            }"""
+        )
+        viewer_page.locator('#variant-table tr[data-key="chr1:5200:C>G"] td').first.click()
+        viewer_page.wait_for_timeout(500)  # past the 300 ms refetch debounce
+        reqs = viewer_page.evaluate("() => window.__pending.map(p => p.req)")
+        regions = [r["arguments"]["region"] for r in reqs if r["name"] == "visualize_region"]
+        assert regions, "row click should trigger a visualize_region fetch"
+        start, end = (int(x) for x in regions[-1].split(":")[1].split("-"))
+        # 1-based inclusive request must cover the variant's 1-based position 5201.
+        assert start <= 5201 <= end, regions
+
+    @pytest.mark.e2e
+    def test_selection_follows_variant_across_resort(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        viewer_page.locator('#variant-table tr[data-key="chr1:250:G>C"] td').first.click()
+        viewer_page.locator('#variant-panel th[data-sort="position"]').click()  # → desc
+        selected = viewer_page.locator("#variant-table tr.selected")
+        assert selected.count() == 1
+        assert selected.get_attribute("data-key") == "chr1:250:G>C"

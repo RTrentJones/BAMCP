@@ -76,7 +76,9 @@ export class StateManager {
     // Variant state
     public variantFilter: 'high' | 'all' = 'high';
     public variantSort: { column: string; direction: 'asc' | 'desc' } = { column: 'position', direction: 'asc' };
-    public selectedVariantIndex: number = -1;
+    // Keyed by variant identity (see variantKey), not table index: the index drifts
+    // after a re-sort, filter change or tile load and highlights the wrong row.
+    public selectedVariantKey: string | null = null;
     public expandedVariantIndex: number = -1;
 
     // Viewer settings (IGV-style display options)

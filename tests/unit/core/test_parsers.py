@@ -16,6 +16,7 @@ from bamcp.core.parsers import (
     detect_variants,
     extract_soft_clips,
     fetch_region,
+    format_region,
     load_vcf_variants,
     parse_region,
     read_passes_filters,
@@ -28,31 +29,64 @@ class TestParseRegion:
 
     @pytest.mark.unit
     def test_standard_format(self):
+        # 1-based inclusive in, 0-based half-open out: start - 1, end unchanged.
         contig, start, end = parse_region("chr1:1000-2000")
         assert contig == "chr1"
-        assert start == 1000
+        assert start == 999
         assert end == 2000
 
     @pytest.mark.unit
     def test_no_chr_prefix(self):
         contig, start, end = parse_region("1:1000-2000")
         assert contig == "1"
-        assert start == 1000
+        assert start == 999
         assert end == 2000
 
     @pytest.mark.unit
     def test_commas_in_coordinates(self):
         contig, start, end = parse_region("chr1:1,000-2,000")
         assert contig == "chr1"
-        assert start == 1000
+        assert start == 999
         assert end == 2000
 
     @pytest.mark.unit
     def test_large_coordinates(self):
         contig, start, end = parse_region("chr17:7,577,000-7,577,500")
         assert contig == "chr17"
-        assert start == 7577000
+        assert start == 7576999
         assert end == 7577500
+
+    @pytest.mark.unit
+    def test_single_base_region_is_valid(self):
+        """chr1:1051-1051 is the single base 1051 (samtools-style), not an empty range."""
+        contig, start, end = parse_region("chr1:1051-1051")
+        assert (contig, start, end) == ("chr1", 1050, 1051)
+        assert end - start == 1
+
+    @pytest.mark.unit
+    def test_first_base_of_contig(self):
+        assert parse_region("chr1:1-10") == ("chr1", 0, 10)
+
+    @pytest.mark.unit
+    def test_zero_start_rejected(self):
+        with pytest.raises(ValueError, match="must be >= 1"):
+            parse_region("chr1:0-100")
+
+    @pytest.mark.unit
+    def test_contig_with_colons_splits_on_last(self):
+        """HLA contigs (e.g. HLA-A*01:01:01:01) contain ':' — split on the last one."""
+        contig, start, end = parse_region("HLA-A*01:01:01:01:100-200")
+        assert (contig, start, end) == ("HLA-A*01:01:01:01", 99, 200)
+
+    @pytest.mark.unit
+    def test_missing_contig_rejected(self):
+        with pytest.raises(ValueError, match="Missing contig"):
+            parse_region(":100-200")
+
+    @pytest.mark.unit
+    def test_format_region_round_trips(self):
+        assert format_region("chr1", 1050, 1051) == "chr1:1051-1051"
+        assert parse_region(format_region("chr1", 0, 500)) == ("chr1", 0, 500)
 
     @pytest.mark.unit
     def test_invalid_format_no_colon(self):
@@ -76,13 +110,15 @@ class TestParseRegion:
 
     @pytest.mark.unit
     def test_end_less_than_start(self):
-        with pytest.raises(ValueError, match="must be greater than start"):
+        with pytest.raises(ValueError, match="must be >= start"):
             parse_region("chr1:2000-1000")
 
     @pytest.mark.unit
-    def test_end_equals_start(self):
-        with pytest.raises(ValueError, match="must be greater than start"):
-            parse_region("chr1:1000-1000")
+    def test_size_limit_counts_inclusive_bases(self):
+        # 1..1_000_000 inclusive is exactly MAX_REGION_SIZE bases — allowed.
+        assert parse_region("chr1:1-1000000") == ("chr1", 0, 1_000_000)
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            parse_region("chr1:1-1000001")
 
 
 class TestDetectVariants:
@@ -239,7 +275,7 @@ class TestDetectIndels:
         # small.bam read4 is 10M2I40M from ref 200 -> insertion anchored at 209 ("TT").
         ref_seq = self._ref(ref_fasta_path, 200, 260)
         indels, _ = detect_indels(
-            small_bam_path, "chr1:200-260", ref_fasta_path, ref_seq, min_vaf=0.1, min_depth=1
+            small_bam_path, "chr1:201-260", ref_fasta_path, ref_seq, min_vaf=0.1, min_depth=1
         )
         ins = [v for v in indels if v["indel_type"] == "ins"]
         assert len(ins) == 1
@@ -258,7 +294,7 @@ class TestDetectIndels:
         start = 300
         ref_seq = self._ref(ref_fasta_path, start, 360)
         indels, gap_depth = detect_indels(
-            small_bam_path, "chr1:300-360", ref_fasta_path, ref_seq, min_vaf=0.1, min_depth=1
+            small_bam_path, "chr1:301-360", ref_fasta_path, ref_seq, min_vaf=0.1, min_depth=1
         )
         dels = [v for v in indels if v["indel_type"] == "del"]
         assert len(dels) == 1
@@ -275,7 +311,7 @@ class TestDetectIndels:
     @pytest.mark.unit
     def test_no_ref_seq_returns_empty_with_sized_gap_depth(self, small_bam_path, ref_fasta_path):
         indels, gap_depth = detect_indels(
-            small_bam_path, "chr1:300-360", ref_fasta_path, None, min_vaf=0.1, min_depth=1
+            small_bam_path, "chr1:301-360", ref_fasta_path, None, min_vaf=0.1, min_depth=1
         )
         assert indels == []
         assert gap_depth == [0] * 60
@@ -285,7 +321,7 @@ class TestDetectIndels:
         # Only read5 spans the deletion (depth 1); min_depth=2 drops it.
         ref_seq = self._ref(ref_fasta_path, 300, 360)
         indels, _ = detect_indels(
-            small_bam_path, "chr1:300-360", ref_fasta_path, ref_seq, min_vaf=0.1, min_depth=2
+            small_bam_path, "chr1:301-360", ref_fasta_path, ref_seq, min_vaf=0.1, min_depth=2
         )
         assert indels == []
 
@@ -296,7 +332,7 @@ class TestDetectIndels:
         # requested columns so later columns exercise the ref_len guard.
         short_ref = "A" * 20
         indels, gap_depth = detect_indels(
-            small_bam_path, "chr1:300-360", ref_fasta_path, short_ref, min_vaf=0.1, min_depth=1
+            small_bam_path, "chr1:301-360", ref_fasta_path, short_ref, min_vaf=0.1, min_depth=1
         )
         assert len(gap_depth) == 60  # gap_depth always spans the full region
         assert all(v["ref"] != v["alt"] for v in indels)
@@ -308,7 +344,7 @@ class TestDetectIndels:
         # window ending at 326 can't resolve the full deleted allele.
         ref_seq = self._ref(ref_fasta_path, 310, 326)
         indels, _ = detect_indels(
-            small_bam_path, "chr1:310-326", ref_fasta_path, ref_seq, min_vaf=0.1, min_depth=1
+            small_bam_path, "chr1:311-326", ref_fasta_path, ref_seq, min_vaf=0.1, min_depth=1
         )
         assert [v for v in indels if v["indel_type"] == "del"] == []
         # No emitted candidate should ever have identical ref and alt.
@@ -318,7 +354,7 @@ class TestDetectIndels:
     def test_fetch_region_surfaces_indels_after_snvs(self, small_bam_path, ref_fasta_path):
         """fetch_region appends indel candidates so variants[0] stays an SNV when present."""
         data = fetch_region(
-            small_bam_path, "chr1:300-360", ref_fasta_path, min_vaf=0.1, min_depth=1
+            small_bam_path, "chr1:301-360", ref_fasta_path, min_vaf=0.1, min_depth=1
         )
         indels = [v for v in data.variants if v.get("variant_kind") == "indel"]
         assert any(v["indel_type"] == "del" and v["position"] == 324 for v in indels)
@@ -353,7 +389,7 @@ class TestLoadVcfVariants:
 
         monkeypatch.setattr("bamcp.core.parsers.pysam.VariantFile", VariantFileStub)
 
-        variants = load_vcf_variants("calls.vcf.gz", "chr1:90-120")
+        variants = load_vcf_variants("calls.vcf.gz", "chr1:91-120")
         assert variants == [
             {
                 "contig": "chr1",
@@ -410,7 +446,7 @@ class TestLoadVcfVariants:
 
         monkeypatch.setattr("bamcp.core.parsers.pysam.VariantFile", VariantFileStub)
 
-        [variant] = load_vcf_variants("sv.bcf", "chr2:400-1000")
+        [variant] = load_vcf_variants("sv.bcf", "chr2:401-1000")
         assert variant["variant_kind"] == "sv"
         assert variant["sv_type"] == "DEL"
         assert variant["sv_end"] == 900
@@ -447,7 +483,7 @@ class TestLoadVcfVariants:
 
         monkeypatch.setattr("bamcp.core.parsers.pysam.VariantFile", VariantFileStub)
 
-        variants = load_vcf_variants("sv.vcf", "chr3:900-3000")
+        variants = load_vcf_variants("sv.vcf", "chr3:901-3000")
         assert [v["alt"] for v in variants] == ["<DEL>", "<DUP>"]
         assert variants[0]["sv_len"] == -500  # DEL's own length
         assert variants[1]["sv_len"] == 900  # DUP's own length, not the first ALT's
@@ -466,7 +502,7 @@ class TestFetchRegion:
     @pytest.mark.unit
     def test_basic_fetch(self, small_bam_path):
         """Should fetch reads from a BAM file."""
-        data = fetch_region(small_bam_path, "chr1:90-200")
+        data = fetch_region(small_bam_path, "chr1:91-200")
         assert isinstance(data, RegionData)
         assert data.contig == "chr1"
         assert data.start == 90
@@ -476,7 +512,7 @@ class TestFetchRegion:
     @pytest.mark.unit
     def test_reads_have_correct_fields(self, small_bam_path):
         """Reads should have all expected fields."""
-        data = fetch_region(small_bam_path, "chr1:90-200")
+        data = fetch_region(small_bam_path, "chr1:91-200")
         read = data.reads[0]
         assert isinstance(read, AlignedRead)
         assert isinstance(read.name, str)
@@ -492,7 +528,7 @@ class TestFetchRegion:
     @pytest.mark.unit
     def test_coverage_array(self, small_bam_path):
         """Coverage array should have correct length."""
-        data = fetch_region(small_bam_path, "chr1:100-200")
+        data = fetch_region(small_bam_path, "chr1:101-200")
         assert len(data.coverage) == 100  # end - start
         # Should have non-zero coverage where reads are
         assert sum(data.coverage) > 0
@@ -500,7 +536,7 @@ class TestFetchRegion:
     @pytest.mark.unit
     def test_coverage_values(self, small_bam_path):
         """Coverage values should be non-negative integers."""
-        data = fetch_region(small_bam_path, "chr1:100-200")
+        data = fetch_region(small_bam_path, "chr1:101-200")
         for cov in data.coverage:
             assert isinstance(cov, int)
             assert cov >= 0
@@ -508,8 +544,8 @@ class TestFetchRegion:
     @pytest.mark.unit
     def test_min_mapq_filter(self, small_bam_path):
         """Reads below min_mapq should be filtered."""
-        data_no_filter = fetch_region(small_bam_path, "chr1:90-200", min_mapq=0)
-        data_filtered = fetch_region(small_bam_path, "chr1:90-200", min_mapq=30)
+        data_no_filter = fetch_region(small_bam_path, "chr1:91-200", min_mapq=0)
+        data_filtered = fetch_region(small_bam_path, "chr1:91-200", min_mapq=30)
 
         # read6_lowq has MAPQ 5, should be excluded with min_mapq=30
         names_no_filter = {r.name for r in data_no_filter.reads}
@@ -521,7 +557,7 @@ class TestFetchRegion:
     @pytest.mark.unit
     def test_secondary_reads_filtered(self, small_bam_path):
         """Secondary alignments should be filtered."""
-        data = fetch_region(small_bam_path, "chr1:390-450")
+        data = fetch_region(small_bam_path, "chr1:391-450")
         names = {r.name for r in data.reads}
         assert "read7_secondary" not in names
 
@@ -564,7 +600,7 @@ class TestFetchRegion:
     @pytest.mark.unit
     def test_secondary_reads_excluded_from_coverage(self, small_bam_path):
         """Secondary/supplementary reads should not inflate coverage counts."""
-        data = fetch_region(small_bam_path, "chr1:390-450")
+        data = fetch_region(small_bam_path, "chr1:391-450")
         # Coverage at any position should not exceed the number of primary reads
         # covering that position
         for i, cov in enumerate(data.coverage):
@@ -577,41 +613,41 @@ class TestFetchRegion:
     @pytest.mark.unit
     def test_max_reads_limit(self, small_bam_path):
         """Should respect max_reads limit."""
-        data = fetch_region(small_bam_path, "chr1:0-1000", max_reads=3)
+        data = fetch_region(small_bam_path, "chr1:1-1000", max_reads=3)
         assert len(data.reads) <= 3
 
     @pytest.mark.unit
     def test_empty_region(self, small_bam_path):
         """Region with no reads should return empty lists."""
-        data = fetch_region(small_bam_path, "chr1:900-950")
+        data = fetch_region(small_bam_path, "chr1:901-950")
         assert len(data.reads) == 0
         assert all(c == 0 for c in data.coverage)
 
     @pytest.mark.unit
     def test_with_reference(self, small_bam_path, ref_fasta_path):
         """Should compute mismatches when reference is provided."""
-        data = fetch_region(small_bam_path, "chr1:90-200", reference_path=ref_fasta_path)
+        data = fetch_region(small_bam_path, "chr1:91-200", reference_path=ref_fasta_path)
         assert data.reference_sequence is not None
         assert len(data.reference_sequence) == 110  # 200 - 90
 
     @pytest.mark.unit
     def test_without_reference(self, small_bam_path):
         """Without reference, mismatches and variants should be empty."""
-        data = fetch_region(small_bam_path, "chr1:90-200")
+        data = fetch_region(small_bam_path, "chr1:91-200")
         assert data.reference_sequence is None
         assert data.variants == []
 
     @pytest.mark.unit
     def test_different_contigs(self, small_bam_path):
         """Should fetch reads from different contigs."""
-        data = fetch_region(small_bam_path, "chr2:40-100")
+        data = fetch_region(small_bam_path, "chr2:41-100")
         names = {r.name for r in data.reads}
         assert "read8_chr2" in names
 
     @pytest.mark.unit
     def test_forward_reverse_strand(self, small_bam_path):
         """Should correctly identify forward and reverse reads."""
-        data = fetch_region(small_bam_path, "chr1:90-200")
+        data = fetch_region(small_bam_path, "chr1:91-200")
         forward = [r for r in data.reads if not r.is_reverse]
         reverse = [r for r in data.reads if r.is_reverse]
         assert len(forward) > 0
@@ -620,14 +656,14 @@ class TestFetchRegion:
     @pytest.mark.unit
     def test_read_cigar(self, small_bam_path):
         """Reads should have CIGAR strings."""
-        data = fetch_region(small_bam_path, "chr1:190-260")
+        data = fetch_region(small_bam_path, "chr1:191-260")
         for read in data.reads:
             assert read.cigar != ""
 
     @pytest.mark.unit
     def test_insertion_cigar(self, small_bam_path):
         """Read with insertion should have correct CIGAR."""
-        data = fetch_region(small_bam_path, "chr1:190-260")
+        data = fetch_region(small_bam_path, "chr1:191-260")
         read4 = next((r for r in data.reads if r.name == "read4"), None)
         if read4:
             assert "I" in read4.cigar
@@ -635,7 +671,7 @@ class TestFetchRegion:
     @pytest.mark.unit
     def test_deletion_cigar(self, small_bam_path):
         """Read with deletion should have correct CIGAR."""
-        data = fetch_region(small_bam_path, "chr1:290-380")
+        data = fetch_region(small_bam_path, "chr1:291-380")
         read5 = next((r for r in data.reads if r.name == "read5"), None)
         if read5:
             assert "D" in read5.cigar
@@ -650,12 +686,12 @@ class TestFetchRegion:
     def test_nonexistent_file(self):
         """Should raise error for nonexistent BAM file."""
         with pytest.raises((FileNotFoundError, OSError)):
-            fetch_region("/nonexistent/file.bam", "chr1:100-200")
+            fetch_region("/nonexistent/file.bam", "chr1:101-200")
 
     @pytest.mark.unit
     def test_empty_bam(self, empty_bam_path):
         """Should return empty data for BAM with no reads."""
-        data = fetch_region(empty_bam_path, "chr1:100-200")
+        data = fetch_region(empty_bam_path, "chr1:101-200")
         assert len(data.reads) == 0
         assert all(c == 0 for c in data.coverage)
 
@@ -919,14 +955,14 @@ class TestAnnotateVcfSnvSupport:
 
         # min_baseq=0: both reads count.
         v = self._snv()[0]
-        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=0)
+        annotate_vcf_snv_support(bam, "chr1:91-110", None, [v], min_baseq=0)
         assert v["read_depth"] == 2
         assert v["strand_forward"] == 1 and v["strand_reverse"] == 1
 
         # min_baseq=30: the Q2 reverse-strand base is excluded from depth AND support,
         # matching count_coverage(quality_threshold=min_baseq) used elsewhere.
         v = self._snv()[0]
-        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=30)
+        annotate_vcf_snv_support(bam, "chr1:91-110", None, [v], min_baseq=30)
         assert v["read_depth"] == 1
         assert v["strand_forward"] == 1 and v["strand_reverse"] == 0
         assert v["_alt_qualities"] == [40]  # only the surviving high-quality base
@@ -939,7 +975,7 @@ class TestAnnotateVcfSnvSupport:
             [("alt", 0, "TACGTACGTA", "I" * 10), ("ncall", 0, "NACGTACGTA", "I" * 10)],
         )
         v = self._snv()[0]
-        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=0)
+        annotate_vcf_snv_support(bam, "chr1:91-110", None, [v], min_baseq=0)
         assert v["read_depth"] == 1  # the N read is excluded from the denominator
         assert v["strand_forward"] == 1 and v["strand_reverse"] == 0
         assert v["read_support_vaf"] == 1.0
@@ -951,11 +987,11 @@ class TestAnnotateVcfSnvSupport:
         bam = self._write_bam(tmp_path, [("noqual", 0, "TACGTACGTA", None)])
 
         v = self._snv()[0]
-        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=0)
+        annotate_vcf_snv_support(bam, "chr1:91-110", None, [v], min_baseq=0)
         assert v["read_depth"] == 1  # no threshold requested -> counted
 
         v = self._snv()[0]
-        annotate_vcf_snv_support(bam, "chr1:90-110", None, [v], min_baseq=20)
+        annotate_vcf_snv_support(bam, "chr1:91-110", None, [v], min_baseq=20)
         assert v["read_depth"] == 0  # no stored quality can't satisfy the threshold
         assert v["strand_forward"] == 0 and v["strand_reverse"] == 0
 
@@ -965,7 +1001,7 @@ class TestAnnotateVcfSnvSupport:
         distinguishing true zero BAM support from an unannotated variant."""
         bam = self._write_bam(tmp_path, [("r", 0, "TACGTACGTA", "I" * 10)])  # covers 100-110
         v = self._snv(position=200)[0]  # no reads at 200
-        annotate_vcf_snv_support(bam, "chr1:90-300", None, [v], min_baseq=0)
+        annotate_vcf_snv_support(bam, "chr1:91-300", None, [v], min_baseq=0)
         assert v["read_depth"] == 0
         assert v["strand_forward"] == 0 and v["strand_reverse"] == 0
         assert v["read_support_vaf"] == 0.0
@@ -1003,7 +1039,7 @@ class TestAnnotateVcfSnvSupport:
         monkeypatch.setattr(
             parsers_mod, "_open_alignment", lambda *a, **k: _Spy(real_open(*a, **k))
         )
-        annotate_vcf_snv_support(bam, "chr1:90-110", None, self._snv())
+        annotate_vcf_snv_support(bam, "chr1:91-110", None, self._snv())
         assert captured.get("max_depth") == PILEUP_MAX_DEPTH
         assert PILEUP_MAX_DEPTH >= 1_000_000_000
 
@@ -1036,7 +1072,7 @@ class TestAnnotateVcfSnvSupport:
             parsers_mod, "_open_alignment", lambda *a, **k: _Spy(real_open(*a, **k))
         )
         # One SNV at 100 inside a 200 kb window: pileup must touch [100, 101), not the span.
-        annotate_vcf_snv_support(bam, "chr1:0-200000", None, self._snv(position=100))
+        annotate_vcf_snv_support(bam, "chr1:1-200000", None, self._snv(position=100))
         assert windows == [(100, 101)]
 
     @pytest.mark.unit

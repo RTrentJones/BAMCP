@@ -892,7 +892,7 @@ class TestVariantSource:
         )
         data = await tools_module._fetch_region_with_timeout(
             small_bam_path,
-            "chr1:90-200",
+            "chr1:91-200",
             config_with_ref.reference,
             config_with_ref,
             mode="variants",
@@ -900,7 +900,7 @@ class TestVariantSource:
             vcf_primary=True,
         )
         assert data.reference_sequence is not None
-        assert len(data.reference_sequence) == 110  # chr1:90-200
+        assert len(data.reference_sequence) == 110  # chr1:91-200 (1-based inclusive)
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -966,7 +966,7 @@ class TestHandleGetCoverage:
     @pytest.mark.asyncio
     async def test_coverage_values(self, small_bam_path, config):
         result = await handle_get_coverage(
-            {"file_path": small_bam_path, "region": "chr1:90-200"}, config
+            {"file_path": small_bam_path, "region": "chr1:91-200"}, config
         )
         payload = json.loads(result["content"][0]["text"])
         assert payload["total_bases"] == 110
@@ -2017,7 +2017,7 @@ class TestMediumRoadmapCoverage:
         monkeypatch.setattr(tools_module, "fetch_region", fail_fetch_region)
 
         data = await tools_module._fetch_region_with_timeout(
-            "sample.bam", "chr1:10-20", None, config, mode="coverage"
+            "sample.bam", "chr1:11-20", None, config, mode="coverage"
         )
 
         assert data.coverage == [3] * 10
@@ -2150,7 +2150,7 @@ class TestMediumRoadmapCoverage:
         def mock_fetch_coverage_only(*args):
             nonlocal call_count
             call_count += 1
-            # Tile region is chr1:0-4096 -> coverage indexed by absolute position.
+            # Tile region is chr1:1-4096 (0-based [0, 4096)) -> coverage by absolute position.
             return RegionData("chr1", 0, 4096, reads=[], coverage=list(range(4096)), variants=[])
 
         monkeypatch.setattr(tools_module, "_ensure_cached_index", mock_ensure_cached_index)
@@ -2158,10 +2158,10 @@ class TestMediumRoadmapCoverage:
 
         cfg = BAMCPConfig(cache_ttl=60)
         a = await tools_module._fetch_region_with_timeout(
-            "sample.bam", "chr1:100-200", None, cfg, mode="coverage"
+            "sample.bam", "chr1:101-200", None, cfg, mode="coverage"
         )
         b = await tools_module._fetch_region_with_timeout(
-            "sample.bam", "chr1:300-400", None, cfg, mode="coverage"
+            "sample.bam", "chr1:301-400", None, cfg, mode="coverage"
         )
 
         assert call_count == 1  # one tile served both sub-regions
@@ -2176,7 +2176,7 @@ class TestMediumRoadmapCoverage:
         from bamcp.core.parsers import fetch_coverage_only
         from bamcp.core.tools import _fetch_region_with_timeout
 
-        region = "chr1:100-160"
+        region = "chr1:101-160"
         tiled = await _fetch_region_with_timeout(
             small_bam_path, region, None, config, mode="coverage"
         )

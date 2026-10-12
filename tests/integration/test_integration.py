@@ -27,7 +27,7 @@ class TestBrowseRegionIntegration:
     async def test_full_browse_region_flow(self, small_bam_path, config_with_ref):
         """Test complete browse_region: fetch -> serialize -> verify all data."""
         result = await handle_visualize_region(
-            {"file_path": small_bam_path, "region": "chr1:90-200"}, config_with_ref
+            {"file_path": small_bam_path, "region": "chr1:91-200"}, config_with_ref
         )
 
         # Verify structure
@@ -35,14 +35,15 @@ class TestBrowseRegionIntegration:
 
         # Content should be a summary string (not JSON payload)
         content_text = result["content"][0]["text"]
-        assert "Region chr1:90-200" in content_text
+        # The summary echoes the region back in the 1-based inclusive form it came in.
+        assert "Region chr1:91-200" in content_text
         assert "reads" in content_text
         assert "variants" in content_text
 
         # Payload is now only in _meta.ui/init (not duplicated in content)
         payload = result["_meta"]["ui/init"]
 
-        # Verify region
+        # Verify region (the viewer payload stays internal 0-based half-open)
         assert payload["contig"] == "chr1"
         assert payload["start"] == 90
         assert payload["end"] == 200
@@ -137,7 +138,7 @@ class TestCoverageIntegration:
         config = BAMCPConfig()
 
         result = await handle_get_coverage(
-            {"file_path": small_bam_path, "region": "chr1:100-200"}, config
+            {"file_path": small_bam_path, "region": "chr1:101-200"}, config
         )
         stats = json.loads(result["content"][0]["text"])
 
@@ -162,7 +163,7 @@ class TestContigListIntegration:
         for contig in contigs:
             name = contig["name"]
             length = contig["length"]
-            region = f"{name}:0-{min(length, 100)}"
+            region = f"{name}:1-{min(length, 100)}"
 
             result = await handle_visualize_region(
                 {"file_path": small_bam_path, "region": region}, config

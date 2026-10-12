@@ -138,35 +138,52 @@ def extract_soft_clips(read: pysam.AlignedSegment) -> list[SoftClip]:
 
 def parse_region(region: str) -> tuple[str, int, int]:
     """
-    Parse a genomic region string into contig, start, end.
+    Parse a 1-based, inclusive (samtools-style) region string into internal coordinates.
+
+    The tool-boundary contract: ``chr1:1051-1051`` is the single base at 1-based
+    position 1051, and ``chr1:1000-2000`` spans 1000..2000 inclusive (1001 bases) —
+    exactly what ``samtools view``/IGV mean by the same string. Internally BAMCP works
+    in pysam's 0-based half-open frame, so this is the ONE place the conversion
+    happens: the returned ``start`` is ``int(start) - 1`` and ``end`` is unchanged
+    (1-based inclusive end == 0-based exclusive end).
 
     Supports formats:
         - chr1:1000-2000
         - chr1:1,000-2,000
         - 1:1000-2000
+        - HLA-A*01:01:01:01:100-200 (contig names containing ':' split on the last ':')
+
+    The end is NOT clamped here (no header is available); the fetchers clamp it to
+    the contig length once the file is open (see :func:`_clamp_end`).
 
     Returns:
-        Tuple of (contig, start, end)
+        Tuple of (contig, start0, end) — 0-based half-open.
 
     Raises:
         ValueError: If region format is invalid or exceeds MAX_REGION_SIZE.
     """
     region = region.replace(",", "")
     try:
-        contig, coords = region.split(":")
+        contig, coords = region.rsplit(":", 1)
         start_str, end_str = coords.split("-")
-        start = int(start_str)
+        start1 = int(start_str)
         end = int(end_str)
     except (ValueError, AttributeError) as e:
         raise ValueError(
-            f"Invalid region format: '{region}'. Expected format: 'chr1:1000-2000'"
+            f"Invalid region format: '{region}'. Expected 1-based inclusive "
+            f"'chr1:1000-2000' (samtools-style)"
         ) from e
+    if not contig:
+        raise ValueError(f"Invalid region format: '{region}'. Missing contig name")
 
-    if start < 0:
-        raise ValueError(f"Start position must be non-negative, got {start}")
-    if end <= start:
-        raise ValueError(f"End position ({end}) must be greater than start ({start})")
+    if start1 < 1:
+        raise ValueError(
+            f"Start position must be >= 1 (regions are 1-based, inclusive), got {start1}"
+        )
+    if end < start1:
+        raise ValueError(f"End position ({end}) must be >= start ({start1})")
 
+    start = start1 - 1
     region_size = end - start
     if region_size > MAX_REGION_SIZE:
         raise ValueError(
@@ -175,6 +192,32 @@ def parse_region(region: str) -> tuple[str, int, int]:
         )
 
     return contig, start, end
+
+
+def format_region(contig: str, start0: int, end: int) -> str:
+    """Render internal 0-based half-open ``[start0, end)`` as a 1-based inclusive region.
+
+    The inverse of :func:`parse_region`: every internal caller that builds a region
+    string from 0-based numbers must go through here so the string it emits means
+    the same bases at the tool boundary.
+    """
+    return f"{contig}:{start0 + 1}-{end}"
+
+
+def _clamp_end(lengths: dict[str, int], contig: str, start: int, end: int) -> int:
+    """Clamp ``end`` to the contig length; raise a clear error for unknown contigs/starts."""
+    length = lengths.get(contig)
+    if length is None:
+        raise ValueError(f"Contig '{contig}' not found in the alignment header")
+    if start >= length:
+        raise ValueError(
+            f"Region start {start + 1} is past the end of {contig} (length {length:,})"
+        )
+    return min(end, length)
+
+
+def _header_lengths(samfile: pysam.AlignmentFile) -> dict[str, int]:
+    return dict(zip(samfile.references, samfile.lengths, strict=False))
 
 
 def _open_alignment(
@@ -193,7 +236,11 @@ def _open_alignment(
 
 
 def fetch_reference_sequence(reference_path: str, region: str) -> str:
-    """Fetch the reference sequence for a region (0-based half-open)."""
+    """Fetch the reference sequence for a 1-based inclusive region string.
+
+    Returns the bases at internal 0-based half-open ``[start, end)``; pysam truncates
+    a slice that runs past the contig end, matching the alignment-side clamp.
+    """
     contig, start, end = parse_region(region)
     with pysam.FastaFile(reference_path) as fasta:
         return fasta.fetch(contig, start, end)
@@ -210,6 +257,7 @@ def count_coverage_arrays(
     """Return base-count coverage arrays for a region without extracting reads."""
     contig, start, end = parse_region(region)
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
+        end = _clamp_end(_header_lengths(samfile), contig, start, end)
         counts = samfile.count_coverage(
             contig,
             start,
@@ -528,6 +576,7 @@ def fetch_region(
 
     # Use context manager to ensure file handles are properly closed on exception
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
+        end = _clamp_end(_header_lengths(samfile), contig, start, end)
         # 1. Calculate coverage and base counts using pysam's optimized C engine
         # Returns tuple of arrays (A, C, G, T)
         # Use read_callback to respect min_mapq filter for consistency with read filtering
@@ -768,20 +817,24 @@ def detect_indels(
         reference-skip at each column, fed back into :func:`detect_variants` to
         correct the SNV depth denominator.
 
-    ``gap_depth`` always has length ``end - start``. Without ``ref_seq`` no alleles can
+    ``gap_depth`` always has length ``end - start`` (``end`` clamped to the contig
+    length, as for the coverage arrays). Without ``ref_seq`` no alleles can
     be built, so ``indels`` is empty (SNV detection also no-ops without a reference).
     """
     contig, start, end = parse_region(region)
-    length = max(end - start, 0)
-    gap_depth = [0] * length
     indels: list[dict] = []
 
-    if not ref_seq or length == 0:
-        return indels, gap_depth
+    if not ref_seq:
+        return indels, [0] * max(end - start, 0)
 
     ref_len = len(ref_seq)
 
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
+        # Same clamp as count_coverage_arrays/fetch_region so gap_depth stays aligned
+        # with the coverage arrays it corrects.
+        end = _clamp_end(_header_lengths(samfile), contig, start, end)
+        length = max(end - start, 0)
+        gap_depth = [0] * length
         # nofilter + explicit read_passes_filters mirrors count_coverage's read set
         # (no BAQ, no mate-overlap dedup) so indel depth stays consistent with SNV depth.
         for column in samfile.pileup(

@@ -188,7 +188,8 @@ async def assemble_evidence(
     from ..core.tools import _fetch_region_with_timeout
 
     ref_path = reference if reference is not None else config.reference
-    region = f"{chrom}:{max(0, pos - window)}-{pos + window}"
+    # 1-based inclusive window around the 1-based pos (start clamped at base 1).
+    region = f"{chrom}:{max(1, pos - window)}-{pos + window}"
 
     # Kick off the two network lookups concurrently with the local BAM read.
     clinvar_coro = _lookup_clinvar_safe(config, chrom, pos, ref, alt)

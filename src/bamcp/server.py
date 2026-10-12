@@ -27,6 +27,7 @@ from .core.tools import (
     handle_visualize_region,
 )
 from .resources import get_viewer_html
+from .tool_specs import REGION_FORMAT_NOTE
 
 _VIEWER_URI = "ui://bamcp/viewer"
 _VIEWER_META: dict = {"ui": {"resourceUri": _VIEWER_URI}}
@@ -72,7 +73,8 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     @mcp.tool(
         description=(
             "Detect and return candidate variants in a genomic region. "
-            "variant_source: 'auto' (BAMCP candidates, VCF overlaid if given), "
+            + REGION_FORMAT_NOTE
+            + " variant_source: 'auto' (BAMCP candidates, VCF overlaid if given), "
             "'vcf' (the VCF is authoritative — BAMCP attaches read-level evidence at "
             "each site; requires vcf_path), or 'bamcp' (BAMCP candidates only)."
         )
@@ -98,7 +100,9 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         result = await handle_get_variants(args, config)
         return str(result["content"][0]["text"])
 
-    @mcp.tool(description="Calculate depth of coverage statistics for a region")
+    @mcp.tool(
+        description="Calculate depth of coverage statistics for a region. " + REGION_FORMAT_NOTE
+    )
     async def get_coverage(
         file_path: str,
         region: str,
@@ -128,7 +132,10 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         return str(result["content"][0]["text"])
 
     @mcp.tool(
-        description="Jump to a specific genomic position and view surrounding reads",
+        description=(
+            "Jump to a specific genomic position and view surrounding reads. "
+            "position is 1-based (VCF/samtools convention)."
+        ),
         meta=_VIEWER_META,
     )
     async def jump_to(
@@ -163,7 +170,10 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     # -- Phase 1: MCP Apps Tools --------------------------------------------
 
     @mcp.tool(
-        description="Visualize aligned reads in a genomic region with interactive MCP Apps viewer",
+        description=(
+            "Visualize aligned reads in a genomic region with interactive MCP Apps viewer. "
+            + REGION_FORMAT_NOTE
+        ),
         meta=_VIEWER_META,
     )
     async def visualize_region(
@@ -188,7 +198,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     @mcp.tool(
         description=(
             "Get a text summary of a genomic region "
-            "(read count, coverage, candidate variants) for LLM reasoning"
+            "(read count, coverage, candidate variants) for LLM reasoning. " + REGION_FORMAT_NOTE
         ),
     )
     async def get_region_summary(
@@ -320,7 +330,8 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             "Coordinates are build-specific: pass the BAM's file_path so the build is "
             "auto-detected and the coordinates line up in that BAM (a GRCh38 locus in a GRCh37 "
             "BAM is ~0.5-2 Mb off, silently). Optionally set build (GRCh37/GRCh38) to override. "
-            "The response states the coordinates' genome_build and warns on any mismatch."
+            "The response states the coordinates' genome_build and warns on any mismatch. "
+            "The returned region is 1-based inclusive, ready to pass to visualize_region."
         ),
     )
     async def search_gene(

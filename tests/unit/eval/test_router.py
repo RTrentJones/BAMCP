@@ -122,7 +122,8 @@ async def test_search_gene_returns_region(monkeypatch):
     assert result.ok is True
     parsed = json.loads(result.text)
     assert parsed["symbol"] == "TP53"
-    assert parsed["region"] == "chr17:7670000-7680000"
+    # NCBI genomicinfo is 0-based; search_gene emits a 1-based inclusive region.
+    assert parsed["region"] == "chr17:7670001-7680001"
     assert parsed["genome_build"] == "GRCh38"
 
 

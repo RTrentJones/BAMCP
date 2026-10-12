@@ -46,6 +46,7 @@ from .parsers import (
     fetch_coverage_only,
     fetch_reference_sequence,
     fetch_region,
+    format_region,
     load_vcf_variants,
     parse_region,
     scan_variants_chunked,
@@ -506,8 +507,10 @@ def _slice_readless_region_data(data: RegionData, start: int, end: int) -> Regio
     position-anchored so they filter by position. Reads are always empty in the
     readless modes this serves.
     """
+    # The tile's end is clamped to the contig length by the parser; never slice past it.
+    end = min(end, data.end)
     offset = start - data.start
-    length = end - start
+    length = max(end - start, 0)
     coverage = data.coverage[offset : offset + length] if data.coverage else []
     reference = (
         data.reference_sequence[offset : offset + length]
@@ -620,7 +623,8 @@ async def _fetch_readless_tiled(
         mode == "variants" and tile_size > INDEL_DETECTION_MAX_REGION >= (r_end - r_start)
     ):
         t_start, t_end = r_start, r_end
-    tile_region = f"{contig}:{t_start}-{t_end}"
+    # Internal 0-based numbers → the 1-based inclusive region string parse_region reads.
+    tile_region = format_region(contig, t_start, t_end)
 
     tile_key = _cache_key(file_path, tile_region, reference, config, mode, min_vaf, min_depth, None)
     tile_data = _get_cached_region(region_cache, tile_key, ttl)
@@ -1002,14 +1006,15 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
 
     coverage = data.coverage
     stats = {
-        "region": f"{data.contig}:{data.start}-{data.end}",
+        "region": format_region(data.contig, data.start, data.end),
         "mean": round(sum(coverage) / len(coverage), 2) if coverage else 0,
         "min": min(coverage) if coverage else 0,
         "max": max(coverage) if coverage else 0,
         "median": sorted(coverage)[len(coverage) // 2] if coverage else 0,
         "bases_covered": sum(1 for c in coverage if c > 0),
         "total_bases": len(coverage),
-        "coordinate_system": _INTERNAL_COORDINATE_SYSTEM,
+        # The echoed region string is 1-based inclusive, like the region it answers.
+        "coordinate_system": _LLM_COORDINATE_SYSTEM,
     }
 
     return {"content": [{"type": "text", "text": json.dumps(stats)}]}
@@ -1186,7 +1191,9 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     payload: dict[str, Any] = {
         "symbol": result.symbol,
         "name": result.name,
-        "region": f"{result.chrom}:{result.start}-{result.end}",
+        # NCBI genomicinfo chrstart/chrstop are 0-based; emit the 1-based inclusive
+        # region string every region-taking tool reads.
+        "region": f"{result.chrom}:{result.start + 1}-{result.end + 1}",
         "strand": result.strand,
         "genome_build": result.build,
         "build_source": source,
@@ -1218,8 +1225,10 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
-    start = max(0, position - window // 2)
-    end = position + window // 2
+    # ``position`` is 1-based; build a 1-based inclusive window of ``window`` bases
+    # centred on it (start clamped at base 1).
+    start = max(1, position - window // 2)
+    end = start + max(window, 1) - 1
     region = f"{contig}:{start}-{end}"
 
     data = await _fetch_region_with_timeout(
@@ -1307,7 +1316,7 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     reads_count = len(data.reads)
     variants_count = len(data.variants)
     summary = (
-        f"Region {data.contig}:{data.start}-{data.end}: "
+        f"Region {format_region(data.contig, data.start, data.end)}: "
         f"{reads_count} reads, {variants_count} candidate variants "
         f"(filters: {_format_filters_line(filters)})"
     )
@@ -1350,7 +1359,7 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
 
     filters = _applied_filters(config, args, include_max_reads=True)
     summary_lines = [
-        f"Region: {data.contig}:{data.start}-{data.end}",
+        f"Region: {format_region(data.contig, data.start, data.end)}",
         f"Reads: {len(data.reads)}",
         f"Coverage: mean={mean_cov}x, max={max_cov}x",
         f"Candidate variants detected: {len(data.variants)}",

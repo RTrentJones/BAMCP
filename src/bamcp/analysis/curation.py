@@ -277,7 +277,9 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     if validation_error:
         return _error_response(validation_error, output_format)
 
-    region = f"{chrom}:{pos - window}-{pos + window}"
+    # 1-based inclusive window around the 1-based pos; clamp the start at base 1 so a
+    # variant near the contig start never builds a negative/zero (invalid) region.
+    region = f"{chrom}:{max(1, pos - window)}-{pos + window}"
 
     try:
         data = await _fetch_region_with_timeout(file_path, region, reference, config)

@@ -102,7 +102,7 @@ Thirteen tools, all registered in `server.py`:
 | `classify_variant` | ACMG classification via evidence fusion (`analysis/acmg.py`, `fusion.py`). |
 | `lookup_clinvar` / `lookup_gnomad` | Clinical significance / population allele frequency. |
 | `search_gene` | Gene symbol → coordinates. Build-aware: auto-detects from the BAM. |
-| `cleanup_cache` | Clean the session's BAM index cache files. |
+| `cleanup_cache` | Clear downloaded index files + region cache. stdio only (no-op on shared HTTP servers); never closes the shared HTTP clients. |
 
 **Every variant response echoes its `applied_filters`** — absence of a variant must stay
 distinguishable from "filtered out". Preserve that when touching variant output.
@@ -149,6 +149,12 @@ and IPv6 private/loopback/link-local. Optional allowlist via `BAMCP_ALLOWED_REMO
 
 Input validation: regions against `REGION_PATTERN`, paths ≤2048 chars, regions ≤100 chars,
 only `.bam`/`.cram` for local files, error messages sanitized (never leak config).
+
+**One error envelope.** Every tool runs through `_run()` in `server.py`, which maps any handler
+exception via `core/errors.py:sanitize_tool_exception` to an `isError=true` result with a
+client-safe message. Handlers raise `ToolInputError` for caller-facing failures — don't return
+`{"error": ...}` as a success. Lookup `not_found` is an answer, not an error.
+`tool_specs.py` must match the server's parameter sets (parity test in `test_tool_specs.py`).
 
 `mcp>=1.23.0` is a hard floor (CVE-2025-66416 DNS rebinding fix).
 

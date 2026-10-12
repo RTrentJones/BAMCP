@@ -284,7 +284,8 @@ async def assemble_evidence(
     ref = ref.upper()
     alt = alt.upper()
     ref_path = reference if reference is not None else config.reference
-    region = f"{chrom}:{max(0, pos - window)}-{pos + window}"
+    # 1-based inclusive window around the 1-based pos (start clamped at base 1).
+    region = f"{chrom}:{max(1, pos - window)}-{pos + window}"
 
     async def _observe() -> tuple[Any, str | None]:
         try:

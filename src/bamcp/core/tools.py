@@ -37,6 +37,7 @@ from ..constants import (
     REGION_TILE_SIZE,
     SCAN_VARIANTS_CHUNK_SIZE,
     SCAN_VARIANTS_MAX_REGION,
+    SCAN_VARIANTS_MAX_RESULTS,
     SCAN_VARIANTS_TIMEOUT_SECONDS,
     VIEWER_RESOURCE_URI,
 )
@@ -44,16 +45,19 @@ from ..middleware.telemetry import telemetry_wrapper
 from .cache import BAMIndexCache
 from .errors import ToolInputError
 from .parsers import (
+    EXCLUDED_READ_FLAGS,
     MAX_REGION_SIZE,
+    OVERLAPPING_MATES_POLICY,
     RegionData,
     annotate_vcf_snv_support,
     fetch_candidate_variants_only,
     fetch_coverage_only,
     fetch_reference_sequence,
     fetch_region,
+    format_region,
     load_vcf_variants,
     parse_region,
-    scan_variants_chunked,
+    scan_contig,
 )
 from .serialization import serialize_region_data
 from .validation import (
@@ -372,23 +376,71 @@ _FILTER_ABSENCE_NOTE = (
 )
 
 
+def _detection_status(
+    region: str, reference: str | None, vcf_primary: bool = False
+) -> dict[str, Any]:
+    """Which candidate detectors actually ran for this request — so an empty result
+    with detection OFF is never mistaken for a confident "no variants here".
+
+    SNV/indel candidates need a reference to define the reference allele; with
+    ``variant_source="vcf"`` the VCF is authoritative and BAMCP adds none; indels need
+    a pileup pass that is skipped above ``INDEL_DETECTION_MAX_REGION``.
+    """
+    _, start, end = parse_region(region)
+    if vcf_primary:
+        reason: str | None = "variant_source=vcf (the VCF is authoritative)"
+    elif not reference:
+        reason = "no reference"
+    else:
+        reason = None
+    status: dict[str, Any] = {
+        "snv_detection": "enabled" if reason is None else f"disabled: {reason}"
+    }
+    if reason is not None:
+        status["indel_detection"] = False
+        status["indel_detection_note"] = f"disabled: {reason}"
+    elif end - start > INDEL_DETECTION_MAX_REGION:
+        status["indel_detection"] = False
+        status["indel_detection_note"] = (
+            f"skipped: region {end - start:,}bp exceeds {INDEL_DETECTION_MAX_REGION:,}bp; "
+            "request a smaller region to detect indels"
+        )
+    else:
+        status["indel_detection"] = True
+    return status
+
+
 def _applied_filters(
-    config: BAMCPConfig, args: dict[str, Any], *, include_max_reads: bool
+    config: BAMCPConfig,
+    args: dict[str, Any],
+    *,
+    include_max_reads: bool,
+    detection: dict[str, Any] | None = None,
+    reads_truncated: bool | None = None,
 ) -> dict[str, Any]:
     """The read/variant thresholds actually applied to this response.
 
     ``min_vaf``/``min_depth`` honor per-call overrides; ``min_mapq``/``min_baseq`` are
     operator config. ``max_reads`` gates how many reads are *displayed* (viewer tools),
     so it's included only where reads are returned — not for readless variant calls.
+    The fixed read exclusions and overlapping-mates policy are always echoed;
+    ``detection`` (see :func:`_detection_status`) and ``reads_truncated`` are merged in
+    when the caller knows them.
     """
     filters: dict[str, Any] = {
         "min_vaf": args.get("min_vaf", config.min_vaf),
         "min_depth": args.get("min_depth", config.min_depth),
         "min_mapq": config.min_mapq,
         "min_baseq": config.min_baseq,
+        "excluded_reads": list(EXCLUDED_READ_FLAGS),
+        "overlapping_mates": OVERLAPPING_MATES_POLICY,
     }
     if include_max_reads:
         filters["max_reads"] = config.max_reads
+    if reads_truncated is not None:
+        filters["reads_truncated"] = reads_truncated
+    if detection:
+        filters.update(detection)
     return filters
 
 
@@ -402,6 +454,17 @@ def _format_filters_line(filters: dict[str, Any]) -> str:
     ]
     if "max_reads" in filters:
         parts.append(f"≤{filters['max_reads']} reads shown")
+    if filters.get("reads_truncated"):
+        parts.append(
+            "read list TRUNCATED at max_reads (SNV evidence from pileup; indel evidence incomplete)"
+        )
+    if "excluded_reads" in filters:
+        parts.append(f"excluded reads: {'/'.join(filters['excluded_reads'])}")
+    snv = filters.get("snv_detection")
+    if snv and snv != "enabled":
+        parts.append(f"SNV detection {snv}")
+    if filters.get("indel_detection") is False:
+        parts.append(f"indel detection {filters.get('indel_detection_note', 'off')}")
     return ", ".join(parts)
 
 
@@ -667,8 +730,10 @@ def _slice_readless_region_data(data: RegionData, start: int, end: int) -> Regio
     position-anchored so they filter by position. Reads are always empty in the
     readless modes this serves.
     """
+    # The tile's end is clamped to the contig length by the parser; never slice past it.
+    end = min(end, data.end)
     offset = start - data.start
-    length = end - start
+    length = max(end - start, 0)
     coverage = data.coverage[offset : offset + length] if data.coverage else []
     reference = (
         data.reference_sequence[offset : offset + length]
@@ -781,7 +846,8 @@ async def _fetch_readless_tiled(
         mode == "variants" and tile_size > INDEL_DETECTION_MAX_REGION >= (r_end - r_start)
     ):
         t_start, t_end = r_start, r_end
-    tile_region = f"{contig}:{t_start}-{t_end}"
+    # Internal 0-based numbers → the 1-based inclusive region string parse_region reads.
+    tile_region = format_region(contig, t_start, t_end)
 
     tile_key = _cache_key(file_path, tile_region, reference, config, mode, min_vaf, min_depth, None)
     tile_data = _get_cached_region(region_cache, tile_key, ttl)
@@ -1144,7 +1210,12 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         "variant_source": variant_source,
         "coordinate_system": _LLM_COORDINATE_SYSTEM,
         "variant_type": "candidate",
-        "applied_filters": _applied_filters(config, args, include_max_reads=False),
+        "applied_filters": _applied_filters(
+            config,
+            args,
+            include_max_reads=False,
+            detection=_detection_status(region, reference, vcf_primary),
+        ),
         "filter_note": _FILTER_ABSENCE_NOTE,
         "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
     }
@@ -1165,14 +1236,15 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
 
     coverage = data.coverage
     stats = {
-        "region": f"{data.contig}:{data.start}-{data.end}",
+        "region": format_region(data.contig, data.start, data.end),
         "mean": round(sum(coverage) / len(coverage), 2) if coverage else 0,
         "min": min(coverage) if coverage else 0,
         "max": max(coverage) if coverage else 0,
         "median": sorted(coverage)[len(coverage) // 2] if coverage else 0,
         "bases_covered": sum(1 for c in coverage if c > 0),
         "total_bases": len(coverage),
-        "coordinate_system": _INTERNAL_COORDINATE_SYSTEM,
+        # The echoed region string is 1-based inclusive, like the region it answers.
+        "coordinate_system": _LLM_COORDINATE_SYSTEM,
     }
 
     return {"content": [{"type": "text", "text": json.dumps(stats)}]}
@@ -1380,6 +1452,8 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     payload: dict[str, Any] = {
         "symbol": result.symbol,
         "name": result.name,
+        # GeneClient already converts NCBI's 0-based chrstart/chrstop to 1-based
+        # inclusive, which is exactly the region string every region-taking tool reads.
         "region": f"{result.chrom}:{result.start}-{result.end}",
         "strand": result.strand,
         "genome_build": result.build,
@@ -1428,7 +1502,13 @@ async def _viewer_response(
     data = await _fetch_region_with_timeout(
         file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
     )
-    filters = _applied_filters(config, args, include_max_reads=True)
+    filters = _applied_filters(
+        config,
+        args,
+        include_max_reads=True,
+        detection=_detection_status(region, reference, vcf_primary),
+        reads_truncated=data.reads_truncated,
+    )
     payload = serialize_region_data(data)
     payload["coordinate_system"] = _INTERNAL_COORDINATE_SYSTEM
     payload["variant_type"] = "candidate"
@@ -1475,8 +1555,10 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     explicit_reference, reference = _resolve_reference(args, config)
     contig = args.get("contig") or await _first_contig(file_path, reference, config)
 
-    start = max(0, position - window // 2)
-    end = position + window // 2
+    # ``position`` is 1-based; build a 1-based inclusive window of ``window`` bases
+    # centred on it (start clamped at base 1).
+    start = max(1, position - window // 2)
+    end = start + max(window, 1) - 1
     region = f"{contig}:{start}-{end}"
     validate_region(region)
 
@@ -1510,7 +1592,7 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
         region,
         explicit_reference,
         reference,
-        lambda data: f"Region {data.contig}:{data.start}-{data.end}",
+        lambda data: f"Region {format_region(data.contig, data.start, data.end)}",
     )
 
 
@@ -1536,9 +1618,15 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     mean_cov = round(sum(coverage) / len(coverage), 2) if coverage else 0
     max_cov = max(coverage) if coverage else 0
 
-    filters = _applied_filters(config, args, include_max_reads=True)
+    filters = _applied_filters(
+        config,
+        args,
+        include_max_reads=True,
+        detection=_detection_status(region, reference, vcf_primary),
+        reads_truncated=data.reads_truncated,
+    )
     summary_lines = [
-        f"Region: {data.contig}:{data.start}-{data.end}",
+        f"Region: {format_region(data.contig, data.start, data.end)}",
         f"Reads: {len(data.reads)}",
         f"Coverage: mean={mean_cov}x, max={max_cov}x",
         f"Candidate variants detected: {len(data.variants)}",
@@ -1739,9 +1827,9 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
     index_path = await _ensure_cached_index(file_path, config)
 
     try:
-        variants = await asyncio.wait_for(
+        scan = await asyncio.wait_for(
             _run_in_parse_pool(
-                scan_variants_chunked,
+                scan_contig,
                 file_path,
                 contig,
                 reference,
@@ -1760,6 +1848,28 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
             f"Scan of {contig} timed out after {SCAN_VARIANTS_TIMEOUT_SECONDS:g}s; "
             "use get_variants on a narrower region."
         ) from e
+    except ValueError as e:
+        # Unknown contig: an error, never a silent empty "no variants" result.
+        raise ToolInputError(str(e)) from e
+
+    variants = scan.variants
+    filters = _applied_filters(config, args, include_max_reads=False)
+    # Self-describing scope: what was scanned, and what this scan cannot see.
+    filters.update(
+        {
+            "snv_detection": "enabled",
+            "indel_detection": False,
+            "indel_detection_note": "scan_variants is SNV-only; use get_variants on a "
+            "smaller region to detect indels",
+            "scanned_region": format_region(contig, scan.scanned_start, scan.scanned_end),
+            "contig_length": scan.contig_length,
+            "truncated_by_max_region": scan.truncated_by_max_region,
+            "max_region": SCAN_VARIANTS_MAX_REGION,
+            "total_candidates": scan.total_candidates,
+            "results_capped": scan.results_capped,
+            "max_results": SCAN_VARIANTS_MAX_RESULTS,
+        }
+    )
 
     return {
         "content": [
@@ -1772,7 +1882,7 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
                         "count": len(variants),
                         "coordinate_system": _LLM_COORDINATE_SYSTEM,
                         "variant_type": "candidate",
-                        "applied_filters": _applied_filters(config, args, include_max_reads=False),
+                        "applied_filters": filters,
                         "filter_note": _FILTER_ABSENCE_NOTE,
                         "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
                     }

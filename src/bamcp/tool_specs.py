@@ -29,6 +29,14 @@ _VARIANT_SOURCE = {
 }
 
 
+# The region-string contract every region-taking tool shares (parse_region converts it).
+REGION_FORMAT_NOTE = (
+    "region is 1-based and inclusive, samtools-style ('chr1:1000-2000' covers bases "
+    "1000..2000; 'chr1:1051-1051' is the single base 1051)."
+)
+_REGION = {**_STR, "description": "1-based inclusive, samtools-style, e.g. chr1:1000-2000"}
+
+
 def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
     return {
         "type": "object",
@@ -41,12 +49,14 @@ def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
 TOOL_SPECS: dict[str, dict[str, Any]] = {
     "get_variants": {
         "description": "Detect and return variants in a genomic region. Positions are "
-        "1-based (VCF/dbSNP convention). Each variant carries strand counts, mean base "
+        "1-based (VCF/dbSNP convention); "
+        + REGION_FORMAT_NOTE
+        + " Each variant carries strand counts, mean base "
         "quality, artifact-risk assessment, and a confidence level.",
         "input_schema": _obj(
             {
                 "file_path": _STR,
-                "region": {**_STR, "description": "e.g. chr1:1000-2000"},
+                "region": _REGION,
                 "reference": _STR,
                 "vcf_path": _VCF_PATH,
                 "variant_source": _VARIANT_SOURCE,
@@ -58,9 +68,9 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "get_coverage": {
         "description": "Calculate depth-of-coverage statistics (mean, min, max, median, "
-        "bases covered) for a genomic region.",
+        "bases covered) for a genomic region. " + REGION_FORMAT_NOTE,
         "input_schema": _obj(
-            {"file_path": _STR, "region": _STR, "reference": _STR},
+            {"file_path": _STR, "region": _REGION, "reference": _STR},
             ["file_path", "region"],
         ),
     },
@@ -72,7 +82,8 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "jump_to": {
         "description": "Jump to a specific genomic position and view the surrounding reads in "
-        "the interactive viewer. If contig is omitted, the BAM's first contig is used.",
+        "the interactive viewer. position is 1-based (VCF/samtools convention). If "
+        "contig is omitted, the BAM's first contig is used.",
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -88,11 +99,11 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "visualize_region": {
         "description": "Visualize aligned reads in a genomic region with the interactive MCP "
-        "Apps viewer. Auto-detects compact mode for large regions.",
+        "Apps viewer. Auto-detects compact mode for large regions. " + REGION_FORMAT_NOTE,
         "input_schema": _obj(
             {
                 "file_path": _STR,
-                "region": _STR,
+                "region": _REGION,
                 "reference": _STR,
                 "vcf_path": _VCF_PATH,
                 "variant_source": _VARIANT_SOURCE,
@@ -102,11 +113,12 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "get_region_summary": {
         "description": "Get a text summary of a genomic region (read count, coverage, and each "
-        "variant with confidence, artifact risk, and strand balance) for LLM reasoning. No UI.",
+        "variant with confidence, artifact risk, and strand balance) for LLM reasoning. No UI. "
+        + REGION_FORMAT_NOTE,
         "input_schema": _obj(
             {
                 "file_path": _STR,
-                "region": _STR,
+                "region": _REGION,
                 "reference": _STR,
                 "vcf_path": _VCF_PATH,
                 "variant_source": _VARIANT_SOURCE,
@@ -174,7 +186,8 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": "Search for a gene by symbol (e.g. BRCA1, TP53) and return its genomic "
         "coordinates (1-based). Use this to navigate to a gene's location by name. Pass "
         "file_path to return coordinates in that BAM's build (auto-detected), or build "
-        "(GRCh37/hg19 or GRCh38/hg38) to choose it explicitly.",
+        "(GRCh37/hg19 or GRCh38/hg38) to choose it explicitly. The returned region is "
+        "1-based inclusive, ready to pass to visualize_region.",
         "input_schema": _obj(
             {
                 "symbol": _STR,

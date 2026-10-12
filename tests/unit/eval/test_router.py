@@ -108,8 +108,8 @@ async def test_search_gene_returns_region(monkeypatch):
         symbol = "TP53"
         name = "tumor protein p53"
         chrom = "chr17"
-        start = 7670000
-        end = 7680000
+        start = 7670001  # GeneClient returns 1-based coordinates
+        end = 7680001
         strand = "-"
         build = "GRCh38"
 
@@ -122,7 +122,8 @@ async def test_search_gene_returns_region(monkeypatch):
     assert result.ok is True
     parsed = json.loads(result.text)
     assert parsed["symbol"] == "TP53"
-    assert parsed["region"] == "chr17:7670000-7680000"
+    # The client is 1-based already; search_gene passes it through unchanged.
+    assert parsed["region"] == "chr17:7670001-7680001"
     assert parsed["genome_build"] == "GRCh38"
 
 

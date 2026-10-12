@@ -3262,3 +3262,99 @@ class TestLargeRegion:
         )
         assert not errors, errors
         assert result > 1000, f"coverage track should be drawn, got {result} opaque px"
+
+
+def _install_fake_host(page: Page) -> None:
+    """Stub client.app so callServerTool resolves only when the test says so."""
+    page.evaluate(
+        """() => {
+            window.__pending = [];
+            window.__messages = [];
+            viewer.client.app = {
+                callServerTool: (req) => new Promise((resolve, reject) => {
+                    window.__pending.push({ req, resolve, reject });
+                }),
+                sendMessage: (m) => { window.__messages.push(m); return Promise.resolve({}); },
+                updateModelContext: () => Promise.resolve({}),
+            };
+        }"""
+    )
+
+
+class TestFetchSequencing:
+    """Overlapping app-initiated fetches must not land out of order."""
+
+    @pytest.mark.e2e
+    def test_older_response_is_dropped(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        _install_fake_host(viewer_page)
+        result = viewer_page.evaluate(
+            """async () => {
+                const tile = (start, end, tag) => ({
+                    contig: 'chr1', start, end, coverage: new Array(end - start).fill(1),
+                    variants: [], reads: [{name: tag, cigar: '10M', position: start + 5,
+                        end_position: start + 15, mapping_quality: 60,
+                        is_reverse: false, mismatches: []}],
+                });
+                const c = viewer.client;
+                const older = c.fetchRegionDirect('/x.bam', 'chr1:101-600');
+                const newer = c.fetchRegionDirect('/x.bam', 'chr1:151-650');
+                // Resolve the NEWER request first, then the older one.
+                window.__pending[1].resolve({ structuredContent: tile(150, 650, 'new') });
+                window.__pending[0].resolve({ structuredContent: tile(100, 600, 'old') });
+                const [o, n] = await Promise.all([older, newer]);
+                viewer.applyFetchResult(n);
+                viewer.applyFetchResult(o);
+                return { o: o.status, n: n.status, name: viewer.state.data.reads[0].name };
+            }"""
+        )
+        assert result == {"o": "stale", "n": "ok", "name": "new"}, result
+
+    @pytest.mark.e2e
+    def test_fetch_error_is_shown_not_swallowed(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        _install_fake_host(viewer_page)
+        viewer_page.evaluate(
+            """async () => {
+                const p = viewer.client.fetchRegionDirect('/x.bam', 'chr1:1-2000000');
+                window.__pending[0].resolve({
+                    isError: true,
+                    content: [{type: 'text', text: 'Region size exceeds maximum allowed'}],
+                });
+                viewer.applyFetchResult(await p);
+            }"""
+        )
+        banner = viewer_page.locator("#fetch-error")
+        expect(banner).to_be_visible()
+        assert "exceeds maximum" in banner.inner_text()
+        viewer_page.locator("#fetch-error-close").click()
+        expect(banner).to_be_hidden()
+
+
+class TestNavigationLimits:
+    @pytest.mark.e2e
+    def test_zoom_in_is_bounded(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        for _ in range(30):
+            viewer_page.locator("#zoom-in").click()
+        span = viewer_page.evaluate("() => viewer.state.viewport.end - viewer.state.viewport.start")
+        assert span >= 20 - 1e-6, f"zoom-in should stop at 20bp, got {span}"
+
+    @pytest.mark.e2e
+    def test_zoom_out_is_bounded_and_start_non_negative(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        for _ in range(40):
+            viewer_page.locator("#zoom-out").click()
+        vp = viewer_page.evaluate("() => viewer.state.viewport")
+        assert vp["end"] - vp["start"] <= 500_000, vp
+        assert vp["start"] >= 0, vp
+
+    @pytest.mark.e2e
+    def test_pan_stops_at_contig_start(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        # ArrowRight pans toward lower coordinates (pan(-50), like dragging right).
+        for _ in range(40):
+            viewer_page.keyboard.press("ArrowRight")
+        vp = viewer_page.evaluate("() => viewer.state.viewport")
+        assert vp["start"] == 0, vp
+        assert vp["end"] == 500, vp

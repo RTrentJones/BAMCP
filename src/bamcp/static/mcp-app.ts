@@ -11,15 +11,18 @@
  * This module is bundled into viewer.html by Vite.
  */
 
-import { BAMCPClient, DebugInfo } from "./client";
+import { BAMCPClient, DebugInfo, FetchResult } from "./client";
 import {
     baseColor,
     displayPos,
     escapeHtml,
     maxOf,
+    paddedFetchWindow,
+    panViewport,
     svColor,
     svTypeLabel,
     toRegionString,
+    zoomViewport,
 } from "./constants";
 import { Renderer } from "./renderer";
 import { StateManager, DEFAULT_SETTINGS } from "./state";
@@ -88,6 +91,8 @@ class BAMCPViewer {
     private variantTableTimer: ReturnType<typeof setTimeout> | null = null;
     private static readonly VIEWPORT_REFETCH_OVERLAP = 0.8;     // refetch when <80% overlap
     private static readonly VIEWPORT_REFETCH_DEBOUNCE_MS = 300;
+    private fetchErrorTimer: ReturnType<typeof setTimeout> | null = null;
+    private static readonly FETCH_ERROR_MS = 8000;
 
     constructor() {
         this.client = new BAMCPClient();
@@ -120,6 +125,7 @@ class BAMCPViewer {
                 clearTimeout(this.sequenceFallbackTimer);
                 this.sequenceFallbackTimer = null;
             }
+            this.hideFetchError();
 
             // Host data always resets viewport
             this.state.loadData(data);
@@ -133,6 +139,10 @@ class BAMCPViewer {
         this.client.setOnDebugUpdate((info: DebugInfo) => {
             this.debugContext.textContent = info.lastContext || '—';
             this.debugToolCall.textContent = info.lastToolCall || '—';
+        });
+
+        document.getElementById('fetch-error-close')?.addEventListener('click', () => {
+            this.hideFetchError();
         });
 
         // Debug close button
@@ -489,9 +499,9 @@ class BAMCPViewer {
         const regionSpan = this.state.viewport.end - this.state.viewport.start;
         const scale = width / regionSpan;
         const bpDelta = dxPixels / scale;
+        if (!Number.isFinite(bpDelta)) return;
 
-        this.state.viewport.start += bpDelta;
-        this.state.viewport.end += bpDelta;
+        this.state.viewport = panViewport(this.state.viewport, bpDelta);
         this.renderer.render();
         this.scheduleContextUpdate();
         this.scheduleVariantTableUpdate();
@@ -499,12 +509,9 @@ class BAMCPViewer {
     }
 
     private zoom(factor: number): void {
-        const span = this.state.viewport.end - this.state.viewport.start;
-        const center = (this.state.viewport.start + this.state.viewport.end) / 2;
-        const newSpan = span * factor;
-
-        this.state.viewport.start = center - newSpan / 2;
-        this.state.viewport.end = center + newSpan / 2;
+        // Clamped to [MIN_VIEW_SPAN, MAX_VIEW_SPAN] and start >= 0, so a refetch
+        // can never ask the server for more than its 1 Mb region limit.
+        this.state.viewport = zoomViewport(this.state.viewport, factor);
         this.renderer.render();
         this.scheduleContextUpdate();
         this.scheduleVariantTableUpdate();
@@ -592,7 +599,7 @@ class BAMCPViewer {
             this.client.fetchRegionDirect(
                 filePath, region, this.state.data?.reference,
                 this.state.data?.vcf_path, this.state.data?.variant_source,
-            ).then(data => {
+            ).then(result => {
                 this.pendingSequenceRequest = false;
                 if (this.sequenceFallbackTimer) {
                     clearTimeout(this.sequenceFallbackTimer);
@@ -600,12 +607,7 @@ class BAMCPViewer {
                 }
                 this.sequenceNotice.classList.add('hidden');
                 this.sequenceNotice.classList.remove('loading');
-                if (data) {
-                    this.state.loadTile(data);
-                    this.renderVariantTable();
-                    this.renderer.resize();
-                    this.scheduleContextUpdate();
-                }
+                this.applyFetchResult(result);
             });
         } else {
             this.client.requestRegion(region);
@@ -640,16 +642,11 @@ class BAMCPViewer {
             this.client.fetchRegionDirect(
                 filePath, region, this.state.data?.reference,
                 this.state.data?.vcf_path, this.state.data?.variant_source,
-            ).then(data => {
+            ).then(result => {
                 this.pendingSequenceRequest = false;
                 this.sequenceNotice.classList.add('hidden');
                 this.sequenceNotice.classList.remove('loading');
-                if (data) {
-                    this.state.loadTile(data);
-                    this.renderVariantTable();
-                    this.renderer.resize();
-                    this.scheduleContextUpdate();
-                }
+                this.applyFetchResult(result);
             });
         } else {
             // sendMessage path — response comes via ontoolresult → onDataReceived
@@ -716,20 +713,59 @@ class BAMCPViewer {
                 return;
             }
 
-            // Pad fetch region by 50% each side to reduce subsequent refetches
-            const padding = sp * 0.5;
-            const region = toRegionString(d.contig, vs - padding, ve + padding);
+            // Pad fetch region by 50% each side to reduce subsequent refetches,
+            // capped so the request stays within the server's region limit.
+            const win = paddedFetchWindow({ start: vs, end: ve });
+            const region = toRegionString(d.contig, win.start, win.end);
 
-            const data = await this.client.fetchRegionDirect(
+            const result = await this.client.fetchRegionDirect(
                 d.file_path, region, d.reference, d.vcf_path, d.variant_source,
             );
-            if (data) {
-                this.state.loadTile(data);
-                this.renderVariantTable();
-                this.renderer.resize();
-                this.scheduleContextUpdate();
-            }
+            this.applyFetchResult(result);
         }, BAMCPViewer.VIEWPORT_REFETCH_DEBOUNCE_MS);
+    }
+
+    /**
+     * Apply an app-initiated fetch. Stale responses (superseded by a newer request
+     * or by host data) are dropped; errors are shown to the user instead of being
+     * swallowed; a tile is only activated if it is on the current contig and still
+     * overlaps the viewport (the user may have moved on while it was in flight).
+     */
+    private applyFetchResult(result: FetchResult): void {
+        if (result.status === 'stale') return;
+        if (result.status === 'error') {
+            this.showFetchError(result.message);
+            return;
+        }
+        this.hideFetchError();
+        const data = result.data;
+        const current = this.state.data;
+        const vp = this.state.viewport;
+        if (current && data.contig !== current.contig) return;
+        if (!(data.end > vp.start && data.start < vp.end)) return;
+
+        this.state.loadTile(data);
+        this.renderVariantTable();
+        this.renderer.resize();
+        this.scheduleContextUpdate();
+    }
+
+    private showFetchError(message: string): void {
+        const banner = document.getElementById('fetch-error');
+        const text = document.getElementById('fetch-error-text');
+        if (!banner || !text) return;
+        text.textContent = `Could not load this view: ${message}`;
+        banner.classList.remove('hidden');
+        if (this.fetchErrorTimer) clearTimeout(this.fetchErrorTimer);
+        this.fetchErrorTimer = setTimeout(() => this.hideFetchError(), BAMCPViewer.FETCH_ERROR_MS);
+    }
+
+    private hideFetchError(): void {
+        if (this.fetchErrorTimer) {
+            clearTimeout(this.fetchErrorTimer);
+            this.fetchErrorTimer = null;
+        }
+        document.getElementById('fetch-error')?.classList.add('hidden');
     }
 
     private scheduleContextUpdate(): void {

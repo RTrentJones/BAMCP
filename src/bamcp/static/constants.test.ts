@@ -6,8 +6,14 @@ import {
   escapeHtml,
   EXPECTED_SCHEMA_VERSION,
   formatRulerLabel,
+  MAX_REGION_SIZE,
+  MAX_VIEW_SPAN,
   maxOf,
+  MIN_VIEW_SPAN,
+  paddedFetchWindow,
+  panViewport,
   toRegionString,
+  zoomViewport,
 } from "./constants";
 
 describe("displayPos — internal 0-based → user-facing 1-based", () => {
@@ -153,5 +159,66 @@ describe("maxOf — max without argument spreading", () => {
     // The old Math.max(...big) throws RangeError here.
     expect(() => Math.max(...big)).toThrow(RangeError);
     expect(maxOf(big, 1)).toBe(123);
+  });
+});
+
+describe("zoomViewport — bounded zoom", () => {
+  it("zooms about the center", () => {
+    expect(zoomViewport({ start: 1000, end: 2000 }, 0.5)).toEqual({ start: 1250, end: 1750 });
+  });
+
+  it("never zooms in below MIN_VIEW_SPAN", () => {
+    let vp = { start: 1000, end: 1100 };
+    for (let i = 0; i < 50; i++) vp = zoomViewport(vp, 0.5);
+    expect(vp.end - vp.start).toBeCloseTo(MIN_VIEW_SPAN);
+  });
+
+  it("never zooms out past MAX_VIEW_SPAN", () => {
+    let vp = { start: 5_000_000, end: 5_001_000 };
+    for (let i = 0; i < 50; i++) vp = zoomViewport(vp, 2);
+    expect(vp.end - vp.start).toBe(MAX_VIEW_SPAN);
+  });
+
+  it("keeps the start on the contig", () => {
+    const vp = zoomViewport({ start: 0, end: 100 }, 4);
+    expect(vp.start).toBe(0);
+    expect(vp.end).toBe(400);
+  });
+
+  it("does not snap a host-loaded view that is already outside the limits", () => {
+    expect(zoomViewport({ start: 0, end: 1_000_000 }, 1.2)).toEqual({ start: 0, end: 1_000_000 });
+    expect(zoomViewport({ start: 100, end: 110 }, 0.5)).toEqual({ start: 100, end: 110 });
+  });
+});
+
+describe("panViewport — no panning before the contig start", () => {
+  it("shifts both edges", () => {
+    expect(panViewport({ start: 100, end: 200 }, 50)).toEqual({ start: 150, end: 250 });
+  });
+
+  it("stops at 0 and keeps the span", () => {
+    expect(panViewport({ start: 30, end: 130 }, -100)).toEqual({ start: 0, end: 100 });
+  });
+});
+
+describe("paddedFetchWindow — refetch never exceeds the server region cap", () => {
+  const size = (w: { start: number; end: number }) => {
+    const [, a, b] = toRegionString("c", w.start, w.end).match(/:(\d+)-(\d+)$/)!;
+    return Number(b) - Number(a) + 1;
+  };
+
+  it("pads by half the span on each side", () => {
+    expect(paddedFetchWindow({ start: 1000, end: 2000 })).toEqual({ start: 500, end: 2500 });
+  });
+
+  it("clamps the start at 0", () => {
+    expect(paddedFetchWindow({ start: 100, end: 1100 }).start).toBe(0);
+  });
+
+  it("stays within MAX_REGION_SIZE at the widest zoom, even with fractional edges", () => {
+    const w = paddedFetchWindow({ start: 2_000_000.4, end: 2_000_000.4 + MAX_VIEW_SPAN });
+    expect(size(w)).toBeLessThanOrEqual(MAX_REGION_SIZE);
+    const huge = paddedFetchWindow({ start: 10.7, end: 10.7 + 2 * MAX_REGION_SIZE });
+    expect(size(huge)).toBeLessThanOrEqual(MAX_REGION_SIZE);
   });
 });

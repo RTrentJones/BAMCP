@@ -197,3 +197,59 @@ export function maxOf(values: ArrayLike<number> | null | undefined, floor = -Inf
     }
     return max;
 }
+
+// Server-side cap on a single region request (bamcp.core.parsers.MAX_REGION_SIZE).
+export const MAX_REGION_SIZE = 1_000_000;
+// Navigation limits. Zooming in below ~20 bp shows nothing useful (and a sub-1 bp
+// span divides the scale by ~0); zooming out is capped at half the server limit so
+// the padded refetch window (viewport + 50% each side) still fits in one request.
+export const MIN_VIEW_SPAN = 20;
+export const MAX_VIEW_SPAN = MAX_REGION_SIZE / 2;
+
+export interface Span {
+    start: number;
+    end: number;
+}
+
+/**
+ * Zoom `vp` about its center by `factor` (<1 zooms in), clamping the span to
+ * [minSpan, maxSpan] and the start to >= 0. A view already outside the limits
+ * (e.g. a host-loaded 1 Mb region) is never pushed further out of them, but is
+ * not forcibly snapped either: zooming in from it still works.
+ */
+export function zoomViewport(
+    vp: Span, factor: number, minSpan = MIN_VIEW_SPAN, maxSpan = MAX_VIEW_SPAN,
+): Span {
+    const span = Math.max(vp.end - vp.start, 1);
+    const center = (vp.start + vp.end) / 2;
+    const lo = Math.min(minSpan, span);
+    const hi = Math.max(maxSpan, span);
+    const newSpan = Math.min(hi, Math.max(lo, span * factor));
+    const start = Math.max(0, center - newSpan / 2);
+    return { start, end: start + newSpan };
+}
+
+/** Shift `vp` by `deltaBp`, never past the start of the contig. */
+export function panViewport(vp: Span, deltaBp: number): Span {
+    const delta = Math.max(deltaBp, -vp.start);
+    return { start: vp.start + delta, end: vp.end + delta };
+}
+
+/**
+ * Viewport-refetch window: the view padded by `padFrac` of its span on each side,
+ * shrunk so the resulting 1-based inclusive request (see toRegionString) stays
+ * within `maxSize` bases, and never starting before 0.
+ */
+export function paddedFetchWindow(
+    vp: Span, padFrac = 0.5, maxSize = MAX_REGION_SIZE,
+): Span {
+    const budget = maxSize - 2; // floor/ceil of fractional edges can add a base each
+    const span = vp.end - vp.start;
+    if (span >= budget) {
+        const start = Math.max(0, vp.start);
+        return { start, end: start + budget };
+    }
+    const pad = Math.max(0, Math.min(span * padFrac, (budget - span) / 2));
+    const start = Math.max(0, vp.start - pad);
+    return { start, end: Math.min(start + budget, vp.end + pad) };
+}

@@ -1,4 +1,8 @@
-.PHONY: install test test-network test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval-smoke giab-benchmark eval-acmg eval-matrix eval-matrix-mock eval eval-cached eval-compare eval-dry eval-vision-setup render-viewer render-viewer-all-modes
+.PHONY: verify install test test-network test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval-smoke giab-benchmark eval-acmg eval-matrix eval-matrix-mock eval eval-cached eval-compare eval-dry eval-vision-setup render-viewer render-viewer-all-modes
+
+# Full local regression loop: every ci.yml gate in one command (see the script).
+verify:
+	./scripts/verify-local.sh
 
 build-viewer:
 	cd src/bamcp/static && npm install && npm run build

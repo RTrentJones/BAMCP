@@ -10,6 +10,16 @@ FIXTURES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fixture
 
 
 @pytest.fixture(scope="session")
+def browser_type_launch_args(browser_type_launch_args):
+    """Honor PLAYWRIGHT_CHROMIUM_EXECUTABLE for sandboxes with a preinstalled Chromium
+    whose revision differs from the pinned playwright's (unset in CI: no-op)."""
+    executable = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
+    if executable:
+        return {**browser_type_launch_args, "executable_path": executable}
+    return browser_type_launch_args
+
+
+@pytest.fixture(scope="session")
 def comprehensive_data():
     """Generate comprehensive BAM and return a loader function for any region.
 

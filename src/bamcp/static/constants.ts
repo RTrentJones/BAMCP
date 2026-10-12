@@ -292,3 +292,36 @@ export function formatNearEndSummary(evidence: {
     const text = `${Math.round((firstBins / total) * 100)}% in position bins 0-50`;
     return flagged ? `Warning: ${text}` : text;
 }
+
+const MAX_PROMPT_ALLELE = 50;
+
+/**
+ * Collapse a payload-derived string to one bounded line before it goes into a
+ * sendMessage prompt: control characters/newlines become spaces (no smuggled
+ * extra "instructions" on new lines) and the result is truncated to `max` chars.
+ */
+export function promptText(value: unknown, max = 200): string {
+    // eslint-disable-next-line no-control-regex
+    const flat = String(value ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').trim();
+    return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+/** A file path for a prompt: flattened, bounded, and quoted so it reads as data. */
+export function promptPath(path: unknown): string {
+    return JSON.stringify(promptText(path, 512));
+}
+
+/**
+ * A VCF REF/ALT allele for a prompt. Only nucleotide strings ([ACGTN*], upper-cased,
+ * long ones truncated) or a symbolic allele like `<DEL>` / `<INS:ME>` pass through;
+ * anything else is replaced, so a crafted VCF can't put free text in the user turn.
+ */
+export function promptAllele(allele: unknown): string {
+    const a = String(allele ?? '');
+    if (/^[ACGTN*]+$/i.test(a)) {
+        const up = a.toUpperCase();
+        return up.length > MAX_PROMPT_ALLELE ? `${up.slice(0, MAX_PROMPT_ALLELE)}…(${up.length}bp)` : up;
+    }
+    if (/^<[A-Za-z0-9:_.-]{1,40}>$/.test(a)) return a;
+    return '<invalid-allele>';
+}

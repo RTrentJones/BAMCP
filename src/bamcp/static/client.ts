@@ -1,6 +1,18 @@
 import { App } from "@modelcontextprotocol/ext-apps";
 import { RegionData, ToolResultParams, Variant } from "./types";
-import { EXPECTED_SCHEMA_VERSION, displayPos } from "./constants";
+import {
+    EXPECTED_SCHEMA_VERSION,
+    displayPos,
+    promptAllele,
+    promptPath,
+    promptText,
+} from "./constants";
+
+/** `contig:pos REF>ALT` for a prompt, with every payload-derived part sanitized. */
+function promptVariant(v: Variant): string {
+    return `${promptText(v.contig, 64)}:${displayPos(Number(v.position))} ` +
+        `${promptAllele(v.ref)}>${promptAllele(v.alt)}`;
+}
 
 export type DisplayMode = 'inline' | 'fullscreen' | 'pip';
 
@@ -193,9 +205,12 @@ export class BAMCPClient {
         if (this.app) {
             try {
                 // Make the request explicit with file path for more reliable tool invocation
+                // The path and region may come from the server payload: quote and
+                // bound them so they read as data, not as part of the instruction.
+                const safeRegion = promptText(region, 120);
                 const message = filePath
-                    ? `Call visualize_region for file ${filePath} region ${region}`
-                    : `Please browse the genomic region ${region} and show the alignment visualization.`;
+                    ? `Call visualize_region for file ${promptPath(filePath)} region ${safeRegion}`
+                    : `Please browse the genomic region ${safeRegion} and show the alignment visualization.`;
 
                 await this.app.sendMessage({
                     role: 'user',
@@ -217,7 +232,7 @@ export class BAMCPClient {
                     role: 'user',
                     content: [{
                         type: 'text',
-                        text: `Search for gene ${symbol} and show the alignment at that location.`
+                        text: `Search for gene ${promptText(symbol, 40)} and show the alignment at that location.`
                     }]
                 });
             } catch (e) {
@@ -231,13 +246,13 @@ export class BAMCPClient {
         try {
             // YAML frontmatter format recommended by MCP Apps patterns docs
             const contextText = `---
-region: ${context.region}
+region: ${promptText(context.region, 120)}
 reads: ${context.reads}
 coverage: ${context.meanCoverage}x
 variants: ${context.variantCount}
 ---
 
-User is viewing ${context.region} with ${context.reads} reads at ${context.meanCoverage}x coverage and ${context.variantCount} variants visible.`;
+User is viewing ${promptText(context.region, 120)} with ${context.reads} reads at ${context.meanCoverage}x coverage and ${context.variantCount} variants visible.`;
             await this.app.updateModelContext({
                 content: [{ type: 'text', text: contextText }]
             });
@@ -334,10 +349,9 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         if (!this.app) return;
 
         const message =
-            'Explain the variant at ' + variant.contig + ':' + displayPos(variant.position) +
-            ': ' + variant.ref + '>' + variant.alt +
-            ', VAF=' + (variant.vaf * 100).toFixed(1) + '%' +
-            ', depth=' + variant.depth;
+            `Explain the variant at ${promptVariant(variant)}` +
+            `, VAF=${(Number(variant.vaf) * 100).toFixed(1)}%` +
+            `, depth=${Number(variant.depth)}`;
 
         try {
             await this.app.sendMessage({
@@ -353,8 +367,8 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         if (!this.app) return;
 
         const message =
-            `Look up the clinical significance of ${variant.contig}:${displayPos(variant.position)} ` +
-            `${variant.ref}>${variant.alt} in ClinVar using the lookup_clinvar tool.`;
+            `Look up the clinical significance of ${promptVariant(variant)} ` +
+            `in ClinVar using the lookup_clinvar tool.`;
 
         try {
             await this.app.sendMessage({
@@ -370,8 +384,8 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         if (!this.app) return;
 
         const message =
-            `Look up the population allele frequency of ${variant.contig}:${displayPos(variant.position)} ` +
-            `${variant.ref}>${variant.alt} in gnomAD using the lookup_gnomad tool.`;
+            `Look up the population allele frequency of ${promptVariant(variant)} ` +
+            `in gnomAD using the lookup_gnomad tool.`;
 
         try {
             await this.app.sendMessage({
@@ -387,7 +401,7 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         if (!this.app) return;
 
         const message =
-            `Get a summary of the current view at region ${region} ` +
+            `Get a summary of the current view at region ${promptText(region, 120)} ` +
             `using get_region_summary with the same BAM file.`;
 
         try {

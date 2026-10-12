@@ -253,3 +253,42 @@ export function paddedFetchWindow(
     const start = Math.max(0, vp.start - pad);
     return { start, end: Math.min(start + budget, vp.end + pad) };
 }
+
+/**
+ * Read-position line for the evidence panel. The bias call belongs to the server
+ * (it flags `read_position_bias` only when supporting bases sit within N bp of an
+ * aligned read end beyond what uniform placement predicts), so prefer its
+ * near-end fraction and only say "Warning" when the server raised that risk.
+ * Older payloads without the fraction get a neutral histogram description that
+ * makes no bias claim of its own.
+ */
+export function formatNearEndSummary(evidence: {
+    near_end_fraction?: number;
+    near_end_cutoff_bp?: number;
+    near_end_expected_fraction?: number | null;
+    position_histogram?: number[];
+    artifact_risk?: { risks?: Array<{ type?: string }> };
+}): string {
+    const flagged = Array.isArray(evidence.artifact_risk?.risks) &&
+        evidence.artifact_risk!.risks!.some(r => r?.type === 'read_position_bias');
+    const frac = Number(evidence.near_end_fraction);
+    if (evidence.near_end_fraction != null && Number.isFinite(frac)) {
+        const cutoff = Number(evidence.near_end_cutoff_bp);
+        const within = Number.isFinite(cutoff) ? `within ${cutoff}bp of a read end` : 'near a read end';
+        let text = `${Math.round(frac * 100)}% ${within}`;
+        const expected = Number(evidence.near_end_expected_fraction);
+        if (evidence.near_end_expected_fraction != null && Number.isFinite(expected)) {
+            text += ` (~${Math.round(expected * 100)}% expected)`;
+        }
+        return flagged ? `Warning: ${text}` : text;
+    }
+
+    const histogram = evidence.position_histogram;
+    if (!Array.isArray(histogram) || histogram.length === 0) return '';
+    let total = 0;
+    for (const v of histogram) total += Number(v) || 0;
+    if (total === 0) return '';
+    const firstBins = (Number(histogram[0]) || 0) + (Number(histogram[1]) || 0);
+    const text = `${Math.round((firstBins / total) * 100)}% in position bins 0-50`;
+    return flagged ? `Warning: ${text}` : text;
+}

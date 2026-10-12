@@ -5,6 +5,7 @@ import {
   displayPos,
   escapeHtml,
   EXPECTED_SCHEMA_VERSION,
+  formatNearEndSummary,
   formatRulerLabel,
   MAX_REGION_SIZE,
   MAX_VIEW_SPAN,
@@ -220,5 +221,38 @@ describe("paddedFetchWindow — refetch never exceeds the server region cap", ()
     expect(size(w)).toBeLessThanOrEqual(MAX_REGION_SIZE);
     const huge = paddedFetchWindow({ start: 10.7, end: 10.7 + 2 * MAX_REGION_SIZE });
     expect(size(huge)).toBeLessThanOrEqual(MAX_REGION_SIZE);
+  });
+});
+
+describe("formatNearEndSummary — defer the bias call to the server", () => {
+  it("shows the server's near-end fraction and cutoff", () => {
+    expect(
+      formatNearEndSummary({
+        near_end_fraction: 0.6,
+        near_end_cutoff_bp: 10,
+        near_end_expected_fraction: 0.15,
+      }),
+    ).toBe("60% within 10bp of a read end (~15% expected)");
+  });
+
+  it("only warns when the server flagged read_position_bias", () => {
+    const flagged = formatNearEndSummary({
+      near_end_fraction: 0.8,
+      near_end_cutoff_bp: 10,
+      near_end_expected_fraction: null,
+      artifact_risk: { risks: [{ type: "read_position_bias" }] },
+    });
+    expect(flagged).toBe("Warning: 80% within 10bp of a read end");
+  });
+
+  it("makes no bias claim from the histogram alone (older payloads)", () => {
+    const text = formatNearEndSummary({ position_histogram: [5, 3, 1, 1, 0, 0] });
+    expect(text).toBe("80% in position bins 0-50");
+    expect(text).not.toMatch(/warning|near ends/i);
+  });
+
+  it("is empty with no data", () => {
+    expect(formatNearEndSummary({})).toBe("");
+    expect(formatNearEndSummary({ position_histogram: [0, 0] })).toBe("");
   });
 });

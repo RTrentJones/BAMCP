@@ -16,6 +16,7 @@ import {
     baseColor,
     displayPos,
     escapeHtml,
+    formatNearEndSummary,
     maxOf,
     paddedFetchWindow,
     panViewport,
@@ -1172,7 +1173,7 @@ class BAMCPViewer {
             '#10b981'
         );
         document.getElementById('position-stats')!.textContent =
-            this.getPositionSummary(evidence.position_histogram);
+            formatNearEndSummary(evidence);
 
         // Draw MAPQ Histogram
         this.renderHistogram(
@@ -1270,22 +1271,6 @@ class BAMCPViewer {
             const x = 10 + i * barWidth + barWidth / 2;
             ctx.fillText(label, x, height - 2);
         });
-    }
-
-    private getPositionSummary(histogram: number[] | undefined): string {
-        if (!histogram || histogram.length === 0) return '';
-
-        const total = histogram.reduce((a, b) => a + b, 0);
-        if (total === 0) return '';
-
-        // First two bins (0-25, 25-50) represent near-end positions
-        const nearEnd = (histogram[0] || 0) + (histogram[1] || 0);
-        const pct = Math.round((nearEnd / total) * 100);
-
-        if (pct > 50) {
-            return `Warning: ${pct}% near ends`;
-        }
-        return `${pct}% near ends`;
     }
 
     private renderArtifactRisk(artifactRisk: ArtifactAssessment | undefined): void {

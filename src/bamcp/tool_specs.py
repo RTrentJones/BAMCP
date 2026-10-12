@@ -92,18 +92,21 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     "lookup_clinvar": {
         "description": "Look up a variant in ClinVar for clinical significance, review status "
         "(star rating), and associated conditions. Research-grade, not for clinical use. "
-        "Positions are 1-based.",
+        "Positions are 1-based, in 'build' (GRCh37/hg19 or GRCh38/hg38; default: server "
+        "build) — pass the BAM's build from list_contigs, or a GRCh37 variant is searched "
+        "at the wrong locus.",
         "input_schema": _obj(
-            {"chrom": _STR, "pos": _INT, "ref": _STR, "alt": _STR},
+            {"chrom": _STR, "pos": _INT, "ref": _STR, "alt": _STR, "build": _STR},
             ["chrom", "pos", "ref", "alt"],
         ),
     },
     "lookup_gnomad": {
         "description": "Look up a variant in gnomAD for population allele-frequency data "
         "(global and per-population AF). Research-grade, not for clinical use. Positions are "
-        "1-based.",
+        "1-based, in 'build' (GRCh37/hg19 → gnomAD v2.1, GRCh38/hg38 → gnomAD v4; default: "
+        "server build) — pass the BAM's build from list_contigs.",
         "input_schema": _obj(
-            {"chrom": _STR, "pos": _INT, "ref": _STR, "alt": _STR},
+            {"chrom": _STR, "pos": _INT, "ref": _STR, "alt": _STR, "build": _STR},
             ["chrom", "pos", "ref", "alt"],
         ),
     },
@@ -143,8 +146,10 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "search_gene": {
         "description": "Search for a gene by symbol (e.g. BRCA1, TP53) and return its genomic "
-        "coordinates. Use this to navigate to a gene's location by name.",
-        "input_schema": _obj({"symbol": _STR}, ["symbol"]),
+        "coordinates (1-based). Use this to navigate to a gene's location by name. Pass "
+        "file_path to return coordinates in that BAM's build (auto-detected), or build "
+        "(GRCh37/hg19 or GRCh38/hg38) to choose it explicitly.",
+        "input_schema": _obj({"symbol": _STR, "file_path": _STR, "build": _STR}, ["symbol"]),
     },
     "cleanup_cache": {
         "description": "Clean up this session's cached BAM index files.",

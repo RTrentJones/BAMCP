@@ -82,8 +82,11 @@ LOW_CONFIDENCE_MIN_MEAN_QUALITY = 20
 LOW_CONFIDENCE_MAX_STRAND_BIAS = 0.9
 
 # Thresholds for a confident call, used by the ACMG quality assessment (classify_variant).
+# Also the "high" tier of compute_confidence and the curation recommendation/balance cutoffs.
 HIGH_CONFIDENCE_MIN_DEPTH = 20
 HIGH_CONFIDENCE_MIN_MEAN_QUALITY = 25
+HIGH_CONFIDENCE_MIN_VAF = 0.2
+HIGH_CONFIDENCE_MAX_STRAND_BIAS = 0.7
 
 QUALITY_HISTOGRAM_BINS = [0, 10, 20, 30, 40]
 POSITION_HISTOGRAM_BINS = [0, 25, 50, 75, 100, 150]
@@ -91,6 +94,14 @@ MAPQ_HISTOGRAM_BINS = [0, 10, 20, 30, 40, 50, 60]
 
 # Artifact detection thresholds
 ARTIFACT_STRAND_BIAS_THRESHOLD = 0.8
+# Read-position bias: a supporting base is "near an end" when it lies within this many
+# ALIGNED (non-soft-clipped) bases of the nearest aligned read end. An absolute ~10bp
+# cutoff (not the display histogram's 0-50bp bins, which cover 2/3 of a 150bp read and
+# all of a 100bp read) keeps uniformly positioned support on clean 2x150 data unflagged.
+ARTIFACT_NEAR_END_DISTANCE_BP = 10
 ARTIFACT_NEAR_END_FRACTION_THRESHOLD = 0.5
+# Short reads put most positions near an end even under uniform placement, so the
+# observed near-end fraction must also exceed the uniform expectation by this margin.
+ARTIFACT_NEAR_END_EXCESS_OVER_EXPECTED = 0.25
 ARTIFACT_LOW_MAPQ_FRACTION_THRESHOLD = 0.3
 ARTIFACT_HOMOPOLYMER_LENGTH_THRESHOLD = 4

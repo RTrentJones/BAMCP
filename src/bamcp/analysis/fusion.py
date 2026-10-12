@@ -41,17 +41,34 @@ class _Unavailable:
 UNAVAILABLE = _Unavailable()
 
 
+class _Disabled:
+    """Sentinel: the source is DISABLED on this server (never queried).
+
+    Like ``UNAVAILABLE`` this is not a not-found: rendering it as ``None`` would read as
+    "genuinely not in ClinVar" / "absent from gnomAD" (a PM2 nudge) for a lookup that
+    never happened.
+    """
+
+    __slots__ = ()
+
+
+DISABLED = _Disabled()
+
+
 def _external_block(
     result: Any, builder: Callable[[Any], dict[str, Any]], *, found_status: str = "found"
 ) -> dict[str, Any] | None:
     """Shape an external-evidence block with an explicit lookup ``status``.
 
     - ``UNAVAILABLE`` → ``{"status": "unavailable"}`` (errored — absence unknown).
+    - ``DISABLED`` → ``{"status": "disabled"}`` (not queried — absence unknown).
     - ``None`` → ``None`` (genuine not-found; downstream criteria treat this as absence).
     - a result object → ``builder(result)`` annotated with ``status``.
     """
     if result is UNAVAILABLE:
         return {"status": "unavailable"}
+    if result is DISABLED:
+        return {"status": "disabled"}
     if result is None:
         return None
     block = builder(result)
@@ -74,9 +91,26 @@ def _max_population_af(gnomad_result: Any) -> tuple[float | None, str | None]:
     return best_af, best_id
 
 
+def _population_block(r: Any) -> dict[str, Any]:
+    """Shape a gnomAD result. ``filters``/``an``/``ac`` are read tolerantly (``getattr``)
+    so the ACMG frequency criteria can refuse to read a filtered or low-AN site as
+    rarity evidence, whatever subset of fields the client surfaces."""
+    max_af, max_pop = _max_population_af(r)
+    return {
+        "global_af": getattr(r, "global_af", None),
+        "max_pop_af": max_af,
+        "max_pop": max_pop,
+        "homozygote_count": getattr(r, "homozygote_count", None),
+        "ac": getattr(r, "ac", None),
+        "an": getattr(r, "an", None),
+        "filters": list(getattr(r, "filters", None) or []),
+        "source": getattr(r, "source", None),
+    }
+
+
 async def _lookup_clinvar_safe(config: BAMCPConfig, chrom: str, pos: int, ref: str, alt: str):
     if not getattr(config, "clinvar_enabled", True):
-        return None
+        return DISABLED
     from ..core.tools import get_clinvar_client
 
     try:
@@ -88,7 +122,7 @@ async def _lookup_clinvar_safe(config: BAMCPConfig, chrom: str, pos: int, ref: s
 
 async def _lookup_gnomad_safe(config: BAMCPConfig, chrom: str, pos: int, ref: str, alt: str):
     if not getattr(config, "gnomad_enabled", True):
-        return None
+        return DISABLED
     from ..core.tools import get_gnomad_client
 
     try:
@@ -98,12 +132,44 @@ async def _lookup_gnomad_safe(config: BAMCPConfig, chrom: str, pos: int, ref: st
         return UNAVAILABLE
 
 
-def _observation_from_variant(target: dict | None) -> dict[str, Any]:
-    """Shape the BAM observation block from an evidence-enhanced variant."""
+def _observation_from_variant(
+    target: dict | None,
+    *,
+    fetch_error: str | None = None,
+    applied_filters: dict[str, Any] | None = None,
+    alt_reads_seen: int | None = None,
+) -> dict[str, Any]:
+    """Shape the BAM observation block from an evidence-enhanced variant.
+
+    Three distinct outcomes, never conflated:
+
+    - ``status="unavailable"`` (``detected=None``): the BAM read itself FAILED (timeout,
+      contig absent, unreadable file) — nothing is known about the reads.
+    - ``status="not_called"`` (``detected=False``): the reads were read but no call
+      matched under ``applied_filters``; ``alt_reads_seen`` counts alt-supporting reads
+      that were present anyway (a variant below min_vaf/min_depth is NOT an absence).
+    - ``status="observed"`` (``detected=True``): the call and its read-level evidence.
+    """
+    if fetch_error is not None:
+        return {
+            "status": "unavailable",
+            "detected": None,
+            "reason": fetch_error,
+        }
     if target is None:
-        return {"detected": False}
+        block: dict[str, Any] = {
+            "status": "not_called",
+            "detected": False,
+            "applied_filters": applied_filters,
+            "note": "No call matched at this position under the applied filters; this "
+            "is not proof of a reference call (loosen min_vaf/min_depth to check).",
+        }
+        if alt_reads_seen is not None:
+            block["alt_reads_seen"] = alt_reads_seen
+        return block
     artifact = target.get("artifact_risk", {})
     return {
+        "status": "observed",
         "detected": True,
         "depth": target.get("depth"),
         "alt_count": target.get("alt_count"),
@@ -111,11 +177,26 @@ def _observation_from_variant(target: dict | None) -> dict[str, Any]:
         "strand_forward": target.get("strand_forward"),
         "strand_reverse": target.get("strand_reverse"),
         "mean_quality": target.get("mean_quality"),
+        "read_evidence_computed": target.get("read_evidence_computed", True),
         "confidence": target.get("confidence"),
         "artifact_likelihood": artifact.get("artifact_likelihood"),
         "artifact_risk_score": artifact.get("risk_score"),
         "artifact_concerns": [r.get("type") for r in artifact.get("risks", [])],
+        "applied_filters": applied_filters,
     }
+
+
+def _count_alt_reads(data: Any, pos0: int, ref: str, alt: str) -> int:
+    """Alt-supporting reads at ``pos0`` in the fetched read set, whatever the caller kept."""
+    from .evidence import _indel_key, build_indel_index, build_mismatch_index
+
+    probe = {"position": pos0, "ref": ref, "alt": alt}
+    key = _indel_key(probe)
+    if key is not None:
+        return len(build_indel_index(data.reads).get(key, []))
+    if len(ref) == 1 == len(alt):
+        return len(build_mismatch_index(data.reads).get((pos0, alt), []))
+    return 0
 
 
 async def clinical_context(
@@ -126,8 +207,11 @@ async def clinical_context(
     Concurrent ClinVar + gnomAD lookups, shaped like the ``clinvar`` and
     ``population_frequency`` blocks of :func:`assemble_evidence`. Used by the
     curation tool's optional clinical bridge. A block is ``None`` for a genuine
-    not-found and ``{"status": "unavailable"}`` when the source's lookup errored.
+    not-found, ``{"status": "unavailable"}`` when the source's lookup errored, and
+    ``{"status": "disabled"}`` when the source is switched off on this server.
     """
+    ref = ref.upper()
+    alt = alt.upper()
     clinvar_result, gnomad_result = await asyncio.gather(
         _lookup_clinvar_safe(config, chrom, pos, ref, alt),
         _lookup_gnomad_safe(config, chrom, pos, ref, alt),
@@ -143,16 +227,7 @@ async def clinical_context(
         },
     )
 
-    def _pop(r: Any) -> dict[str, Any]:
-        max_af, max_pop = _max_population_af(r)
-        return {
-            "global_af": r.global_af,
-            "max_pop_af": max_af,
-            "max_pop": max_pop,
-            "homozygote_count": r.homozygote_count,
-        }
-
-    pop_block = _external_block(gnomad_result, _pop)
+    pop_block = _external_block(gnomad_result, _population_block)
 
     return {"clinvar": clinvar_block, "population_frequency": pop_block}
 
@@ -181,38 +256,67 @@ async def assemble_evidence(
     Returns:
         A dict with ``variant``, ``observation``, ``clinvar``, and
         ``population_frequency`` (and ``gene_context`` when ``gene`` is given).
-        External blocks are ``None`` for a genuine not-found and
-        ``{"status": "unavailable"}`` when that source's lookup errored (so absence is
-        never confused with a failed fetch).
+        External blocks are ``None`` for a genuine not-found,
+        ``{"status": "unavailable"}`` when that source's lookup errored, and
+        ``{"status": "disabled"}`` when the source is switched off on this server (so
+        absence is never confused with a failed or skipped fetch). ``observation`` has
+        a ``status`` of ``observed``/``not_called``/``unavailable`` (see
+        :func:`_observation_from_variant`).
     """
-    from ..core.tools import _fetch_region_with_timeout
+    from ..core.tools import _applied_filters, _fetch_region_with_timeout
 
+    # Validation accepts lowercase alleles; calls and the external sources use uppercase.
+    ref = ref.upper()
+    alt = alt.upper()
     ref_path = reference if reference is not None else config.reference
     region = f"{chrom}:{max(0, pos - window)}-{pos + window}"
 
-    # Kick off the two network lookups concurrently with the local BAM read.
-    clinvar_coro = _lookup_clinvar_safe(config, chrom, pos, ref, alt)
-    gnomad_coro = _lookup_gnomad_safe(config, chrom, pos, ref, alt)
+    async def _observe() -> tuple[Any, str | None]:
+        try:
+            return await _fetch_region_with_timeout(file_path, region, ref_path, config), None
+        except (asyncio.TimeoutError, TimeoutError):
+            # Builtin TimeoutError (what _fetch_region_with_timeout raises) differs from
+            # asyncio.TimeoutError on Python 3.10; catch both.
+            logger.warning("BAM observation timed out during fusion")
+            return None, "timeout reading the alignment file"
+        except (KeyError, ValueError) as e:
+            logger.warning("BAM observation unavailable during fusion: %s", e)
+            return None, "contig not present in the alignment file, or invalid region"
+        except OSError as e:
+            logger.warning("BAM observation unavailable during fusion: %s", e)
+            return None, "alignment file could not be read"
 
+    # Run the two network lookups concurrently WITH the local BAM read: schedule all
+    # three as tasks up front so they genuinely overlap, and cancel any still pending if
+    # one raises unexpectedly (gather alone would leave the siblings running).
+    tasks = [
+        asyncio.ensure_future(_observe()),
+        asyncio.ensure_future(_lookup_clinvar_safe(config, chrom, pos, ref, alt)),
+        asyncio.ensure_future(_lookup_gnomad_safe(config, chrom, pos, ref, alt)),
+    ]
     try:
-        data = await _fetch_region_with_timeout(file_path, region, ref_path, config)
-    except (asyncio.TimeoutError, ValueError, OSError, KeyError) as e:
-        # Contig absent from the BAM (pysam raises KeyError), unreadable file, or
-        # timeout: degrade to "not observed" so classification can still proceed
-        # on external evidence.
-        logger.warning("BAM observation unavailable during fusion: %s", e)
-        data = None
+        observed, clinvar_result, gnomad_result = await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        raise
+    data, fetch_error = observed
 
     target: dict | None = None
+    alt_reads_seen: int | None = None
     if data is not None:
         enhanced, _ = build_enhanced_variants(data)
         # data.variants carry pysam's 0-based position; pos is 1-based.
         for v in enhanced:
-            if v["position"] == pos - 1 and v["ref"] == ref and v["alt"] == alt:
+            if (
+                v["position"] == pos - 1
+                and str(v["ref"]).upper() == ref
+                and str(v["alt"]).upper() == alt
+            ):
                 target = v
                 break
-
-    clinvar_result, gnomad_result = await asyncio.gather(clinvar_coro, gnomad_coro)
+        if target is None:
+            alt_reads_seen = _count_alt_reads(data, pos - 1, ref, alt)
 
     clinvar_block = _external_block(
         clinvar_result,
@@ -226,18 +330,7 @@ async def assemble_evidence(
         },
     )
 
-    def _pop(r: Any) -> dict[str, Any]:
-        max_af, max_pop = _max_population_af(r)
-        return {
-            "global_af": r.global_af,
-            "max_pop_af": max_af,
-            "max_pop": max_pop,
-            "homozygote_count": r.homozygote_count,
-            "filters": r.filters,
-            "source": r.source,
-        }
-
-    pop_block = _external_block(gnomad_result, _pop)
+    pop_block = _external_block(gnomad_result, _population_block)
 
     evidence: dict[str, Any] = {
         "variant": {
@@ -248,14 +341,19 @@ async def assemble_evidence(
             "ref": ref,
             "alt": alt,
         },
-        "observation": _observation_from_variant(target),
+        "observation": _observation_from_variant(
+            target,
+            fetch_error=fetch_error,
+            applied_filters=_applied_filters(config, {}, include_max_reads=True),
+            alt_reads_seen=alt_reads_seen,
+        ),
         "clinvar": clinvar_block,
         "population_frequency": pop_block,
     }
     if gene:
         evidence["gene_context"] = {
             "gene": gene,
-            "clinvar_gene": getattr(clinvar_result, "gene", None),
+            "clinvar_gene": getattr(clinvar_result, "gene", None),  # None for sentinels
         }
 
     return evidence

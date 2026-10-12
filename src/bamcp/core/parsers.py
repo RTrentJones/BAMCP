@@ -73,6 +73,19 @@ SNV_PILEUP_MERGE_GAP = 1000
 # CIGAR operation codes
 CIGAR_SOFT_CLIP = 4  # S operation
 
+# Reads BAMCP never counts — for coverage, candidates, VCF support, or display. Echoed
+# in every variant response's applied_filters so the exclusions are never silent.
+EXCLUDED_READ_FLAGS = ("unmapped", "secondary", "supplementary", "duplicate", "qcfail")
+
+# Overlapping mates policy: when both mates of a fragment cover a base, BAMCP counts
+# BOTH (like ``samtools depth`` without ``-s``). count_coverage cannot de-duplicate
+# overlaps, so every pileup pass sets ``ignore_overlaps=False`` explicitly to agree with
+# it — pysam's default (True) silently zeroes one mate's base quality, which made depth
+# and VAF differ between the coverage, indel and VCF-support passes.
+OVERLAPPING_MATES_POLICY = "both_counted"
+
+_ACGT = frozenset("ACGT")
+
 
 def read_passes_filters(read: pysam.AlignedSegment, min_mapq: int = 0) -> bool:
     """Return whether a read should contribute to BAMCP coverage/read evidence."""
@@ -84,6 +97,51 @@ def read_passes_filters(read: pysam.AlignedSegment, min_mapq: int = 0) -> bool:
         and not read.is_duplicate
         and not read.is_qcfail
     )
+
+
+def _pileup(samfile: pysam.AlignmentFile, contig: str, start: int, stop: int) -> Any:
+    """The one pileup configuration every BAMCP pass uses.
+
+    ``stepper="nofilter"`` + explicit :func:`read_passes_filters` mirrors count_coverage's
+    read set; ``min_base_quality=0`` because pileup's own base-quality filter also drops
+    deletion/ref-skip entries (which have no base) — callers threshold real bases
+    themselves via :func:`_counted_base`; ``ignore_overlaps=False`` per
+    :data:`OVERLAPPING_MATES_POLICY`; no BAQ; ``max_depth`` lifted off pysam's 8000.
+    """
+    return samfile.pileup(
+        contig,
+        start,
+        stop,
+        truncate=True,
+        min_base_quality=0,
+        stepper="nofilter",
+        ignore_overlaps=False,
+        compute_baq=False,
+        max_depth=PILEUP_MAX_DEPTH,
+    )
+
+
+def _counted_base(pread: Any, min_baseq: int) -> str | None:
+    """The upper-case base a pileup read contributes, or None if count_coverage wouldn't.
+
+    count_coverage tallies only A/C/G/T whose stored quality meets the threshold, so
+    under a positive ``min_baseq`` a no-QUAL ("*") read — or one whose quality array
+    is too short — does NOT count either. Deletion/ref-skip entries carry no base.
+    """
+    if pread.is_del or pread.is_refskip:
+        return None
+    qpos = pread.query_position
+    seq = pread.alignment.query_sequence
+    if qpos is None or seq is None or qpos >= len(seq):
+        return None
+    base = seq[qpos].upper()
+    if base not in _ACGT:
+        return None
+    if min_baseq:
+        quals = pread.alignment.query_qualities
+        if quals is None or qpos >= len(quals) or quals[qpos] < min_baseq:
+            return None
+    return str(base)
 
 
 def extract_soft_clips(read: pysam.AlignedSegment) -> list[SoftClip]:
@@ -555,21 +613,12 @@ def annotate_vcf_snv_support(
     intervals = _merge_snv_intervals(list(by_pos), SNV_PILEUP_MERGE_GAP)
 
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        # stepper="nofilter" leaves us to apply the base-quality threshold ourselves
-        # (below), so pileup's own min_base_quality is a no-op here; max_depth is lifted
-        # off pysam's 8000 default so high-depth sites aren't silently truncated.
+        # See _pileup: no pileup-side base filtering, both overlapping mates counted,
+        # and max_depth lifted so high-depth sites aren't silently truncated.
         columns = (
             column
             for iv_start, iv_stop in intervals
-            for column in samfile.pileup(
-                contig,
-                iv_start,
-                iv_stop,
-                truncate=True,
-                min_base_quality=0,
-                stepper="nofilter",
-                max_depth=PILEUP_MAX_DEPTH,
-            )
+            for column in _pileup(samfile, contig, iv_start, iv_stop)
         )
         for column in columns:
             targets = by_pos.get(column.reference_pos)
@@ -584,27 +633,15 @@ def annotate_vcf_snv_support(
             }
             for pread in column.pileups:
                 aln = pread.alignment
-                if not read_passes_filters(aln, min_mapq) or pread.is_del or pread.is_refskip:
+                if not read_passes_filters(aln, min_mapq):
+                    continue
+                # Honor min_baseq (and A/C/G/T-only) for both depth and support so
+                # VCF-primary VAF/confidence agrees with count_coverage used elsewhere.
+                base = _counted_base(pread, min_baseq)
+                if base is None:
                     continue
                 qpos = pread.query_position
-                seq = aln.query_sequence
-                if qpos is None or seq is None:
-                    continue
-                base = seq[qpos].upper()
-                # count_coverage's denominator sums only A/C/G/T, so N/no-call bases
-                # must not inflate the depth denominator here either.
-                if base not in "ACGT":
-                    continue
                 quals = aln.query_qualities
-                # Honor min_baseq for both depth and support so VCF-primary VAF/confidence
-                # agrees with count_coverage(quality_threshold=min_baseq) used elsewhere.
-                # count_coverage only counts a base when a stored quality meets the
-                # threshold, so under a positive min_baseq a no-QUAL ("*") read — or one
-                # whose quality array is too short — does NOT count.
-                if min_baseq and not (
-                    quals is not None and qpos < len(quals) and quals[qpos] >= min_baseq
-                ):
-                    continue
                 depth += 1
                 support = acc.get(base)
                 if support is None:
@@ -832,11 +869,11 @@ def detect_variants(
         start: Start position of the region.
         min_vaf: Minimum variant allele frequency threshold.
         min_depth: Minimum read depth to consider.
-        gap_depth: Optional per-position count of reads carrying a deletion or
-            reference-skip at each column (from :func:`detect_indels`). count_coverage
-            only tallies A/C/G/T, so at deletion-heavy loci the naive ``sum(A,C,G,T)``
-            denominator understates depth and inflates VAF. Adding gap_depth restores
-            the true spanning depth.
+        gap_depth: Optional per-position count of reads carrying a deletion at each
+            column (from :func:`detect_indels`; spliced ref-skips are excluded).
+            count_coverage only tallies A/C/G/T, so at deletion-heavy loci the naive
+            ``sum(A,C,G,T)`` denominator understates depth and inflates VAF. Adding
+            gap_depth restores the true spanning depth.
 
     Returns:
         List of candidate variant dicts (contig, position, ref, alt, vaf, depth,
@@ -851,7 +888,7 @@ def detect_variants(
 
     # Iterate over positions
     for i in range(len(cov_A)):
-        # True spanning depth: matched bases (A/C/G/T) plus reads deleted/skipped here.
+        # True spanning depth: matched bases (A/C/G/T) plus reads deleted here.
         counts = {"A": cov_A[i], "C": cov_C[i], "G": cov_G[i], "T": cov_T[i]}
         gap = gap_depth[i] if gap_depth is not None and i < len(gap_depth) else 0
         total = sum(counts.values()) + gap
@@ -863,6 +900,10 @@ def detect_variants(
             break
 
         ref_base = ref_seq[i].upper()
+        # An N/IUPAC reference base has no "reference allele" to differ from: every
+        # covered read would otherwise read as a 100%-VAF "variant".
+        if ref_base not in _ACGT:
+            continue
 
         # Check for alternatives
         for base, count in counts.items():
@@ -912,9 +953,9 @@ def detect_indels(
       - ``indels`` are candidate records (``variant_kind="indel"``, ``indel_type``
         of ``"ins"``/``"del"``) in VCF-style anchored representation (ref/alt share a
         leading anchor base), 0-based ``position`` like :func:`detect_variants`.
-      - ``gap_depth`` is a per-position count of reads carrying a deletion or
-        reference-skip at each column, fed back into :func:`detect_variants` to
-        correct the SNV depth denominator.
+      - ``gap_depth`` is a per-position count of reads carrying a deletion at each
+        column (a spliced ``N`` skip does not span the base and is not counted),
+        fed back into :func:`detect_variants` to correct the SNV depth denominator.
 
     ``gap_depth`` always has length ``end - start`` (``end`` clamped to the contig
     length, as for the coverage arrays). Without ``ref_seq`` no alleles can
@@ -934,16 +975,9 @@ def detect_indels(
         end = _clamp_end(_header_lengths(samfile), contig, start, end)
         length = max(end - start, 0)
         gap_depth = [0] * length
-        # nofilter + explicit read_passes_filters mirrors count_coverage's read set
-        # (no BAQ, no mate-overlap dedup) so indel depth stays consistent with SNV depth.
-        for column in samfile.pileup(
-            contig,
-            start,
-            end,
-            truncate=True,
-            min_base_quality=min_baseq,
-            stepper="nofilter",
-        ):
+        # _pileup mirrors count_coverage's read set (no BAQ, both overlapping mates
+        # counted) so indel depth stays consistent with SNV depth.
+        for column in _pileup(samfile, contig, start, end):
             idx = column.reference_pos - start
             if not (0 <= idx < length):
                 continue
@@ -958,10 +992,16 @@ def detect_indels(
                 if not read_passes_filters(aln, min_mapq):
                     continue
                 if pread.is_refskip:
-                    del_here += 1
+                    # A spliced (N) read skips this base entirely — it neither covers it
+                    # nor carries a deletion, so it must not enter any depth denominator.
                     continue
                 if pread.is_del:
+                    # A deletion has no base quality; count it regardless of min_baseq
+                    # (pileup's own min_base_quality used to drop it here).
                     del_here += 1
+                    continue
+                # Matched bases follow count_coverage's rule (A/C/G/T, qual >= min_baseq).
+                if _counted_base(pread, min_baseq) is None:
                     continue
                 matched += 1
                 # pread.indel is the indel BETWEEN this column and the next.
@@ -987,6 +1027,9 @@ def detect_indels(
                 continue
 
             anchor = ref_seq[idx].upper()
+            # As for SNVs: an N/IUPAC anchor can't form a real VCF-style allele.
+            if anchor not in _ACGT:
+                continue
 
             for del_len, support in del_events.items():
                 vaf = support / depth
@@ -1000,6 +1043,8 @@ def detect_indels(
                 if del_end > ref_len:
                     continue
                 ref_allele = ref_seq[idx:del_end].upper()
+                if not set(ref_allele) <= _ACGT:
+                    continue  # deleted bases include N/IUPAC — no real ref allele
                 indels.append(
                     {
                         "contig": contig,

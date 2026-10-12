@@ -183,3 +183,28 @@ def test_main_cli_writes_tables(tmp_path, comprehensive_bam_path, capsys):
     assert {s["tools"] for s in payload["specs"]} == {True, False}
     assert payload["ablation"][0]["lift"] > 0
     assert (out / "comparison.md").exists()
+
+
+@pytest.mark.integration
+async def test_ablation_grades_no_tools_arm_on_answer_only(tmp_path, monkeypatch):
+    # A no-tools answer that is correct must pass even though the case declares
+    # tools_expected — otherwise the lift counts tool selection, not answer quality.
+    from bamcp.eval.providers import make_one_shot_mock
+    from bamcp.eval.schema import EvalCase
+
+    case = EvalCase(
+        name="contigs",
+        input="Which contigs?",
+        expected="names chr1",
+        tools_expected=["list_contigs"],
+        expected_claims=["chr1"],
+    )
+    spec = RunSpec("m (no tools)", "mock", "m", tools=False)
+
+    import bamcp.eval.compare as compare
+
+    monkeypatch.setattr(
+        compare, "build_provider", lambda _spec: make_one_shot_mock("The BAM has chr1 and chr2.")
+    )
+    report = await run_comparison([spec], [case], tmp_path)
+    assert report.specs[0].passed == 1

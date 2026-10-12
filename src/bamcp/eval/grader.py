@@ -65,6 +65,8 @@ def grade_case(
     response_text: str,
     tool_calls: Iterable[str],
     rubric_payloads: Iterable[dict] = (),
+    *,
+    grade_tools: bool = True,
 ) -> GraderVerdict | None:
     """Run deterministic checks. Return None if no deterministic rule applies.
 
@@ -74,6 +76,11 @@ def grade_case(
     result is ``None`` so the LLM judge grades the answer; when one is declared it must also pass.
     A missing tool or a failed answer check is a deterministic fail. Sub-scores are surfaced on
     the verdict so a report can show which dimension failed.
+
+    ``grade_tools=False`` grades answer correctness only (``tools_expected`` is ignored).
+    The tool-use ablation needs this: a tools-off arm cannot call tools by construction, so
+    grading it on tool selection auto-fails every ``tools_expected`` case and inflates the
+    measured lift with something that is not answer quality.
     """
     tool_set = set(tool_calls)
     deterministic_signals = []
@@ -82,7 +89,7 @@ def grade_case(
     answer_score: float | None = None
 
     # --- Tool selection -----------------------------------------------------
-    if case.tools_expected:
+    if grade_tools and case.tools_expected:
         missing = [t for t in case.tools_expected if t not in tool_set]
         tool_score = 1.0 if not missing else 0.0
         if missing:

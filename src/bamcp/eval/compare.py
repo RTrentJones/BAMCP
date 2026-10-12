@@ -7,6 +7,8 @@ cases". This module answers the two questions a deployment actually cares about:
    and rank them by accuracy — overall and per category.
 2. **Are the tools worth it?** Run each model *with* the BAMCP tools and *without*
    them (same cases, tools withheld), and report the accuracy lift the tools buy.
+   Both arms are graded on answer correctness only (``grade_tools=False``): grading
+   the tools-off arm on tool selection would fail it by construction.
 
 It reuses the existing runner and grader unchanged; it only orchestrates
 multiple runs and aggregates them into a comparison table (Markdown + JSON).
@@ -318,6 +320,10 @@ async def run_comparison(
             judge=build_judge(spec),
             output_dir=output_dir / spec.slug,
             no_vision=True,
+            # Both arms are graded on the answer only. Tool selection would auto-fail
+            # every tools_expected case in the tools-off arm (it has no tools to call)
+            # and bias the lift; the lift must measure answer quality.
+            grade_tools=False,
         )
         spec_results.append(aggregate(spec, results))
     return ComparisonReport(spec_results)

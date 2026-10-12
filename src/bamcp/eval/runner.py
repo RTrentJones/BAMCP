@@ -194,6 +194,7 @@ async def run_case(
     *,
     no_vision: bool = False,
     screenshot_dir: Path | None = None,
+    grade_tools: bool = True,
 ) -> EvalResult:
     """Run one case to completion and grade it."""
     case_slug = case.name.replace(" ", "_").replace("/", "_").replace(":", "_").replace(">", "_")
@@ -268,7 +269,7 @@ async def run_case(
     ]
     rubric_payloads = collect_rubric_payloads(tool_results)
 
-    verdict = grade_case(case, final_text, captured_tools, rubric_payloads)
+    verdict = grade_case(case, final_text, captured_tools, rubric_payloads, grade_tools=grade_tools)
     if verdict is None:
         if judge is None:
             verdict = GraderVerdict(
@@ -304,6 +305,7 @@ async def run_cases(
     *,
     no_vision: bool = False,
     screenshot_dir: Path | None = None,
+    grade_tools: bool = True,
 ) -> list[EvalResult]:
     """Run a sequence of cases. Returns one result per (case, rendering_mode)."""
     results: list[EvalResult] = []
@@ -324,6 +326,7 @@ async def run_cases(
                     mode,
                     no_vision=no_vision,
                     screenshot_dir=screenshot_dir,
+                    grade_tools=grade_tools,
                 )
             )
     return results

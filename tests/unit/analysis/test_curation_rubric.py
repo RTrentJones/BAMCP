@@ -76,6 +76,7 @@ class TestComputeRubricScores:
                 "strand_bias": 1.0,
                 "mapq_histogram": [80, 20, 0, 0, 0],
                 "position_histogram": [40, 40, 0, 0],
+                "near_end_fraction": 1.0,
             },
             artifact_risk={"risk_score": 1.0},
         )
@@ -83,7 +84,7 @@ class TestComputeRubricScores:
         assert scores["mapq_quality"] == 0.0
         assert scores["artifact_risk_inverse"] == 0.0
         assert scores["depth_quality"] < 0.2
-        # near-end bins are first two => all reads near ends => position 0
+        # every supporting base within the near-end cutoff => position 0
         assert scores["position_quality"] == 0.0
         # vaf 0.05 * 2.5 = 0.125
         assert scores["vaf_quality"] == 0.125

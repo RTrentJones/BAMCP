@@ -12,8 +12,14 @@ import re
 from ..constants import (
     ARTIFACT_HOMOPOLYMER_LENGTH_THRESHOLD,
     ARTIFACT_LOW_MAPQ_FRACTION_THRESHOLD,
+    ARTIFACT_NEAR_END_DISTANCE_BP,
+    ARTIFACT_NEAR_END_EXCESS_OVER_EXPECTED,
     ARTIFACT_NEAR_END_FRACTION_THRESHOLD,
     ARTIFACT_STRAND_BIAS_THRESHOLD,
+    HIGH_CONFIDENCE_MAX_STRAND_BIAS,
+    HIGH_CONFIDENCE_MIN_DEPTH,
+    HIGH_CONFIDENCE_MIN_MEAN_QUALITY,
+    HIGH_CONFIDENCE_MIN_VAF,
     LOW_CONFIDENCE_MAX_STRAND_BIAS,
     LOW_CONFIDENCE_MIN_DEPTH,
     LOW_CONFIDENCE_MIN_MEAN_QUALITY,
@@ -117,6 +123,22 @@ def detect_homopolymer(seq: str, pos: int) -> int:
     return length
 
 
+def homopolymer_context_length(variant: dict, seq: str, pos_in_region: int) -> int:
+    """Homopolymer run length relevant to a variant at ``pos_in_region`` of ``seq``.
+
+    SNV: the run containing the base. Indel: the longest run touching the anchor, the
+    deleted/inserted span, or the base just after it (``pos+1 .. pos+len+1``).
+    """
+    if not is_indel(variant):
+        return detect_homopolymer(seq, pos_in_region)
+    span = max(len(str(variant.get("ref", ""))), len(str(variant.get("alt", ""))))
+    stop = min(len(seq), pos_in_region + span + 1)
+    return max(
+        (detect_homopolymer(seq, i) for i in range(pos_in_region, stop)),
+        default=0,
+    )
+
+
 def build_mismatch_index(
     reads: list[AlignedRead],
 ) -> dict[tuple[int, str], list[tuple[AlignedRead, dict]]]:
@@ -135,29 +157,133 @@ def build_mismatch_index(
     return index
 
 
-def _aggregate_read_evidence(supporting: list[tuple[AlignedRead, int | None]]) -> dict:
-    """Aggregate ``(read, query_position)`` support tuples into an evidence dict.
+_CIGAR_RE = re.compile(r"(\d+)([MIDNSHP=X])")
 
-    Shared by the mismatch-index path (BAMCP candidates) and the base-scan path
-    (VCF SNVs); ``query_position`` may be None when the site isn't aligned in a read.
+
+def _aligned_query_span(read: AlignedRead) -> tuple[int, int]:
+    """Return ``(first, last)`` query indices of the ALIGNED (non-soft-clipped) part.
+
+    Soft-clipped bases are in the query but were not aligned, so a base 3bp from the
+    end of the aligned block is "near the end" even when 20 clipped bases follow it.
+    """
+    ops = [(int(n), op) for n, op in _CIGAR_RE.findall(read.cigar)]
+    qlen = sum(n for n, op in ops if op in "MIS=X")
+    if qlen == 0:
+        qlen = len(read.qualities) or len(read.sequence)
+    lead = 0
+    for n, op in ops:
+        if op == "H":
+            continue
+        if op == "S":
+            lead += n
+            continue
+        break
+    trail = 0
+    for n, op in reversed(ops):
+        if op == "H":
+            continue
+        if op == "S":
+            trail += n
+            continue
+        break
+    return lead, qlen - trail - 1
+
+
+def summarize_read_positions(
+    distances: list[int], aligned_lengths: list[int] | None = None
+) -> dict:
+    """Near-end summary for supporting bases.
+
+    ``distances`` are each supporting base's distance (bp) to the nearest aligned read
+    end. A base is "near the end" when that distance is below
+    ``ARTIFACT_NEAR_END_DISTANCE_BP``. When the aligned read lengths are known, the
+    fraction expected under UNIFORM placement (``min(L, 2c) / L`` per read, averaged)
+    is reported too, so short reads — where most positions are near an end anyway —
+    are not mistaken for a position bias.
+    """
+    cutoff = ARTIFACT_NEAR_END_DISTANCE_BP
+    n = len(distances)
+    near = sum(1 for d in distances if d < cutoff)
+    expected: float | None = None
+    if aligned_lengths:
+        per_read = [min(length, 2 * cutoff) / length for length in aligned_lengths if length > 0]
+        if per_read:
+            expected = round(sum(per_read) / len(per_read), 3)
+    return {
+        "near_end_cutoff_bp": cutoff,
+        "near_end_count": near,
+        "position_count": n,
+        "near_end_fraction": round(near / n, 3) if n else 0.0,
+        "near_end_expected_fraction": expected,
+    }
+
+
+def is_read_position_biased(evidence: dict) -> bool:
+    """True when supporting bases cluster near aligned read ends beyond chance.
+
+    Requires both an absolute majority near an end (> ``ARTIFACT_NEAR_END_FRACTION_THRESHOLD``)
+    and, when the uniform expectation is known, an excess over it of at least
+    ``ARTIFACT_NEAR_END_EXCESS_OVER_EXPECTED``. Uniform positions never flag.
+    """
+    if not evidence.get("position_count"):
+        return False
+    frac = float(evidence.get("near_end_fraction") or 0.0)
+    if frac <= ARTIFACT_NEAR_END_FRACTION_THRESHOLD:
+        return False
+    expected = evidence.get("near_end_expected_fraction")
+    return expected is None or frac >= expected + ARTIFACT_NEAR_END_EXCESS_OVER_EXPECTED
+
+
+def _not_computed_evidence(reason: str) -> dict:
+    """Evidence record for a variant whose supporting reads could not be located.
+
+    Numeric fields stay numeric (the viewer renders them) but ``read_evidence_computed``
+    is False and ``read_evidence_note`` says why; analysis consumers must treat strand,
+    quality and position as UNKNOWN rather than as balanced/clean zeros.
+    """
+    return {
+        "read_evidence_computed": False,
+        "read_evidence_note": reason,
+        "forward_count": 0,
+        "reverse_count": 0,
+        "strand_bias": 0.0,
+        "mean_quality": 0,
+        "median_quality": 0,
+        "quality_histogram": bin_values([], QUALITY_HISTOGRAM_BINS),
+        "position_histogram": bin_values([], POSITION_HISTOGRAM_BINS),
+        "mapq_histogram": bin_values([], MAPQ_HISTOGRAM_BINS),
+        **summarize_read_positions([]),
+    }
+
+
+def _aggregate_read_evidence(supporting: list[tuple[AlignedRead, int | None, int | None]]) -> dict:
+    """Aggregate ``(read, query_position, base_quality)`` support into an evidence dict.
+
+    ``query_position`` may be None when the site isn't aligned in a read; ``base_quality``
+    is the quality attributed to the supporting event (the base itself for an SNV, the
+    inserted/flanking bases for an indel), or None if unknown.
     """
     forward_count = 0
     reverse_count = 0
     qualities: list[int] = []
     positions_in_read: list[int] = []
+    aligned_lengths: list[int] = []
     mapq_values: list[int] = []
 
-    for read, query_pos in supporting:
+    for read, query_pos, base_quality in supporting:
         if read.is_reverse:
             reverse_count += 1
         else:
             forward_count += 1
 
-        if query_pos is not None and query_pos < len(read.qualities):
-            qualities.append(read.qualities[query_pos])
-            # Position relative to the nearest read end.
-            read_length = len(read.qualities)
-            positions_in_read.append(min(query_pos, read_length - query_pos - 1))
+        if base_quality is not None:
+            qualities.append(base_quality)
+        if query_pos is not None:
+            first, last = _aligned_query_span(read)
+            if first <= query_pos <= last:
+                # Distance to the nearest ALIGNED read end (soft clips excluded).
+                positions_in_read.append(min(query_pos - first, last - query_pos))
+                aligned_lengths.append(last - first + 1)
 
         mapq_values.append(read.mapping_quality)
 
@@ -166,6 +292,7 @@ def _aggregate_read_evidence(supporting: list[tuple[AlignedRead, int | None]]) -
     strand_bias = abs(forward_count - reverse_count) / max(total, 1)
 
     return {
+        "read_evidence_computed": True,
         "forward_count": forward_count,
         "reverse_count": reverse_count,
         "strand_bias": round(strand_bias, 3),
@@ -174,7 +301,73 @@ def _aggregate_read_evidence(supporting: list[tuple[AlignedRead, int | None]]) -
         "quality_histogram": bin_values(qualities, QUALITY_HISTOGRAM_BINS),
         "position_histogram": bin_values(positions_in_read, POSITION_HISTOGRAM_BINS),
         "mapq_histogram": bin_values(mapq_values, MAPQ_HISTOGRAM_BINS),
+        **summarize_read_positions(positions_in_read, aligned_lengths),
     }
+
+
+def _indel_key(variant: dict) -> tuple[int, str, int | str] | None:
+    """Map a VCF-style anchored indel to ``(anchor_pos, kind, length|inserted_seq)``.
+
+    Returns None for SNVs and for complex/unanchored alleles BAMCP can't key from CIGAR.
+    """
+    ref = str(variant.get("ref", "")).upper()
+    alt = str(variant.get("alt", "")).upper()
+    if len(ref) == len(alt) or not ref or not alt or ref[0] != alt[0]:
+        return None
+    if len(ref) > len(alt):
+        if len(alt) != 1:
+            return None
+        return (variant["position"], "del", len(ref) - 1)
+    if len(ref) != 1:
+        return None
+    return (variant["position"], "ins", alt[1:])
+
+
+def build_indel_index(
+    reads: list[AlignedRead],
+) -> dict[tuple[int, str, int | str], list[tuple[AlignedRead, int, int | None]]]:
+    """Index CIGAR insertions/deletions by ``(anchor_pos, kind, length|seq)``.
+
+    ``read.mismatches`` carries SNVs only, so indel candidates need their own index. The
+    key matches :func:`_indel_key` (VCF-style anchor = last reference base before the
+    event, 0-based — the same convention ``detect_indels`` reports via pileup). Each entry
+    is ``(read, query_pos, event_quality)``: for an insertion the query position of its
+    first inserted base and the minimum inserted-base quality; for a deletion the anchor
+    base's query position and the minimum quality of the two flanking bases.
+    """
+    index: dict[tuple[int, str, int | str], list[tuple[AlignedRead, int, int | None]]] = {}
+    for read in reads:
+        quals = read.qualities
+        seq = read.sequence.upper()
+        qpos = 0
+        rpos = read.position
+        prev_aligned = False  # whether the previous op ended on an aligned base
+        for n_str, op in _CIGAR_RE.findall(read.cigar):
+            n = int(n_str)
+            if op in ("M", "=", "X"):
+                qpos += n
+                rpos += n
+                prev_aligned = True
+            elif op == "I":
+                if prev_aligned and qpos + n <= len(seq):
+                    ins = seq[qpos : qpos + n]
+                    q = min(quals[qpos : qpos + n]) if len(quals) >= qpos + n else None
+                    index.setdefault((rpos - 1, "ins", ins), []).append((read, qpos, q))
+                qpos += n
+            elif op == "D":
+                if prev_aligned:
+                    flank = [quals[i] for i in (qpos - 1, qpos) if 0 <= i < len(quals)]
+                    q = min(flank) if flank else None
+                    index.setdefault((rpos - 1, "del", n), []).append((read, qpos - 1, q))
+                rpos += n
+            elif op == "N":
+                rpos += n
+                prev_aligned = False
+            elif op == "S":
+                qpos += n
+                prev_aligned = False
+            # H/P consume nothing
+    return index
 
 
 def compute_variant_evidence(
@@ -188,8 +381,45 @@ def compute_variant_evidence(
     including histogram distributions for curation.
     """
     matches = index.get((variant["position"], variant["alt"]), [])
-    supporting = [(read, get_query_position(read, mm["pos"])) for read, mm in matches]
+    supporting: list[tuple[AlignedRead, int | None, int | None]] = []
+    for read, mm in matches:
+        qpos = get_query_position(read, mm["pos"])
+        qual = read.qualities[qpos] if qpos is not None and qpos < len(read.qualities) else None
+        supporting.append((read, qpos, qual))
+    if not supporting and variant.get("alt_count", 0):
+        return _not_computed_evidence(
+            "No alt-supporting reads were found in the fetched read set (it may be "
+            "capped by max_reads); strand/quality/position evidence was not computed."
+        )
     return _aggregate_read_evidence(supporting)
+
+
+def compute_indel_evidence(
+    indel_index: dict[tuple[int, str, int | str], list[tuple[AlignedRead, int, int | None]]],
+    variant: dict,
+) -> dict:
+    """Read-level evidence for an anchored indel, from CIGAR-derived support.
+
+    Falls back to a not-computed record (explicit, never zero-filled "clean") when the
+    allele can't be keyed or no supporting reads are in the fetched read set.
+    """
+    key = _indel_key(variant)
+    if key is None:
+        return _not_computed_evidence(
+            "Complex/unanchored indel allele: read-level support was not computed."
+        )
+    matches = indel_index.get(key, [])
+    if not matches:
+        return _not_computed_evidence(
+            "No indel-supporting reads were found in the fetched read set (it may be "
+            "capped by max_reads); strand/quality/position evidence was not computed."
+        )
+    return _aggregate_read_evidence(list(matches))
+
+
+def is_indel(variant: dict) -> bool:
+    """True for a length-changing allele (insertion/deletion)."""
+    return len(str(variant.get("ref", ""))) != len(str(variant.get("alt", "")))
 
 
 def compute_artifact_risk(
@@ -212,28 +442,42 @@ def compute_artifact_risk(
     risks: list[dict] = []
     risk_score = 0.0
 
-    # 1. Position-in-read bias (ReadPosRankSum equivalent)
-    pos_hist = evidence.get("position_histogram", [])
-    if pos_hist:
-        total = sum(pos_hist)
-        if total > 0:
-            # First two bins (0-25, 25-50) represent near-end positions
-            near_end = sum(pos_hist[:2])
-            near_end_fraction = near_end / total
-            if near_end_fraction > ARTIFACT_NEAR_END_FRACTION_THRESHOLD:
-                risks.append(
-                    {
-                        "type": "read_position_bias",
-                        "severity": "medium",
-                        "description": f"{near_end_fraction:.0%} of bases near read ends",
-                        "value": round(near_end_fraction, 3),
-                    }
-                )
-                risk_score += 0.3
+    # 0. Read evidence not computed (e.g. supporting reads not in the fetched set). The
+    # strand/quality/position zeros are placeholders, NOT a clean bill of health.
+    computed = evidence.get("read_evidence_computed", True)
+    if not computed:
+        risks.append(
+            {
+                "type": "read_evidence_unavailable",
+                "severity": "medium",
+                "description": evidence.get("read_evidence_note")
+                or "Read-level evidence was not computed for this variant",
+                "value": None,
+            }
+        )
+        risk_score += 0.3
+
+    # 1. Position-in-read bias: supporting bases clustered within a few bp of an aligned
+    # read end, beyond what uniform placement would give (see is_read_position_biased).
+    if computed and is_read_position_biased(evidence):
+        near_end_fraction = float(evidence.get("near_end_fraction") or 0.0)
+        cutoff = evidence.get("near_end_cutoff_bp", ARTIFACT_NEAR_END_DISTANCE_BP)
+        risks.append(
+            {
+                "type": "read_position_bias",
+                "severity": "medium",
+                "description": (
+                    f"{near_end_fraction:.0%} of supporting bases within {cutoff}bp "
+                    "of an aligned read end"
+                ),
+                "value": round(near_end_fraction, 3),
+            }
+        )
+        risk_score += 0.3
 
     # 2. Strand bias
     strand_bias = evidence.get("strand_bias", 0)
-    if strand_bias > ARTIFACT_STRAND_BIAS_THRESHOLD:
+    if computed and strand_bias > ARTIFACT_STRAND_BIAS_THRESHOLD:
         severity = "high" if strand_bias > 0.95 else "medium"
         risks.append(
             {
@@ -264,11 +508,13 @@ def compute_artifact_risk(
                 )
                 risk_score += 0.25
 
-    # 4. Homopolymer context
+    # 4. Homopolymer context. For an indel the VCF anchor base precedes the event, so the
+    # anchor alone under-reads the run (CAAAAAAG: anchor C → 1, real A-run → 6); take the
+    # longest run over the anchor plus the affected/flanking bases instead.
     if reference_sequence:
         pos_in_region = variant["position"] - region_start
         if 0 <= pos_in_region < len(reference_sequence):
-            hp_len = detect_homopolymer(reference_sequence, pos_in_region)
+            hp_len = homopolymer_context_length(variant, reference_sequence, pos_in_region)
             if hp_len >= ARTIFACT_HOMOPOLYMER_LENGTH_THRESHOLD:
                 severity = "high" if hp_len >= 6 else "medium"
                 risks.append(
@@ -336,7 +582,16 @@ def compute_confidence(
     quality = evidence["mean_quality"]
     strand_bias = evidence["strand_bias"]
 
-    if vaf >= 0.2 and depth >= 20 and quality >= 25 and strand_bias <= 0.7:
+    if not evidence.get("read_evidence_computed", True):
+        # Strand/quality are unknown, not clean — never let placeholders earn confidence.
+        return "low"
+
+    if (
+        vaf >= HIGH_CONFIDENCE_MIN_VAF
+        and depth >= HIGH_CONFIDENCE_MIN_DEPTH
+        and quality >= HIGH_CONFIDENCE_MIN_MEAN_QUALITY
+        and strand_bias <= HIGH_CONFIDENCE_MAX_STRAND_BIAS
+    ):
         confidence = "high"
     elif (
         vaf >= LOW_CONFIDENCE_MIN_VAF
@@ -391,6 +646,10 @@ def _vcf_evidence(
         "quality_histogram": bin_values(quals, QUALITY_HISTOGRAM_BINS),
         "position_histogram": bin_values(positions, POSITION_HISTOGRAM_BINS),
         "mapq_histogram": bin_values(mapqs, MAPQ_HISTOGRAM_BINS),
+        # The annotator reports distance to the nearest read end without the read length,
+        # so the uniform expectation is unknown; the absolute cutoff still keeps uniformly
+        # placed support on >=40bp reads below the majority threshold.
+        **summarize_read_positions(list(positions)),
     }
     artifact_risk = compute_artifact_risk(
         {**variant, "depth": depth}, evidence, reference_sequence, region_start
@@ -450,6 +709,7 @@ def enhance_variants_with_evidence(
     can't corroborate from single-base support, pass through unscored.
     """
     mismatch_index = build_mismatch_index(reads)
+    indel_index: dict | None = None
     variant_evidence: dict = {}
     enhanced_variants: list[dict] = []
 
@@ -470,15 +730,23 @@ def enhance_variants_with_evidence(
                 enhanced_variants.append(dict(variant))
             continue
 
-        evidence = compute_variant_evidence(mismatch_index, variant)
+        if is_indel(variant):
+            if indel_index is None:
+                indel_index = build_indel_index(reads)
+            evidence = compute_indel_evidence(indel_index, variant)
+        else:
+            evidence = compute_variant_evidence(mismatch_index, variant)
         artifact_risk = compute_artifact_risk(variant, evidence, reference_sequence, region_start)
         evidence["artifact_risk"] = artifact_risk
         variant_evidence[key] = evidence
 
         enhanced = dict(variant)
-        enhanced["strand_forward"] = evidence["forward_count"]
-        enhanced["strand_reverse"] = evidence["reverse_count"]
-        enhanced["mean_quality"] = evidence["mean_quality"]
+        computed = evidence.get("read_evidence_computed", True)
+        # Unknown read evidence is reported as null, never as a clean 0/0 / 0.0.
+        enhanced["strand_forward"] = evidence["forward_count"] if computed else None
+        enhanced["strand_reverse"] = evidence["reverse_count"] if computed else None
+        enhanced["mean_quality"] = evidence["mean_quality"] if computed else None
+        enhanced["read_evidence_computed"] = computed
         enhanced["artifact_risk"] = artifact_risk
 
         confidence = compute_confidence(variant, evidence, artifact_risk)

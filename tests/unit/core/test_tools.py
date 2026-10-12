@@ -1776,7 +1776,12 @@ class TestComputeArtifactRisk:
         variant = {"position": 100, "depth": 50, "vaf": 0.5}
         evidence = {
             "strand_bias": 0.1,
-            "position_histogram": [10, 10, 1, 0, 0, 0],  # Mostly near ends
+            "position_histogram": [10, 10, 1, 0, 0, 0],
+            # 20/21 supporting bases within the near-end cutoff vs ~13% expected.
+            "position_count": 21,
+            "near_end_count": 20,
+            "near_end_fraction": 0.952,
+            "near_end_expected_fraction": 0.133,
             "mapq_histogram": [0, 0, 0, 0, 5, 10, 20],
         }
         result = compute_artifact_risk(variant, evidence, None, 0)

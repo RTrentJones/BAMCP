@@ -44,7 +44,9 @@ variant_sites:
     category: strand_bias
     expected_vaf: 0.40
     expected_artifact: strand_bias
-    expected_likelihood: high
+    # medium: strand bias alone. (It read "high" only because the old 0-50bp near-end
+    # bins also flagged its mid-read support as read-position bias.)
+    expected_likelihood: medium
 
   - chrom: chr1
     pos: 1101
@@ -62,7 +64,8 @@ variant_sites:
     category: clean
     expected_vaf: 0.44
     expected_artifact: null
-    expected_likelihood: medium
+    # low: support sits ~20bp from either aligned end, not near-end under the 10bp cutoff.
+    expected_likelihood: low
     is_clean_control: true
 
   - chrom: chr1
@@ -81,7 +84,8 @@ variant_sites:
     category: homopolymer
     expected_vaf: 0.27
     expected_artifact: homopolymer
-    expected_likelihood: high
+    # medium: 6bp homopolymer alone (previously compounded by spurious position bias).
+    expected_likelihood: medium
 
   - chrom: chr1
     pos: 2076

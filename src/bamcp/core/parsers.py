@@ -340,24 +340,107 @@ def _per_alt_value(value: Any, idx: int) -> Any:
     return value
 
 
+def _info_value(record: Any, key: str, default: Any = None) -> Any:
+    """Read an INFO field without tripping pysam's undeclared-key error.
+
+    ``record.info.get(key)`` raises ``ValueError("Invalid header")`` when the VCF
+    header does not declare ``key`` — the norm for bcftools/GATK/DeepVariant small-
+    variant VCFs, which never declare SVTYPE/END/SVLEN (and often not AF/DP).
+    """
+    if key not in record.header.info:
+        return default
+    return record.info.get(key, default)
+
+
+_NUCLEOTIDES = frozenset("ACGTNacgtn")
+
+
+def _trim_allele(pos0: int, ref: str, alt: str) -> tuple[int, str, str]:
+    """Minimally represent one ALT against REF (multi-allelic records are padded).
+
+    A multi-allelic record shares one REF across ALTs (``REF=ACG ALT=ATG,A``), so
+    each allele is trimmed on its own: shared suffix first, then shared prefix,
+    always leaving at least one base on each side (VCF anchor convention). The
+    result matches BAMCP's own candidate representation, so the ``auto`` overlay
+    de-duplicates a VCF call against the same local candidate.
+    """
+    while len(ref) > 1 and len(alt) > 1 and ref[-1].upper() == alt[-1].upper():
+        ref, alt = ref[:-1], alt[:-1]
+    while len(ref) > 1 and len(alt) > 1 and ref[0].upper() == alt[0].upper():
+        ref, alt, pos0 = ref[1:], alt[1:], pos0 + 1
+    return pos0, ref, alt
+
+
+def _classify_allele(ref: str, alt: str, structural: bool) -> str:
+    """Variant kind of a (trimmed) ref/alt pair: snv, mnp, indel, or sv."""
+    if structural:
+        return "sv"
+    if len(ref) == len(alt):
+        return "snv" if len(ref) == 1 else "mnp"
+    return "indel"
+
+
+def _sample_support(record: Any, idx: int) -> tuple[int, int] | None:
+    """``(depth, alt_count)`` for ALT ``idx`` from a single-sample FORMAT AD/DP.
+
+    The sample's own allele depths are what VAF means for the BAM being viewed;
+    INFO AF/DP are cohort/site-level and only a fallback. Used only when the VCF has
+    exactly one sample (with several, which one matches the BAM is unknowable) and
+    AD carries a value for this ALT.
+    """
+    if len(record.samples) != 1 or "AD" not in record.format:
+        return None
+    sample = record.samples[0]
+    ad = sample.get("AD")
+    if not isinstance(ad, (list, tuple)) or idx + 1 >= len(ad) or ad[idx + 1] is None:
+        return None
+    alt_count = int(ad[idx + 1])
+    dp = sample.get("DP") if "DP" in record.format else None
+    depth = int(dp) if dp is not None else sum(int(x) for x in ad if x is not None)
+    return depth, alt_count
+
+
 def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
-    """Load VCF/BCF records for a region as internal 0-based candidate variants."""
+    """Load VCF/BCF records for a region as internal 0-based candidate variants.
+
+    One variant per ALT allele, each trimmed to its minimal representation and
+    classified as snv / mnp / indel / sv. Spanning-deletion ``*`` alleles are not
+    variants at this site (the upstream deletion record carries them) and are
+    skipped. Depth/VAF come from the single sample's FORMAT AD/DP when present,
+    else from INFO AF/DP; a missing (``.``) value leaves VAF 0 for the read-support
+    annotation to fill.
+
+    Raises:
+        ValueError: For a VCF that cannot be region-queried (plain/unindexed .vcf).
+    """
     contig, start, end = parse_region(region)
     variants: list[dict] = []
     with pysam.VariantFile(vcf_path) as vcf:
-        for record in vcf.fetch(contig, start, end):
+        try:
+            records = vcf.fetch(contig, start, end)
+        except ValueError as e:
+            raise ValueError(
+                "vcf_path must be bgzip-compressed and indexed (.tbi/.csi) or an indexed "
+                "BCF to be queried by region; run `bgzip calls.vcf && tabix -p vcf "
+                f"calls.vcf.gz` ({e})"
+            ) from e
+        for record in records:
             pos0 = int(record.pos) - 1
             if pos0 < start or pos0 >= end:
                 continue
-            depth = int(record.info.get("DP", 0) or 0)
-            af_value = record.info.get("AF", 0.0)
+            info_dp = _info_value(record, "DP", 0) or 0
+            af_value = _info_value(record, "AF", 0.0)
             af_values = af_value if isinstance(af_value, tuple) else (af_value,)
-            sv_type = record.info.get("SVTYPE")
-            sv_end = record.info.get("END")
-            sv_len = record.info.get("SVLEN")
-            is_structural = bool(sv_type) or any(
-                str(alt).startswith("<") for alt in record.alts or []
+            sv_type = _info_value(record, "SVTYPE")
+            # pysam reserves INFO/END: ``record.info.get("END")`` is always None for a
+            # real file, and the value surfaces as ``record.stop`` instead. Only report
+            # it when the record actually carries an END (span differs from REF's).
+            sv_end = (
+                int(record.stop)
+                if "END" in record.header.info and record.rlen != len(record.ref or "")
+                else None
             )
+            sv_len = _info_value(record, "SVLEN")
             samples = {
                 sample_name: {
                     key: list(value) if isinstance(value, tuple) else value
@@ -366,22 +449,38 @@ def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
                 for sample_name, sample_data in record.samples.items()
             }
             for idx, alt in enumerate(record.alts or []):
-                af = float(af_values[idx]) if idx < len(af_values) else 0.0
-                alt_len = len(str(alt))
-                ref_len = len(str(record.ref))
-                variant_kind = (
-                    "sv" if is_structural else ("snv" if ref_len == 1 and alt_len == 1 else "indel")
+                alt = str(alt)
+                if alt == "*":
+                    continue
+                ref = str(record.ref)
+                is_structural = bool(sv_type) or not (
+                    set(alt) <= _NUCLEOTIDES and set(ref) <= _NUCLEOTIDES
                 )
+                var_pos0, var_ref, var_alt = (
+                    (pos0, ref, alt) if is_structural else _trim_allele(pos0, ref, alt)
+                )
+
+                support = _sample_support(record, idx)
+                if support is not None:
+                    depth, alt_count = support
+                    vaf = alt_count / depth if depth else 0.0
+                else:
+                    depth = int(info_dp)
+                    raw_af = af_values[idx] if idx < len(af_values) else None
+                    # AF=.,0.3 arrives as (None, 0.3): a missing value is "unknown",
+                    # not a crash.
+                    vaf = float(raw_af) if raw_af is not None else 0.0
+                    alt_count = round(vaf * depth) if depth else 0
                 variants.append(
                     {
                         "contig": record.contig,
-                        "position": pos0,
-                        "ref": record.ref,
-                        "alt": alt,
-                        "variant_kind": variant_kind,
-                        "vaf": round(af, 3),
+                        "position": var_pos0,
+                        "ref": var_ref,
+                        "alt": var_alt,
+                        "variant_kind": _classify_allele(var_ref, var_alt, is_structural),
+                        "vaf": round(vaf, 3),
                         "depth": depth,
-                        "alt_count": round(af * depth) if depth else 0,
+                        "alt_count": alt_count,
                         "source": "vcf",
                         "samples": samples,
                         "sample_names": list(samples.keys()),

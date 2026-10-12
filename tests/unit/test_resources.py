@@ -109,3 +109,21 @@ class TestGetViewerHtml:
         # Should be > 50KB (SDK + viewer code) but < 1MB
         assert len(html) > 50_000, "HTML seems too small, SDK may not be bundled"
         assert len(html) < 1_000_000, "HTML seems too large"
+
+
+@pytest.mark.unit
+def test_source_fallback_logs_warning(tmp_path, monkeypatch, caplog):
+    """With no bundled dist/, the unbundled source is still served — but loudly."""
+    import logging
+
+    import bamcp.resources as res
+
+    src = tmp_path / "static" / "viewer.html"
+    src.parent.mkdir()
+    src.write_text("<html>source</html>", encoding="utf-8")
+    monkeypatch.setattr(res, "_STATIC_DIR", tmp_path / "static")
+    monkeypatch.setattr(res.importlib.resources, "files", lambda _pkg: tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="bamcp.resources"):
+        assert res.get_viewer_html() == "<html>source</html>"
+    assert "make build-viewer" in caplog.text

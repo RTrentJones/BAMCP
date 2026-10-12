@@ -6,8 +6,10 @@ import asyncio
 import functools
 import json
 import logging
+import os
 import tempfile
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -27,9 +29,9 @@ from ..config import BAMCPConfig
 from ..constants import (
     BAM_PARSE_TIMEOUT_SECONDS,
     DEFAULT_CACHE_TTL_SECONDS,
-    DEFAULT_CONTIG,
     INDEL_DETECTION_MAX_REGION,
     PARSE_MAX_CONCURRENCY,
+    REGION_CACHE_MAX_BYTES,
     REGION_CACHE_MAX_ENTRIES,
     REGION_TILE_SIZE,
     SCAN_VARIANTS_CHUNK_SIZE,
@@ -39,6 +41,7 @@ from ..constants import (
 )
 from ..middleware.telemetry import telemetry_wrapper
 from .cache import BAMIndexCache
+from .errors import ToolInputError
 from .parsers import (
     MAX_REGION_SIZE,
     RegionData,
@@ -80,7 +83,23 @@ _PARSE_EXECUTOR = ThreadPoolExecutor(
 # request count) instead. A permit is held until the underlying thread truly finishes (released
 # via a done-callback, and the future is shielded from await-cancellation), so a hung parse keeps
 # occupying its slot rather than freeing it for a submission that would then queue behind it.
-_parse_gate = asyncio.Semaphore(PARSE_MAX_CONCURRENCY)
+#
+# asyncio primitives bind to the first loop that contends on them, so a single module-level
+# Semaphore breaks ("bound to a different event loop") once a second loop uses it — repeated
+# asyncio.run() in embedded/sync callers, or test suites. Keep one gate per running loop. In a
+# server there is exactly one loop, so the bound is unchanged.
+_parse_gates: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _get_parse_gate() -> asyncio.Semaphore:
+    """The submission gate for the running event loop (created on first use)."""
+    loop = asyncio.get_running_loop()
+    gate = _parse_gates.get(loop)
+    if gate is None:
+        gate = _parse_gates[loop] = asyncio.Semaphore(PARSE_MAX_CONCURRENCY)
+    return gate
 
 
 async def _run_in_parse_pool(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
@@ -90,12 +109,16 @@ async def _run_in_parse_pool(fn: Callable[..., _T], /, *args: Any, **kwargs: Any
     run_in_executor takes no kwargs, so bind them with partial to keep the call sites unchanged.
     """
     call = functools.partial(fn, **kwargs) if kwargs else fn
-    await _parse_gate.acquire()
+    gate = _get_parse_gate()
+    await gate.acquire()
     fut = asyncio.get_running_loop().run_in_executor(_PARSE_EXECUTOR, call, *args)
     # Release only when the thread actually completes — not when an outer wait_for cancels the
     # await — so hung parses keep holding their slot (real backpressure, bounded executor queue).
-    fut.add_done_callback(lambda _f: _parse_gate.release())
+    fut.add_done_callback(lambda _f: gate.release())
     return await asyncio.shield(fut)
+
+
+_RegionCacheEntry = tuple[float, RegionData, int]
 
 
 @dataclass
@@ -113,8 +136,9 @@ class BAMCPServices:
 
     config: BAMCPConfig
     cache: BAMIndexCache
-    # LRU-ordered (newest at the end); bounded to REGION_CACHE_MAX_ENTRIES in _set_cached_region.
-    region_cache: OrderedDict[tuple, tuple[float, RegionData]] = field(default_factory=OrderedDict)
+    # LRU-ordered (newest at the end); bounded by entry count AND approximate bytes in
+    # _set_cached_region. Values are (created_monotonic, data, approx_bytes).
+    region_cache: OrderedDict[tuple, _RegionCacheEntry] = field(default_factory=OrderedDict)
     index_download_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     _clinvar: ClinVarClient | None = field(default=None, repr=False)
     _gnomad: GnomadClient | None = field(default=None, repr=False)
@@ -164,6 +188,16 @@ class BAMCPServices:
         self._genes = None
         self.region_cache.clear()
         self.index_download_locks.clear()
+
+    def clear_caches(self) -> int:
+        """Drop downloaded index files and the region cache; return index files removed.
+
+        Deliberately leaves the shared HTTP clients open: closing them here would make any
+        in-flight ClinVar/gnomAD/gene lookup fail with ``RuntimeError`` (closed client).
+        """
+        removed = self.cache.cleanup_session()
+        self.region_cache.clear()
+        return removed
 
 
 # Services keyed by config identity so distinct server instances stay isolated. LRU-ordered and
@@ -341,6 +375,21 @@ def _format_filters_line(filters: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
+def _local_fingerprint(path: str | None) -> tuple[int, int] | None:
+    """``(mtime_ns, size)`` of a local file, so a replaced file never serves stale cache hits.
+
+    Remote URLs (and unreadable paths) return None — remote objects carry no cheap identity
+    here, and an unreadable path fails in the parser anyway.
+    """
+    if not path or "://" in path:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 def _cache_key(
     file_path: str,
     region: str,
@@ -355,9 +404,12 @@ def _cache_key(
     return (
         mode,
         file_path,
+        _local_fingerprint(file_path),
         region,
         reference,
+        _local_fingerprint(reference),
         vcf_path,
+        _local_fingerprint(vcf_path),
         vcf_primary,
         config.max_reads,
         config.min_mapq,
@@ -367,15 +419,33 @@ def _cache_key(
     )
 
 
+def _approx_region_bytes(data: Any) -> int:
+    """Rough in-memory size of a cached RegionData (CPython object overheads included).
+
+    Entry *count* alone does not bound memory: a full-mode 1 Mb region with max_reads reads can
+    weigh tens of MB, so 128 of them would blow far past a 2 GB container. Estimates per read
+    ~600 B of fixed overhead plus ~9 B/base (sequence char + quality-list slot), ~16 B per
+    coverage position, ~1 KB per variant dict, plus the reference string.
+    """
+    total = 1024
+    for read in getattr(data, "reads", None) or ():
+        total += 600 + 9 * len(getattr(read, "sequence", "") or "")
+        total += 200 * len(getattr(read, "mismatches", ()) or ())
+    total += 16 * len(getattr(data, "coverage", None) or ())
+    total += 1024 * len(getattr(data, "variants", None) or ())
+    total += len(getattr(data, "reference_sequence", None) or "")
+    return total
+
+
 def _get_cached_region(
-    region_cache: OrderedDict[tuple, tuple[float, RegionData]], key: tuple, ttl: int
+    region_cache: OrderedDict[tuple, _RegionCacheEntry], key: tuple, ttl: int
 ) -> RegionData | None:
     if ttl <= 0:
         return None
     cached = region_cache.get(key)
     if cached is None:
         return None
-    created, data = cached
+    created, data, _ = cached
     if (time.monotonic() - created) > ttl:
         region_cache.pop(key, None)
         return None
@@ -384,17 +454,28 @@ def _get_cached_region(
 
 
 def _set_cached_region(
-    region_cache: OrderedDict[tuple, tuple[float, RegionData]],
+    region_cache: OrderedDict[tuple, _RegionCacheEntry],
     key: tuple,
     data: RegionData,
     ttl: int,
 ) -> RegionData:
-    if ttl > 0:
-        region_cache[key] = (time.monotonic(), data)
-        region_cache.move_to_end(key)
-        # Bound memory: evict least-recently-used entries beyond the cap.
-        while len(region_cache) > REGION_CACHE_MAX_ENTRIES:
-            region_cache.popitem(last=False)
+    if ttl <= 0:
+        return data
+    size = _approx_region_bytes(data)
+    # One entry may take at most a quarter of the budget; bigger ones are served uncached
+    # rather than evicting most of the cache for a single payload.
+    if size > REGION_CACHE_MAX_BYTES // 4:
+        region_cache.pop(key, None)
+        return data
+    region_cache[key] = (time.monotonic(), data, size)
+    region_cache.move_to_end(key)
+    # Bound memory: evict least-recently-used entries beyond the count cap or byte budget.
+    total = sum(entry[2] for entry in region_cache.values())
+    while region_cache and (
+        len(region_cache) > REGION_CACHE_MAX_ENTRIES or total > REGION_CACHE_MAX_BYTES
+    ):
+        _, evicted = region_cache.popitem(last=False)
+        total -= evicted[2]
     return data
 
 
@@ -649,7 +730,7 @@ async def _fetch_readless_tiled(
     mode: str,
     min_vaf: float | None,
     min_depth: int | None,
-    region_cache: OrderedDict[tuple, tuple[float, RegionData]],
+    region_cache: OrderedDict[tuple, _RegionCacheEntry],
     ttl: int,
 ) -> RegionData:
     """Serve a readless (coverage/variants) query from a per-tile cache.
@@ -949,6 +1030,20 @@ def _format_variant_line(variant: dict[str, Any]) -> str:
     return line
 
 
+def _resolve_reference(args: dict[str, Any], config: BAMCPConfig) -> tuple[str | None, str | None]:
+    """Return ``(explicit_reference, effective_reference)`` for a tool call.
+
+    Validates only a caller-supplied reference — that is the untrusted SSRF vector. A
+    ``config.reference`` default is operator-set (trusted) and may legitimately be absent for BAM
+    inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
+    The explicit value is returned separately because only it may be echoed back to the caller.
+    """
+    explicit_reference = args.get("reference")
+    if explicit_reference:
+        validate_reference_path(explicit_reference, config)
+    return explicit_reference, explicit_reference or config.reference
+
+
 def _resolve_variant_source(variant_source: str, vcf_path: str | None) -> tuple[str | None, bool]:
     """Validate ``variant_source`` and return the effective ``(vcf_path, vcf_primary)``.
 
@@ -983,13 +1078,7 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     validate_path(file_path, config)
     region = args["region"]
     validate_region(region)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
+    _, reference = _resolve_reference(args, config)
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
     min_vaf = args.get("min_vaf", config.min_vaf)
@@ -1040,13 +1129,7 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
     validate_path(file_path, config)
     region = args["region"]
     validate_region(region)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
+    _, reference = _resolve_reference(args, config)
 
     data = await _fetch_region_with_timeout(file_path, region, reference, config, mode="coverage")
 
@@ -1105,13 +1188,7 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
 
     file_path = args["file_path"]
     validate_path(file_path, config)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
+    _, reference = _resolve_reference(args, config)
 
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
@@ -1247,30 +1324,38 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 
 
-@telemetry_wrapper("jump_to")
-async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
-    """Handle jump_to tool call.
+async def _first_contig(file_path: str, reference: str | None, config: BAMCPConfig) -> str:
+    """The BAM/CRAM header's first contig — the default when a caller names none.
 
-    Centers the viewer on a specific genomic position with a configurable window.
+    A hard-coded ``"chr1"`` default breaks on ``1``-style (Ensembl/GRCh37) BAMs, so resolve
+    the default from the file itself.
     """
-    file_path = args["file_path"]
-    validate_path(file_path, config)
-    position = args["position"]
-    contig = args.get("contig", DEFAULT_CONTIG)
-    window = args.get("window", config.default_window)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
+    index_path = await _ensure_cached_index(file_path, config)
+    contigs = await asyncio.wait_for(
+        _run_in_parse_pool(_read_contigs_sync, file_path, reference, index_path),
+        timeout=BAM_PARSE_TIMEOUT_SECONDS,
+    )
+    if not contigs:
+        raise ToolInputError("The alignment file's header lists no contigs.")
+    return str(contigs[0]["name"])
+
+
+async def _viewer_response(
+    args: dict[str, Any],
+    config: BAMCPConfig,
+    file_path: str,
+    region: str,
+    explicit_reference: str | None,
+    reference: str | None,
+    summary_prefix: Callable[[RegionData], str],
+) -> dict:
+    """Fetch a region and build the MCP Apps viewer response (shared by visualize/jump_to).
+
+    The summary text (for LLM context) echoes the applied filters — the LLM reasons over this
+    text, not _meta; the full payload goes only in ``_meta.ui/init``.
+    """
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
-
-    start = max(0, position - window // 2)
-    end = position + window // 2
-    region = f"{contig}:{start}-{end}"
 
     data = await _fetch_region_with_timeout(
         file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
@@ -1294,12 +1379,9 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     if effective_vcf is not None:
         payload["vcf_path"] = effective_vcf
 
-    # Return summary text in content (for LLM context), full data only in _meta.
-    reads_count = len(data.reads)
-    variants_count = len(data.variants)
     summary = (
-        f"Jumped to {data.contig}:{position}: {reads_count} reads, "
-        f"{variants_count} candidate variants (filters: {_format_filters_line(filters)})"
+        f"{summary_prefix(data)}: {len(data.reads)} reads, "
+        f"{len(data.variants)} candidate variants (filters: {_format_filters_line(filters)})"
     )
     return {
         "content": [{"type": "text", "text": summary}],
@@ -1308,6 +1390,37 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
             "ui/init": payload,
         },
     }
+
+
+@telemetry_wrapper("jump_to")
+async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
+    """Handle jump_to tool call.
+
+    Centers the viewer on a specific genomic position with a configurable window. With no
+    ``contig``, the BAM's first contig is used. The constructed region goes through the same
+    ``validate_region`` as visualize_region, so both tools accept exactly the same contigs.
+    """
+    file_path = args["file_path"]
+    validate_path(file_path, config)
+    position = args["position"]
+    window = args.get("window", config.default_window)
+    explicit_reference, reference = _resolve_reference(args, config)
+    contig = args.get("contig") or await _first_contig(file_path, reference, config)
+
+    start = max(0, position - window // 2)
+    end = position + window // 2
+    region = f"{contig}:{start}-{end}"
+    validate_region(region)
+
+    return await _viewer_response(
+        args,
+        config,
+        file_path,
+        region,
+        explicit_reference,
+        reference,
+        lambda data: f"Jumped to {data.contig}:{position}",
+    )
 
 
 @telemetry_wrapper("visualize_region")
@@ -1320,54 +1433,17 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     validate_path(file_path, config)
     region = args["region"]
     validate_region(region)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
-    variant_source = args.get("variant_source", "auto")
-    effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
+    explicit_reference, reference = _resolve_reference(args, config)
 
-    data = await _fetch_region_with_timeout(
-        file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
+    return await _viewer_response(
+        args,
+        config,
+        file_path,
+        region,
+        explicit_reference,
+        reference,
+        lambda data: f"Region {data.contig}:{data.start}-{data.end}",
     )
-    filters = _applied_filters(config, args, include_max_reads=True)
-    payload = serialize_region_data(data)
-    payload["coordinate_system"] = _INTERNAL_COORDINATE_SYSTEM
-    payload["variant_type"] = "candidate"
-    payload["applied_filters"] = filters
-    payload["filter_note"] = _FILTER_ABSENCE_NOTE
-    payload["disclaimer"] = _CANDIDATE_VARIANT_DISCLAIMER
-    payload["file_path"] = file_path  # For client-side re-queries
-    # Preserve the full data-source context so the viewer's pan/zoom/detail refetches carry it.
-    # Without reference, follow-up calls lose mismatch evidence and CRAM decode fails on navigation.
-    # Echo ONLY a caller-supplied reference: a config-default reference is re-applied server-side on
-    # refetch and stays trusted — echoing it would make refetches re-validate the operator default
-    # as caller input and fail when it's outside the caller allow-list.
-    payload["variant_source"] = variant_source
-    if explicit_reference is not None:
-        payload["reference"] = explicit_reference
-    if effective_vcf is not None:
-        payload["vcf_path"] = effective_vcf
-
-    # Return summary text in content (for LLM context), full data only in _meta.
-    # Echo the applied filters here too — the LLM reasons over this text, not _meta.
-    reads_count = len(data.reads)
-    variants_count = len(data.variants)
-    summary = (
-        f"Region {data.contig}:{data.start}-{data.end}: "
-        f"{reads_count} reads, {variants_count} candidate variants "
-        f"(filters: {_format_filters_line(filters)})"
-    )
-    return {
-        "content": [{"type": "text", "text": summary}],
-        "_meta": {
-            "ui/resourceUri": VIEWER_RESOURCE_URI,
-            "ui/init": payload,
-        },
-    }
 
 
 @telemetry_wrapper("get_region_summary")
@@ -1380,13 +1456,7 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     validate_path(file_path, config)
     region = args["region"]
     validate_region(region)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
+    _, reference = _resolve_reference(args, config)
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
@@ -1545,35 +1615,25 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
 
 @telemetry_wrapper("scan_variants")
 async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dict:
-    """Scan an entire contig for variants using fast coverage-based detection."""
+    """Scan an entire contig for variants using fast coverage-based detection.
+
+    Failures (no reference, timeout) raise :class:`ToolInputError` so they reach the client as
+    an MCP error result rather than a successful ``{"error": ...}`` payload. With no
+    ``contig``, the BAM's first contig is scanned.
+    """
     file_path = args["file_path"]
     validate_path(file_path, config)
-    contig = args.get("contig", DEFAULT_CONTIG)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
+    _, reference = _resolve_reference(args, config)
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
 
     if not reference:
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "error": "Reference genome required for variant scanning. "
-                            "Use list_contigs to detect genome build and get a reference URL."
-                        }
-                    ),
-                }
-            ]
-        }
+        raise ToolInputError(
+            "Reference genome required for variant scanning. "
+            "Use list_contigs to detect genome build and get a reference URL."
+        )
 
+    contig = args.get("contig") or await _first_contig(file_path, reference, config)
     index_path = await _ensure_cached_index(file_path, config)
 
     try:
@@ -1593,17 +1653,11 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
             ),
             timeout=SCAN_VARIANTS_TIMEOUT_SECONDS,
         )
-    except asyncio.TimeoutError:
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {"error": f"Scan timed out after {SCAN_VARIANTS_TIMEOUT_SECONDS}s"}
-                    ),
-                }
-            ]
-        }
+    except asyncio.TimeoutError as e:
+        raise ToolInputError(
+            f"Scan of {contig} timed out after {SCAN_VARIANTS_TIMEOUT_SECONDS:g}s; "
+            "use get_variants on a narrower region."
+        ) from e
 
     return {
         "content": [
@@ -1624,3 +1678,23 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
             }
         ]
     }
+
+
+@telemetry_wrapper("cleanup_cache")
+async def handle_cleanup_cache(args: dict[str, Any], config: BAMCPConfig) -> dict:
+    """Clear downloaded index files and the region cache — single-client (stdio) servers only.
+
+    One server holds ONE cache shared by every connected client, so on an HTTP transport any
+    caller could wipe everyone's cache (and race in-flight index downloads). There, the cache is
+    managed by its TTL and this is a no-op that says so. The shared HTTP clients are never
+    closed by this tool (see :meth:`BAMCPServices.clear_caches`).
+    """
+    if config.transport != "stdio":
+        text = (
+            "Cache cleanup is disabled on shared (HTTP) servers: the cache is shared by all "
+            f"clients and expires automatically after {config.cache_ttl}s."
+        )
+    else:
+        removed = get_services(config).clear_caches()
+        text = f"Removed {removed} cached index files and cleared the region cache."
+    return {"content": [{"type": "text", "text": text}]}

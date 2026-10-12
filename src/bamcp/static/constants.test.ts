@@ -6,6 +6,7 @@ import {
   escapeHtml,
   EXPECTED_SCHEMA_VERSION,
   formatRulerLabel,
+  maxOf,
   toRegionString,
 } from "./constants";
 
@@ -131,5 +132,26 @@ describe("baseColor — nucleotide lookup that ignores prototype members", () =>
   it("falls back for unknown or prototype-named keys", () => {
     expect(baseColor("constructor", "#000")).toBe("#000");
     expect(baseColor("<x>", "#111")).toBe("#111");
+  });
+});
+
+describe("maxOf — max without argument spreading", () => {
+  it("finds the maximum and honors the floor", () => {
+    expect(maxOf([3, 9, 2])).toBe(9);
+    expect(maxOf([0, 0], 1)).toBe(1);
+    expect(maxOf([], 1)).toBe(1);
+    expect(maxOf(null, 1)).toBe(1);
+  });
+
+  it("ignores NaN entries", () => {
+    expect(maxOf([1, NaN, 4])).toBe(4);
+  });
+
+  it("handles arrays far past the spread-argument limit (1 Mb region)", () => {
+    const big = new Array<number>(1_000_000).fill(5);
+    big[777_777] = 123;
+    // The old Math.max(...big) throws RangeError here.
+    expect(() => Math.max(...big)).toThrow(RangeError);
+    expect(maxOf(big, 1)).toBe(123);
   });
 });

@@ -181,3 +181,19 @@ export function toRegionString(contig: string, start0: number, end0: number): st
 export function baseColor(base: string, fallback: string): string {
     return Object.prototype.hasOwnProperty.call(BASE_COLORS, base) ? BASE_COLORS[base] : fallback;
 }
+
+/**
+ * Largest value in `values`, or `floor` if none is larger (NaN entries are ignored).
+ * A loop, not `Math.max(...values)`: spreading passes every element as a call
+ * argument, which throws RangeError once an array outgrows the engine's argument
+ * limit (~125k in V8) — i.e. any coverage array for a region over ~125 kb.
+ */
+export function maxOf(values: ArrayLike<number> | null | undefined, floor = -Infinity): number {
+    let max = floor;
+    if (!values) return max;
+    for (let i = 0; i < values.length; i++) {
+        const v = values[i];
+        if (v > max) max = v;
+    }
+    return max;
+}

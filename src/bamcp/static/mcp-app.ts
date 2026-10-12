@@ -16,6 +16,7 @@ import {
     baseColor,
     displayPos,
     escapeHtml,
+    maxOf,
     svColor,
     svTypeLabel,
     toRegionString,
@@ -1142,7 +1143,7 @@ class BAMCPViewer {
             return;
         }
 
-        const maxValue = Math.max(...data, 1);
+        const maxValue = maxOf(data, 1);
         const barWidth = (width - 20) / data.length;
         const barGap = 2;
 

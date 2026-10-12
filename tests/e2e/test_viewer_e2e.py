@@ -3235,3 +3235,30 @@ class TestHtmlEscaping:
         )
         assert result["imgs"] == 0, result
         assert XSS_PAYLOAD in result["listText"]
+
+
+class TestLargeRegion:
+    """Regions past ~125 kb used to render blank: Math.max(...coverage) threw RangeError."""
+
+    @pytest.mark.e2e
+    def test_coverage_renders_for_one_megabase_region(self, viewer_page: Page):
+        errors: list[str] = []
+        viewer_page.on("pageerror", lambda e: errors.append(str(e)))
+        result = viewer_page.evaluate(
+            """() => {
+                const n = 1_000_000;
+                const coverage = new Array(n).fill(30);
+                for (let i = 0; i < 1000; i++) coverage[500_000 + i] = 0;
+                viewer.state.loadData({
+                    contig: 'chr1', start: 0, end: n, reads: [], variants: [], coverage,
+                });
+                viewer.renderer.resize();
+                const c = document.getElementById('coverage-canvas');
+                const px = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+                let opaque = 0;
+                for (let i = 3; i < px.length; i += 4) if (px[i] > 0) opaque++;
+                return opaque;
+            }"""
+        )
+        assert not errors, errors
+        assert result > 1000, f"coverage track should be drawn, got {result} opaque px"

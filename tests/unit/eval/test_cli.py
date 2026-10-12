@@ -75,7 +75,9 @@ def test_run_returns_zero_when_all_cached(tmp_path: Path, capsys):
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     # Seed a passing prior result so --cache filters everything.
-    (out_dir / "results.json").write_text(json.dumps([{"case_name": "c1", "passed": True}]))
+    (out_dir / "results.json").write_text(
+        json.dumps([{"case_name": "c1", "passed": True, "provider": "mock", "model": "mock"}])
+    )
     cfg = parse_args(
         [
             "--test-cases",
@@ -141,14 +143,19 @@ def test_build_router_mcp_stdio_not_implemented():
 def test_filter_cached_drops_passing_cases(tmp_path: Path):
     results_path = tmp_path / "results.json"
     results_path.write_text(
-        json.dumps([{"case_name": "a", "passed": True}, {"case_name": "b", "passed": False}])
+        json.dumps(
+            [
+                {"case_name": "a", "passed": True, "provider": "p", "model": "m"},
+                {"case_name": "b", "passed": False, "provider": "p", "model": "m"},
+            ]
+        )
     )
     cases = [
         EvalCase(name="a", input="q", expected="e"),
         EvalCase(name="b", input="q", expected="e"),
         EvalCase(name="c", input="q", expected="e"),
     ]
-    out = _filter_cached(results_path, cases)
+    out = _filter_cached(results_path, cases, "p", "m")
     names = [c.name for c in out]
     assert "a" not in names  # was passing
     assert "b" in names  # was failing — rerun
@@ -177,3 +184,83 @@ def test_build_judge_refuses_self_grading():
     )
     with pytest.raises(ValueError):
         _build_judge(cfg)
+
+
+@pytest.mark.unit
+def test_filter_cached_ignores_passes_from_another_model(tmp_path: Path):
+    results_path = tmp_path / "results.json"
+    results_path.write_text(
+        json.dumps(
+            [
+                {"case_name": "a", "passed": True, "provider": "p", "model": "other"},
+                {"case_name": "b", "passed": True},  # legacy row: no provider/model
+            ]
+        )
+    )
+    cases = [
+        EvalCase(name="a", input="q", expected="e"),
+        EvalCase(name="b", input="q", expected="e"),
+    ]
+    assert [c.name for c in _filter_cached(results_path, cases, "p", "m")] == ["a", "b"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("subset", ["5-9", "3-2"])
+def test_empty_or_out_of_range_subset_fails(tmp_path: Path, capsys, subset):
+    cases_file = tmp_path / "cases.yaml"
+    cases_file.write_text("- case:\n    name: c1\n    input: q\n    expected: a\n")
+    cfg = parse_args(
+        [
+            "--test-cases",
+            str(cases_file),
+            "--output-dir",
+            str(tmp_path / "o"),
+            "--provider",
+            "mock",
+            "--subset",
+            subset,
+        ]
+    )
+    assert asyncio.run(_run(cfg)) == 2
+    assert "No cases selected" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_empty_case_file_fails(tmp_path: Path):
+    cases_file = tmp_path / "cases.yaml"
+    cases_file.write_text("[]\n")
+    cfg = parse_args(["--test-cases", str(cases_file), "--provider", "mock"])
+    assert asyncio.run(_run(cfg)) == 2
+
+
+@pytest.mark.unit
+def test_run_exit_code_ignores_skipped_but_requires_a_graded_case(tmp_path: Path, monkeypatch):
+    import bamcp.eval.cli as cli
+    from bamcp.eval.schema import EvalResult, GraderVerdict
+
+    def _res(name, passed, skipped=False):
+        return EvalResult(
+            case_name=name,
+            category="c",
+            rendering_mode=None,
+            response_text="",
+            tool_calls=[],
+            duration_ms=0.0,
+            verdict=GraderVerdict(passed=passed, rationale="", deterministic=True),
+            skipped=skipped,
+        )
+
+    cases_file = tmp_path / "cases.yaml"
+    cases_file.write_text("- case:\n    name: c1\n    input: q\n    expected: a\n")
+    cfg = parse_args(
+        ["--test-cases", str(cases_file), "--output-dir", str(tmp_path / "o"), "--provider", "mock"]
+    )
+
+    async def fake_run_cases(**kwargs):
+        return outcome
+
+    monkeypatch.setattr(cli, "run_cases", fake_run_cases)
+    outcome = [_res("a", True), _res("v", False, skipped=True)]
+    assert asyncio.run(_run(cfg)) == 0
+    outcome = [_res("v", False, skipped=True)]
+    assert asyncio.run(_run(cfg)) == 1

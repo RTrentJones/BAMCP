@@ -22,7 +22,12 @@ def write_reports(
 ) -> dict[str, Path]:
     """Write all report artifacts. Returns a dict of name -> file path."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    serialized = [_serialize_result(r) for r in results]
+    # Each row carries the provider/model that produced it, so --cache only reuses a
+    # pass recorded by the same configuration.
+    serialized = [
+        {**_serialize_result(r), "provider": config.provider, "model": config.model}
+        for r in results
+    ]
 
     paths: dict[str, Path] = {}
 
@@ -95,11 +100,9 @@ def _dump_yaml(obj: object) -> str:
 
 def _render_html(results: list[EvalResult], config: RunConfig, output_dir: Path) -> str:
     rows: list[str] = []
-    pass_count = sum(1 for r in results if r.verdict.passed)
+    pass_count, total, rate = pass_rate(results)
     skipped = sum(1 for r in results if r.skipped)
     vision_used = sum(1 for r in results if r.vision_used)
-    total = len(results)
-    rate = (pass_count / total * 100.0) if total else 0.0
 
     for r in results:
         verdict_class = "skipped" if r.skipped else ("pass" if r.verdict.passed else "fail")
@@ -234,9 +237,18 @@ def _h(s: object) -> str:
     )
 
 
+def pass_rate(results: list[EvalResult]) -> tuple[int, int, float]:
+    """(passed, graded, percent) over graded cases — skipped cases are excluded from the
+    denominator, the same rule as ``compare.aggregate``."""
+    graded = [r for r in results if not r.skipped]
+    passed = sum(1 for r in graded if r.verdict.passed)
+    total = len(graded)
+    return passed, total, (passed / total * 100.0) if total else 0.0
+
+
 def write_summary_line(results: list[EvalResult]) -> str:
     """One-line summary printed to stdout at the end of a run."""
-    pass_count = sum(1 for r in results if r.verdict.passed)
-    total = len(results)
-    rate = (pass_count / total * 100.0) if total else 0.0
-    return f"Eval: {pass_count}/{total} passed ({rate:.1f}%)"
+    pass_count, total, rate = pass_rate(results)
+    skipped = sum(1 for r in results if r.skipped)
+    line = f"Eval: {pass_count}/{total} passed ({rate:.1f}%)"
+    return line + (f", {skipped} skipped" if skipped else "")

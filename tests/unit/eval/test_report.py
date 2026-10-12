@@ -75,3 +75,19 @@ def test_html_report_escapes_user_strings(tmp_path: Path):
     html = paths["html"].read_text()
     assert "<script>" not in html
     assert "&lt;script&gt;" in html
+
+
+@pytest.mark.unit
+def test_skipped_cases_excluded_from_pass_rate(tmp_path: Path):
+    # Same rule as compare.aggregate: skipped cases are not in the denominator.
+    skipped = _make_result("v", False)
+    skipped.skipped = True
+    results = [_make_result("a", True), _make_result("b", False), skipped]
+    assert write_summary_line(results) == "Eval: 1/2 passed (50.0%), 1 skipped"
+    cfg = RunConfig(
+        test_cases_path=tmp_path / "c.yaml", output_dir=tmp_path, provider="p", model="m"
+    )
+    paths = write_reports(results, cfg, tmp_path)
+    assert "1/2 passed (50.0%)" in paths["html"].read_text()
+    rows = json.loads(paths["json"].read_text())
+    assert {(r["provider"], r["model"]) for r in rows} == {("p", "m")}

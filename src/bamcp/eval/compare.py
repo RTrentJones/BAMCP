@@ -360,6 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     """CLI: run a model comparison + tool ablation and write the results table."""
     import argparse
     import asyncio
+    import sys
 
     p = argparse.ArgumentParser(
         prog="bamcp-eval-compare",
@@ -393,7 +394,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.subset:
         lo, hi = args.subset.split("-")
         subset = (int(lo), int(hi))
-    cases = apply_subset(load_cases(args.test_cases), subset)
+    all_cases = load_cases(args.test_cases)
+    cases = apply_subset(all_cases, subset)
+    if not cases:
+        print(f"No cases selected (subset {subset} of {len(all_cases)}).", file=sys.stderr)
+        return 2
 
     specs = _default_specs(args.provider, args.models)
     output_dir = Path(args.output_dir)

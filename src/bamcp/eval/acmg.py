@@ -395,8 +395,9 @@ async def run_acmg(
             f"Call classify_variant, apply the ACMG scaffold, and end with a line "
             f"'final_classification: <one of {', '.join(SEVERITY_ORDER)}>'."
         )
-        final_text, _, _ = await _run_tool_loop(provider, router, tools, prompt)
-        predicted = extract_classification(final_text)
+        final_text, _, _, completed = await _run_tool_loop(provider, router, tools, prompt)
+        # A model still calling tools at the turn limit gave no final answer.
+        predicted = extract_classification(final_text) if completed else None
         scored.append((case, score_classification(predicted, case.expected_classification)))
 
     report = build_report(scored)

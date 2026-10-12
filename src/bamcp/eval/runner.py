@@ -103,22 +103,26 @@ async def _run_tool_loop(
     initial_user: str,
     *,
     vision_ctx: _VisionContext | None = None,
-) -> tuple[str, list[tuple[str, str]], list[str]]:
+) -> tuple[str, list[tuple[str, str]], list[str], bool]:
     """Drive a single conversation through up to MAX_TURNS rounds.
 
-    Returns ``(final_text, tool_results, screenshots)`` where ``tool_results``
-    is the list of ``(tool_name, response_text)`` tuples in call order and
-    ``screenshots`` is the list of paths written when vision was active.
+    Returns ``(final_text, tool_results, screenshots, completed)`` where
+    ``tool_results`` is the list of ``(tool_name, response_text)`` tuples in call
+    order, ``screenshots`` is the list of paths written when vision was active, and
+    ``completed`` is False when the model was still calling tools at MAX_TURNS
+    (its last text is then mid-conversation, not a final answer).
     """
     messages: list[dict[str, Any]] = [{"role": "user", "content": initial_user}]
     tool_results: list[tuple[str, str]] = []
     screenshots: list[str] = []
     final_text = ""
+    completed = False
 
     for _ in range(MAX_TURNS):
         resp = await provider.chat_with_tools(messages=messages, tools=tools)
         final_text = resp.text
         if not resp.tool_calls:
+            completed = True
             break
         # Append the assistant turn carrying the tool_use blocks.
         messages.append(
@@ -155,7 +159,15 @@ async def _run_tool_loop(
             )
         messages.append({"role": "user", "content": user_content})
 
-    return final_text, tool_results, screenshots
+    return final_text, tool_results, screenshots, completed
+
+
+def _call_ok(event: dict[str, Any]) -> bool:
+    """Whether a telemetry event records a successful tool call."""
+    if not event.get("ok", False):
+        return False
+    summary = event.get("result_summary")
+    return not (isinstance(summary, dict) and summary.get("error"))
 
 
 def _assistant_content_blocks(text: str, tool_calls: list[ToolCall]) -> list[dict[str, Any]]:
@@ -242,6 +254,7 @@ async def run_case(
     final_text = ""
     tool_results: list[tuple[str, str]] = []
     screenshots: list[str] = []
+    completed = False
     try:
         tools = tool_descriptors(router)
         user_message = _format_user_message(case, rendering_mode)
@@ -250,11 +263,11 @@ async def run_case(
             shot_dir = (screenshot_dir or output_dir / "screenshots").resolve()
             async with renderer:
                 vision_ctx = _VisionContext(renderer, shot_dir, case_slug, rendering_mode or "")
-                final_text, tool_results, screenshots = await _run_tool_loop(
+                final_text, tool_results, screenshots, completed = await _run_tool_loop(
                     provider, router, tools, user_message, vision_ctx=vision_ctx
                 )
         else:
-            final_text, tool_results, screenshots = await _run_tool_loop(
+            final_text, tool_results, screenshots, completed = await _run_tool_loop(
                 provider, router, tools, user_message
             )
     except Exception as e:  # noqa: BLE001 — capture and surface to caller
@@ -267,9 +280,25 @@ async def run_case(
     captured_tools: list[str] = [
         str(e["tool_name"]) for e in events if isinstance(e.get("tool_name"), str)
     ]
+    # Tool-selection credit only for calls that succeeded: a call that raised, or
+    # returned an {"error": ...} payload, did not deliver what tools_expected asks for.
+    successful_tools = [
+        str(e["tool_name"]) for e in events if isinstance(e.get("tool_name"), str) and _call_ok(e)
+    ]
     rubric_payloads = collect_rubric_payloads(tool_results)
 
-    verdict = grade_case(case, final_text, captured_tools, rubric_payloads, grade_tools=grade_tools)
+    if error is None and not completed:
+        error = f"turn limit reached: still calling tools after {MAX_TURNS} turns"
+
+    verdict: GraderVerdict | None
+    if error is not None:
+        # A run that crashed or never produced a final answer is a failure, whatever
+        # a partial transcript would grade as.
+        verdict = GraderVerdict(passed=False, rationale=f"run failed: {error}", deterministic=True)
+    else:
+        verdict = grade_case(
+            case, final_text, successful_tools, rubric_payloads, grade_tools=grade_tools
+        )
     if verdict is None:
         if judge is None:
             verdict = GraderVerdict(

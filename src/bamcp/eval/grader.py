@@ -13,8 +13,9 @@ Two-tier:
    surfaced on the verdict.
 
 2. LLM judge: free-form ``expected`` strings are compared against the assistant response via a
-   small judge prompt. The judge model defaults to the same provider/model running the eval;
-   users can override it.
+   small judge prompt. The judge is a FIXED model separate from the model under test
+   (``providers.DEFAULT_JUDGE_*``, temperature 0), so a model never grades its own answers;
+   users can override it but not set it to the subject.
 """
 
 from __future__ import annotations
@@ -36,6 +37,11 @@ _JUDGE_PROMPT = (
     "or\n"
     "VERDICT: FAIL — <one-sentence rationale>\n"
 )
+
+# Tolerant of markdown decoration and placement: "**VERDICT: PASS**", "Verdict - fail",
+# "## VERDICT: PASS — ...". The last verdict in the reply wins (a judge that reasons first
+# states its verdict last).
+_VERDICT_PATTERN = re.compile(r"\bVERDICT\b[\s*_`#:=\-—]*\b(PASS|FAIL)\b", re.IGNORECASE)
 
 _SCORE_THRESHOLD_PATTERN = re.compile(r"score_at_least:\s*(\w+)\s*=\s*([0-9]*\.?[0-9]+)")
 
@@ -177,14 +183,26 @@ async def judge_with_llm(
         tools=[],
     )
     text = (resp.text or "").strip()
-    verdict_line = text.splitlines()[0] if text else ""
-    passed = verdict_line.upper().startswith("VERDICT: PASS")
+    passed, rationale = parse_verdict(text)
     return GraderVerdict(
         passed=passed,
-        rationale=verdict_line or "(no judge output)",
+        rationale=rationale,
         deterministic=False,
         score=1.0 if passed else 0.0,
     )
+
+
+def parse_verdict(text: str) -> tuple[bool, str]:
+    """Parse a judge reply into (passed, rationale). No recognizable verdict -> fail."""
+    matches = list(_VERDICT_PATTERN.finditer(text or ""))
+    if not matches:
+        first = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
+        return False, f"unparseable judge output: {first}" if first else "(no judge output)"
+    m = matches[-1]
+    line_start = text.rfind("\n", 0, m.start()) + 1
+    line_end = text.find("\n", m.end())
+    line = text[line_start : line_end if line_end != -1 else len(text)].strip()
+    return m.group(1).upper() == "PASS", line
 
 
 def collect_rubric_payloads(tool_results: Iterable[tuple[str, str]]) -> list[dict]:

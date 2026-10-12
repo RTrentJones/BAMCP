@@ -109,7 +109,15 @@ captures tool-call telemetry, and grades two ways:
 - **Deterministic** when a case declares `tools_expected` or inline rubric
   thresholds (`score_at_least: depth_quality=0.5`).
 - **LLM judge** for free-form `expected` criteria, falling back to a small
-  judge prompt.
+  judge prompt. The judge is **fixed and separate from the model under test**
+  (default `anthropic` / `claude-haiku-4-5`, override with `--judge-provider` /
+  `--judge-model`; a judge equal to the subject is refused) and runs at
+  **temperature 0**, so every configuration is graded by the same deterministic
+  judge. Verdict parsing tolerates markdown (`**VERDICT: PASS**`); no
+  recognizable verdict is a fail.
+- **Tool-use ablation** (`bamcp.eval.compare`) grades both arms on answer
+  correctness only — the tools-off arm cannot call tools, so grading it on
+  `tools_expected` would fail it by construction.
 
 Cases live in `tests/eval/test_cases.yaml` (text) and
 `tests/eval/vision_cases.yaml` (vision-required). The harness is

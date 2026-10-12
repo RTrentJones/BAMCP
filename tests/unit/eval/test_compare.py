@@ -208,3 +208,20 @@ async def test_ablation_grades_no_tools_arm_on_answer_only(tmp_path, monkeypatch
     )
     report = await run_comparison([spec], [case], tmp_path)
     assert report.specs[0].passed == 1
+
+
+async def test_run_comparison_refuses_self_judging_before_running(tmp_path):
+    specs = [RunSpec("a", "anthropic", "claude-x", tools=True)]
+    with pytest.raises(ValueError, match="model under test"):
+        await run_comparison(specs, [], tmp_path, judge_model="claude-x")
+
+
+def test_build_judge_is_shared_and_separate():
+    pytest.importorskip("anthropic")
+    from bamcp.eval.compare import build_judge
+    from bamcp.eval.providers import DEFAULT_JUDGE_MODEL
+
+    assert build_judge(RunSpec("m", "mock", "m")) is None
+    j1 = build_judge(RunSpec("a", "anthropic", "claude-opus-4-8"))
+    j2 = build_judge(RunSpec("b", "anthropic", "claude-sonnet-4-5"))
+    assert j1.model == j2.model == DEFAULT_JUDGE_MODEL

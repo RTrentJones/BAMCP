@@ -102,6 +102,7 @@ class RunConfig:
     output_dir: Path
     provider: str = "anthropic"
     model: str = "claude-opus-4-7"
+    judge_provider: str | None = None
     judge_model: str | None = None
     cache: bool = False
     subset: tuple[int, int] | None = None  # 1-indexed inclusive range

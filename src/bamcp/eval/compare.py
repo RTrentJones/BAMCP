@@ -30,12 +30,16 @@ from pathlib import Path
 from typing import Any
 
 from .providers import (
+    DEFAULT_JUDGE_MODEL,
+    DEFAULT_JUDGE_PROVIDER,
     LLMProvider,
     MockProvider,
     ProviderResponse,
     ToolCall,
     ToolDescriptor,
+    build_judge_provider,
     get_provider,
+    resolve_judge,
 )
 from .router import InProcessRouter, RouterResult, ToolRouter
 from .runner import run_cases
@@ -292,10 +296,16 @@ def build_provider(spec: RunSpec) -> LLMProvider:
     return get_provider(spec.provider, spec.model)
 
 
-def build_judge(spec: RunSpec) -> LLMProvider | None:
-    if spec.provider == "mock":
-        return None
-    return get_provider(spec.provider, spec.model)
+def build_judge(
+    spec: RunSpec, judge_provider: str | None = None, judge_model: str | None = None
+) -> LLMProvider | None:
+    """The fixed, separate judge for ``spec`` (None for offline mock runs).
+
+    Every spec is graded by the SAME judge so configurations are comparable, and never
+    by the model under test (see ``providers.resolve_judge``).
+    """
+    resolved = resolve_judge(spec.provider, spec.model, judge_provider, judge_model)
+    return build_judge_provider(*resolved) if resolved else None
 
 
 def build_router(spec: RunSpec) -> ToolRouter:
@@ -309,15 +319,20 @@ async def run_comparison(
     specs: list[RunSpec],
     cases: list[EvalCase],
     output_dir: Path,
+    *,
+    judge_provider: str | None = None,
+    judge_model: str | None = None,
 ) -> ComparisonReport:
     """Run every spec over the shared case set and aggregate the outcomes."""
+    # Resolve every judge up front so a self-grading config fails before any spend.
+    judges = [build_judge(spec, judge_provider, judge_model) for spec in specs]
     spec_results: list[SpecResult] = []
-    for spec in specs:
+    for spec, judge in zip(specs, judges, strict=True):
         results = await run_cases(
             cases=cases,
             provider=build_provider(spec),
             router=build_router(spec),
-            judge=build_judge(spec),
+            judge=judge,
             output_dir=output_dir / spec.slug,
             no_vision=True,
             # Both arms are graded on the answer only. Tool selection would auto-fail
@@ -361,6 +376,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--output-dir", default=".eval-results/comparison")
     p.add_argument("--subset", help="1-indexed inclusive range, e.g. 1-5")
     p.add_argument("--results-md", default=None, help="Write the Markdown table here.")
+    p.add_argument(
+        "--judge-provider",
+        default=None,
+        choices=["anthropic", "openai"],
+        help=f"Fixed LLM judge provider for every spec (default: {DEFAULT_JUDGE_PROVIDER}).",
+    )
+    p.add_argument(
+        "--judge-model",
+        default=None,
+        help=f"Fixed LLM judge model, temperature 0 (default: {DEFAULT_JUDGE_MODEL}).",
+    )
     args = p.parse_args(argv)
 
     subset = None
@@ -371,7 +397,15 @@ def main(argv: list[str] | None = None) -> int:
 
     specs = _default_specs(args.provider, args.models)
     output_dir = Path(args.output_dir)
-    report = asyncio.run(run_comparison(specs, cases, output_dir))
+    report = asyncio.run(
+        run_comparison(
+            specs,
+            cases,
+            output_dir,
+            judge_provider=args.judge_provider,
+            judge_model=args.judge_model,
+        )
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "comparison.json").write_text(

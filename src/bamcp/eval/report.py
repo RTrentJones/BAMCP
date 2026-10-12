@@ -70,6 +70,7 @@ def _config_to_dict(config: RunConfig) -> dict:
     return {
         "provider": config.provider,
         "model": config.model,
+        "judge_provider": config.judge_provider,
         "judge_model": config.judge_model,
         "cache": config.cache,
         "subset": list(config.subset) if config.subset else None,

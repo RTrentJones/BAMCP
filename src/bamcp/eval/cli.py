@@ -13,7 +13,15 @@ import json
 import sys
 from pathlib import Path
 
-from .providers import LLMProvider, default_model, get_provider
+from .providers import (
+    DEFAULT_JUDGE_MODEL,
+    DEFAULT_JUDGE_PROVIDER,
+    LLMProvider,
+    build_judge_provider,
+    default_model,
+    get_provider,
+    resolve_judge,
+)
 from .report import write_reports, write_summary_line
 from .router import InProcessRouter, ToolRouter
 from .runner import run_cases
@@ -51,9 +59,18 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
         "(so --provider openai does not inherit an Anthropic model id).",
     )
     p.add_argument(
+        "--judge-provider",
+        default=None,
+        choices=["anthropic", "openai"],
+        help=f"Provider for the LLM judge (default: {DEFAULT_JUDGE_PROVIDER}).",
+    )
+    p.add_argument(
         "--judge-model",
         default=None,
-        help="Override model for the LLM judge (defaults to the same model).",
+        help=(
+            f"Model for the LLM judge (default: {DEFAULT_JUDGE_MODEL}). The judge is fixed, "
+            "runs at temperature 0, and must differ from the model under test."
+        ),
     )
     p.add_argument(
         "--cache",
@@ -119,6 +136,7 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
         # Resolve --model to the provider's actual default when omitted, so run_config.yaml and
         # the HTML report record the model that was really used (not `null`).
         model=args.model or default_model(args.provider),
+        judge_provider=args.judge_provider,
         judge_model=args.judge_model,
         cache=args.cache,
         subset=subset,
@@ -154,10 +172,14 @@ def _build_router(config: RunConfig) -> ToolRouter:
 
 
 def _build_judge(config: RunConfig) -> LLMProvider | None:
-    if config.provider == "mock":
+    resolved = resolve_judge(
+        config.provider, config.model, config.judge_provider, config.judge_model
+    )
+    if resolved is None:
         return None  # No judge in fully-offline runs.
-    model = config.judge_model or config.model
-    return get_provider(config.provider, model)
+    # Record what actually graded the run (run_config.yaml / the HTML report).
+    config.judge_provider, config.judge_model = resolved
+    return build_judge_provider(*resolved)
 
 
 async def _run(config: RunConfig) -> int:

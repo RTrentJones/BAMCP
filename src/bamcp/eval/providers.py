@@ -135,6 +135,44 @@ DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 
 
+# The LLM judge is FIXED and SEPARATE from the model under test: a model grading its own
+# answers inflates its score, and a judge that changes with the subject makes runs
+# incomparable. Default: Anthropic claude-haiku-4-5 (no eval subject in this repo uses it),
+# at temperature 0. Override with --judge-provider / --judge-model; a judge identical to
+# the model under test is refused (see resolve_judge).
+DEFAULT_JUDGE_PROVIDER = "anthropic"
+DEFAULT_JUDGE_MODEL = "claude-haiku-4-5"
+JUDGE_TEMPERATURE = 0.0
+
+
+def resolve_judge(
+    subject_provider: str,
+    subject_model: str | None,
+    judge_provider: str | None = None,
+    judge_model: str | None = None,
+) -> tuple[str, str] | None:
+    """Return the (provider, model) of the judge, or None for fully offline mock runs.
+
+    Raises ValueError when the judge would be the model under test (self-grading).
+    """
+    if subject_provider == "mock" and judge_provider in (None, "mock"):
+        return None
+    jp = judge_provider or DEFAULT_JUDGE_PROVIDER
+    jm = judge_model or (DEFAULT_JUDGE_MODEL if jp == DEFAULT_JUDGE_PROVIDER else default_model(jp))
+    subject = (subject_provider, subject_model or default_model(subject_provider))
+    if (jp, jm) == subject:
+        raise ValueError(
+            f"LLM judge {jp}/{jm} is the model under test; pick a separate judge "
+            "with --judge-provider/--judge-model"
+        )
+    return jp, jm
+
+
+def build_judge_provider(provider: str, model: str) -> LLMProvider:
+    """Construct the judge: the given provider/model at temperature 0 (deterministic)."""
+    return get_provider(provider, model, temperature=JUDGE_TEMPERATURE)
+
+
 def default_model(provider: str) -> str:
     """The model id a provider uses when none is given — recorded so runs stay reproducible."""
     return {
@@ -151,7 +189,12 @@ class AnthropicProvider:
     # All current claude-opus-4-* and claude-sonnet-4-* models accept vision.
     vision_capable: bool = True
 
-    def __init__(self, model: str = DEFAULT_ANTHROPIC_MODEL, max_tokens: int = 4096) -> None:
+    def __init__(
+        self,
+        model: str = DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: int = 4096,
+        temperature: float | None = None,
+    ) -> None:
         try:
             import anthropic  # noqa: F401
         except ImportError as e:  # pragma: no cover — install hint
@@ -160,6 +203,7 @@ class AnthropicProvider:
             ) from e
         self.model = model
         self.max_tokens = max_tokens
+        self.temperature = temperature
 
     async def chat_with_tools(
         self,
@@ -173,11 +217,15 @@ class AnthropicProvider:
             {"name": t.name, "description": t.description, "input_schema": t.input_schema}
             for t in tools
         ]
+        extra: dict[str, Any] = {}
+        if self.temperature is not None:
+            extra["temperature"] = self.temperature
         resp = await client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
             messages=messages,  # type: ignore[arg-type]
             tools=tool_specs,  # type: ignore[arg-type]
+            **extra,
         )
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
@@ -203,7 +251,12 @@ class OpenAIProvider:
     # gpt-4o family accepts image content blocks.
     vision_capable: bool = True
 
-    def __init__(self, model: str = DEFAULT_OPENAI_MODEL, max_tokens: int = 4096) -> None:
+    def __init__(
+        self,
+        model: str = DEFAULT_OPENAI_MODEL,
+        max_tokens: int = 4096,
+        temperature: float | None = None,
+    ) -> None:
         try:
             import openai  # noqa: F401
         except ImportError as e:  # pragma: no cover — install hint
@@ -212,6 +265,7 @@ class OpenAIProvider:
             ) from e
         self.model = model
         self.max_tokens = max_tokens
+        self.temperature = temperature
 
     async def chat_with_tools(
         self,
@@ -232,11 +286,16 @@ class OpenAIProvider:
             }
             for t in tools
         ]
+        extra: dict[str, Any] = {}
+        if self.temperature is not None:
+            extra["temperature"] = self.temperature
+        if tool_specs:
+            extra["tools"] = tool_specs
         resp = await client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
             messages=messages,  # type: ignore[arg-type]
-            tools=tool_specs,  # type: ignore[arg-type]
+            **extra,
         )
         choice = resp.choices[0].message
         tool_calls: list[ToolCall] = []
@@ -254,7 +313,9 @@ class OpenAIProvider:
         return ProviderResponse(text=choice.content or "", tool_calls=tool_calls)
 
 
-def get_provider(name: str, model: str | None = None) -> LLMProvider:
+def get_provider(
+    name: str, model: str | None = None, *, temperature: float | None = None
+) -> LLMProvider:
     """Factory: resolve a provider name + model to an LLMProvider instance.
 
     ``model`` may be ``None`` — each provider then uses its own default, so a caller that
@@ -264,9 +325,9 @@ def get_provider(name: str, model: str | None = None) -> LLMProvider:
     if name == "mock":
         return make_one_shot_mock(text="[mock response]")
     if name == "anthropic":
-        return AnthropicProvider(model=model) if model else AnthropicProvider()
+        return AnthropicProvider(model=model or DEFAULT_ANTHROPIC_MODEL, temperature=temperature)
     if name == "openai":
-        return OpenAIProvider(model=model) if model else OpenAIProvider()
+        return OpenAIProvider(model=model or DEFAULT_OPENAI_MODEL, temperature=temperature)
     raise ValueError(f"Unknown provider {name!r}. Supported: anthropic, openai, mock.")
 
 

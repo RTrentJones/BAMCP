@@ -153,3 +153,27 @@ def test_filter_cached_drops_passing_cases(tmp_path: Path):
     assert "a" not in names  # was passing
     assert "b" in names  # was failing — rerun
     assert "c" in names  # not yet run
+
+
+@pytest.mark.unit
+def test_build_judge_defaults_to_fixed_judge_not_subject():
+    from bamcp.eval.cli import _build_judge
+    from bamcp.eval.providers import DEFAULT_JUDGE_MODEL
+
+    cfg = parse_args(["--provider", "anthropic", "--model", "claude-x"])
+    judge = _build_judge(cfg)
+    assert judge is not None
+    assert judge.model == DEFAULT_JUDGE_MODEL != "claude-x"
+    assert judge.temperature == 0.0
+    assert cfg.judge_model == DEFAULT_JUDGE_MODEL  # recorded for the run report
+
+
+@pytest.mark.unit
+def test_build_judge_refuses_self_grading():
+    from bamcp.eval.cli import _build_judge
+
+    cfg = parse_args(
+        ["--provider", "anthropic", "--model", "claude-x", "--judge-model", "claude-x"]
+    )
+    with pytest.raises(ValueError):
+        _build_judge(cfg)

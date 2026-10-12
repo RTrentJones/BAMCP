@@ -32,9 +32,10 @@ MISS = _Miss()
 
 
 class BoundedTTLCache(Generic[T]):
-    """Thread-safe bounded cache with TTL eviction.
+    """Bounded LRU cache with TTL eviction, safe for concurrent asyncio tasks.
 
-    Implements LRU eviction when maxsize is exceeded and TTL-based expiry.
+    Implements LRU eviction when maxsize is exceeded and TTL-based expiry. Guarded by an
+    ``asyncio.Lock``: safe across coroutines on ONE event loop, NOT across threads.
     """
 
     def __init__(self, maxsize: int = API_CACHE_MAX_SIZE, ttl: float = API_CACHE_TTL_SECONDS):

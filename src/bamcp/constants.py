@@ -43,6 +43,10 @@ PAYLOAD_SCHEMA_VERSION = 1
 # Cap on distinct regions held in a server's in-memory region cache (LRU-evicted).
 # Bounds memory: each entry can hold a full RegionData payload.
 REGION_CACHE_MAX_ENTRIES = 128
+# ...and by approximate in-memory bytes (see tools._approx_region_bytes): a full-mode 1 Mb entry
+# can weigh tens of MB, so the count cap alone could exceed a 2 GB container. An entry larger
+# than a quarter of this budget is served uncached.
+REGION_CACHE_MAX_BYTES = 512 * 1024 * 1024
 
 # Max concurrent pysam parses. All blocking BAM/CRAM/VCF work runs in a dedicated thread pool
 # of this size, so a burst of requests (or parses that hang past their timeout) is confined to

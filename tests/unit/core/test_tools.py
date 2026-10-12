@@ -2526,7 +2526,8 @@ class TestMediumRoadmapCoverage:
         import bamcp.core.tools as tm
 
         # Cap concurrency at 2 for the test.
-        monkeypatch.setattr(tm, "_parse_gate", asyncio.Semaphore(2))
+        gate = asyncio.Semaphore(2)
+        monkeypatch.setattr(tm, "_get_parse_gate", lambda: gate)
         running = []
         release = threading.Event()
 

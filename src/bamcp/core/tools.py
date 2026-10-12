@@ -122,7 +122,13 @@ class BAMCPServices:
 
     @classmethod
     def from_config(cls, config: BAMCPConfig) -> BAMCPServices:
-        return cls(config=config, cache=BAMIndexCache(config.cache_dir, config.cache_ttl))
+        cache = BAMIndexCache(
+            config.cache_dir, config.cache_ttl, max_total_bytes=config.max_index_cache_bytes
+        )
+        # Sweep index dirs left behind by expired sessions (e.g. a crashed process whose
+        # atexit cleanup never ran) so the shared cache dir can't accumulate forever.
+        cache.cleanup_expired_sessions()
+        return cls(config=config, cache=cache)
 
     def clinvar(self) -> ClinVarClient:
         if self._clinvar is None:
@@ -502,25 +508,34 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
         # BAM files: try .bam.bai first, then .bai
         index_urls = [file_path + ".bai", file_path.rsplit(".", 1)[0] + ".bai"]
 
-    lock = services.index_download_locks.setdefault(index_path, asyncio.Lock())
-    async with lock:
-        if cache.is_valid(index_path):
-            logger.debug("Using cached index after waiting for download lock: %s", index_path)
-            return index_path
+    locks = services.index_download_locks
+    lock = locks.setdefault(index_path, asyncio.Lock())
+    try:
+        async with lock:
+            if cache.is_valid(index_path):
+                logger.debug("Using cached index after waiting for download lock: %s", index_path)
+                return index_path
 
-        logger.info("Downloading index for remote BAM: %s", file_path)
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
-            for index_url in index_urls:
-                try:
-                    downloaded = await _download_index_streaming(
-                        client, index_url, index_path, config
-                    )
-                    if downloaded:
-                        return downloaded
-                    logger.debug("Index not found at %s, trying next", index_url)
-                except (httpx.RequestError, OSError, ValueError) as e:
-                    logger.warning("Index download error for %s: %s", index_url, e)
-                    continue
+            logger.info("Downloading index for remote BAM: %s", file_path)
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+                for index_url in index_urls:
+                    try:
+                        downloaded = await _download_index_streaming(
+                            client, index_url, index_path, config
+                        )
+                        if downloaded:
+                            cache.enforce_budget(keep=downloaded)
+                            return downloaded
+                        logger.debug("Index not found at %s, trying next", index_url)
+                    except (httpx.RequestError, OSError, ValueError) as e:
+                        logger.warning("Index download error for %s: %s", index_url, e)
+                        continue
+    finally:
+        # Drop the per-URL lock once nobody holds it so the dict can't grow one entry per
+        # URL forever. A waiter already woken keeps its reference; at worst a racing new
+        # caller creates a fresh lock and repeats an (atomic, idempotent) download.
+        if not lock.locked() and locks.get(index_path) is lock:
+            del locks[index_path]
 
     # All attempts failed - let pysam try its own resolution
     logger.warning("Could not download index for %s, falling back to pysam", file_path)

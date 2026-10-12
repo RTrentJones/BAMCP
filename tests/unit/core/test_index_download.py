@@ -182,3 +182,50 @@ class TestTempFileCleanup:
                 )
         assert _tmp_files(tmp_path) == []
         assert not (tmp_path / "x.bai").exists()
+
+
+@pytest.mark.unit
+class TestEnsureCachedIndex:
+    async def test_download_enforces_budget_and_prunes_lock(self, tmp_path, monkeypatch):
+        from bamcp.core.tools import _ensure_cached_index, get_services
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"BAI\x01")
+
+        real_client = httpx.AsyncClient
+
+        def client_factory(**kwargs):
+            assert kwargs.get("follow_redirects") is False
+            return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+        monkeypatch.setattr(tools_module.httpx, "AsyncClient", client_factory)
+        config = BAMCPConfig(cache_dir=str(tmp_path), allow_remote_files=True)
+        services = get_services(config)
+        budget_calls: list[str | None] = []
+        monkeypatch.setattr(
+            services.cache, "enforce_budget", lambda keep=None: budget_calls.append(keep) or 0
+        )
+
+        result = await _ensure_cached_index("https://data.example.com/S1.CRAM?sig=1", config)
+
+        assert result is not None and result.endswith(".crai")
+        assert Path(result).read_bytes() == b"BAI\x01"
+        assert budget_calls == [result]
+        assert services.index_download_locks == {}
+
+    async def test_failed_download_prunes_lock(self, tmp_path, monkeypatch):
+        from bamcp.core.tools import _ensure_cached_index, get_services
+
+        real_client = httpx.AsyncClient
+
+        def client_factory(**kwargs):
+            return real_client(
+                transport=httpx.MockTransport(lambda r: httpx.Response(404)), **kwargs
+            )
+
+        monkeypatch.setattr(tools_module.httpx, "AsyncClient", client_factory)
+        config = BAMCPConfig(cache_dir=str(tmp_path), allow_remote_files=True)
+
+        assert await _ensure_cached_index("https://data.example.com/x.bam", config) is None
+        assert get_services(config).index_download_locks == {}
+        assert _tmp_files(get_services(config).cache.cache_dir) == []

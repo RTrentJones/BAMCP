@@ -11,6 +11,7 @@ from .constants import (
     DEFAULT_GNOMAD_DATASET,
     DEFAULT_HOST,
     DEFAULT_ISSUER_URL,
+    DEFAULT_MAX_INDEX_CACHE_BYTES,
     DEFAULT_MAX_READS,
     DEFAULT_MAX_REMOTE_INDEX_BYTES,
     DEFAULT_MIN_BASEQ,
@@ -70,6 +71,7 @@ class BAMCPConfig:
     cache_dir: str = ""  # Defaults to ~/.cache/bamcp if empty
     cache_ttl: int = DEFAULT_CACHE_TTL_SECONDS
     max_remote_index_bytes: int = DEFAULT_MAX_REMOTE_INDEX_BYTES
+    max_index_cache_bytes: int = DEFAULT_MAX_INDEX_CACHE_BYTES
 
     # Security settings
     allowed_directories: list[str] | None = None
@@ -142,6 +144,11 @@ class BAMCPConfig:
                 f"max_remote_index_bytes must be at least 1 byte, got {self.max_remote_index_bytes}"
             )
 
+        if self.max_index_cache_bytes < 1:
+            raise ValueError(
+                f"max_index_cache_bytes must be at least 1 byte, got {self.max_index_cache_bytes}"
+            )
+
     @classmethod
     def from_env(cls) -> "BAMCPConfig":
         """Create config from environment variables."""
@@ -194,6 +201,9 @@ class BAMCPConfig:
             cache_ttl=int(env.get("BAMCP_CACHE_TTL", str(DEFAULT_CACHE_TTL_SECONDS))),
             max_remote_index_bytes=int(
                 env.get("BAMCP_MAX_REMOTE_INDEX_BYTES", str(DEFAULT_MAX_REMOTE_INDEX_BYTES))
+            ),
+            max_index_cache_bytes=int(
+                env.get("BAMCP_MAX_INDEX_CACHE_BYTES", str(DEFAULT_MAX_INDEX_CACHE_BYTES))
             ),
             allowed_directories=[
                 d.strip() for d in env.get("BAMCP_ALLOWED_DIRECTORIES", "").split(",") if d.strip()

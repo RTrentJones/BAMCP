@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from ..constants import (
     CACHE_SESSION_ID_LENGTH,
     DEFAULT_CACHE_TTL_SECONDS,
+    DEFAULT_MAX_INDEX_CACHE_BYTES,
     REMOTE_FILE_SCHEMES,
 )
 from .validation import is_cram
@@ -36,6 +37,7 @@ class BAMIndexCache:
         cache_dir: str,
         ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
         session_id: str | None = None,
+        max_total_bytes: int = DEFAULT_MAX_INDEX_CACHE_BYTES,
     ):
         """Initialize the cache.
 
@@ -43,9 +45,12 @@ class BAMIndexCache:
             cache_dir: Base directory for cached index files.
             ttl_seconds: Time-to-live in seconds (default: 24 hours).
             session_id: Unique session identifier. If None, generates a UUID.
+            max_total_bytes: On-disk budget for this session's cached indexes;
+                :meth:`enforce_budget` evicts the oldest files beyond it.
         """
         self.base_cache_dir = Path(cache_dir)
         self.ttl_seconds = ttl_seconds
+        self.max_total_bytes = max_total_bytes
         self.session_id = session_id or str(uuid.uuid4())[:CACHE_SESSION_ID_LENGTH]
         self.cache_dir = self.base_cache_dir / self.session_id
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -87,6 +92,59 @@ class BAMIndexCache:
         age = datetime.now().timestamp() - path.stat().st_mtime
         return age < self.ttl_seconds
 
+    def enforce_budget(self, keep: str | None = None) -> int:
+        """Bound this session's cache: drop expired files, then evict oldest-first.
+
+        Removes expired index files, then deletes the oldest (by mtime) remaining
+        files until the session's total size is within ``max_total_bytes``. The
+        file named by ``keep`` (the one just downloaded) is never evicted, even if
+        it alone exceeds the budget. In-flight ``.index-*.tmp`` downloads are left
+        alone. Filesystem races (a file vanishing concurrently) are tolerated.
+
+        Returns:
+            Number of files removed.
+        """
+        keep_path = Path(keep).resolve() if keep else None
+        now = datetime.now().timestamp()
+        entries: list[tuple[float, int, Path]] = []
+        removed = 0
+        try:
+            candidates = [p for p in self.cache_dir.iterdir() if not p.name.endswith(".tmp")]
+        except OSError:
+            return 0
+        for path in candidates:
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            if not path.is_file():
+                continue
+            is_keep = keep_path is not None and path.resolve() == keep_path
+            if not is_keep and now - st.st_mtime >= self.ttl_seconds:
+                if self._unlink(path):
+                    removed += 1
+                continue
+            entries.append((st.st_mtime, st.st_size, path))
+
+        total = sum(size for _, size, _ in entries)
+        for _mtime, size, path in sorted(entries, key=lambda e: e[0]):
+            if total <= self.max_total_bytes:
+                break
+            if keep_path is not None and path.resolve() == keep_path:
+                continue
+            if self._unlink(path):
+                removed += 1
+            total -= size
+        return removed
+
+    @staticmethod
+    def _unlink(path: Path) -> bool:
+        try:
+            path.unlink()
+        except OSError:  # incl. FileNotFoundError: already gone is fine
+            return False
+        return True
+
     def cleanup_session(self) -> int:
         """Remove the entire session cache directory.
 
@@ -119,7 +177,11 @@ class BAMIndexCache:
         """
         removed = 0
         remaining = 0
-        for session_dir in self.base_cache_dir.iterdir():
+        try:
+            session_dirs = list(self.base_cache_dir.iterdir())
+        except OSError:
+            return 0, 0
+        for session_dir in session_dirs:
             if session_dir.is_dir() and session_dir.name != self.session_id:
                 # Check if any file in the session is still valid
                 files = list(session_dir.glob("*"))
@@ -134,7 +196,7 @@ class BAMIndexCache:
                     # All files expired, remove them and the directory
                     for f in files:
                         if f.is_file():
-                            f.unlink()
+                            f.unlink(missing_ok=True)
                     try:
                         session_dir.rmdir()
                         removed += 1

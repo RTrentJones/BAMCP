@@ -28,9 +28,11 @@ def _mw(**kwargs) -> RateLimitMiddleware:
     return RateLimitMiddleware(app=lambda *a, **k: None, **kwargs)
 
 
-def _req(peer: str, xff: str | None = None) -> SimpleNamespace:
+def _req(peer: str, xff: str | None = None, cf: str | None = None) -> SimpleNamespace:
     """A minimal stand-in exposing only what _get_client_ip reads."""
     headers = {"x-forwarded-for": xff} if xff is not None else {}
+    if cf is not None:
+        headers["cf-connecting-ip"] = cf
     return SimpleNamespace(client=SimpleNamespace(host=peer), headers=headers)
 
 
@@ -123,7 +125,7 @@ class TestBoundedTable:
 
         # 500 distinct forwarded clients through the trusted proxy.
         for i in range(500):
-            await mw.dispatch(_req("10.0.0.1", xff=f"1.2.3.{i % 256}.{i}"), _next)
+            await mw.dispatch(_req("10.0.0.1", xff=f"198.51.{i // 256}.{i % 256}"), _next)
         assert len(mw._requests) <= 50
 
     @pytest.mark.unit
@@ -135,3 +137,60 @@ class TestBoundedTable:
         mw._requests["9.9.9.9"] = [stale]
         mw._sweep_expired(time.monotonic())
         assert "9.9.9.9" not in mw._requests
+
+
+class TestCloudflareAndValidation:
+    """CF-Connecting-IP preference and IP validation of the chosen hop."""
+
+    @pytest.mark.unit
+    def test_cf_connecting_ip_preferred_behind_loopback(self):
+        mw = _mw()
+        req = _req("127.0.0.1", xff="9.9.9.9", cf="203.0.113.7")
+        assert mw._get_client_ip(req) == "203.0.113.7"
+
+    @pytest.mark.unit
+    def test_cf_connecting_ip_ignored_from_untrusted_peer(self):
+        mw = _mw()
+        assert mw._get_client_ip(_req("198.51.100.1", cf="203.0.113.7")) == "198.51.100.1"
+
+    @pytest.mark.unit
+    def test_invalid_cf_header_falls_back_to_xff(self):
+        mw = _mw()
+        assert mw._get_client_ip(_req("127.0.0.1", xff="5.6.7.8", cf="not-an-ip")) == "5.6.7.8"
+
+    @pytest.mark.unit
+    def test_invalid_xff_hop_falls_back_to_peer(self):
+        mw = _mw()
+        assert mw._get_client_ip(_req("127.0.0.1", xff="garbage-token")) == "127.0.0.1"
+
+    @pytest.mark.unit
+    def test_ipv6_cf_header_is_normalized(self):
+        mw = _mw()
+        assert mw._get_client_ip(_req("::1", cf="2001:DB8:0:0::1")) == "2001:db8::1"
+
+    @pytest.mark.unit
+    def test_default_limit_is_120(self):
+        assert _mw().requests_per_minute == 120
+
+
+class TestAmortizedSweep:
+    """Sweeping pops stale entries off the LRU front and stops at the first live one."""
+
+    @pytest.mark.unit
+    def test_sweep_stops_at_first_live_entry(self):
+        import time
+
+        mw = _mw()
+        now = time.monotonic()
+        mw._requests["1.1.1.1"] = [now - 200]
+        mw._requests["2.2.2.2"] = [now - 120]
+        mw._requests["3.3.3.3"] = [now - 1]
+        mw._requests["4.4.4.4"] = [now - 300]  # behind a live entry: left for later / the cap
+        mw._sweep_expired(now)
+        assert list(mw._requests) == ["3.3.3.3", "4.4.4.4"]
+
+    @pytest.mark.unit
+    def test_sweep_handles_empty_table(self):
+        mw = _mw()
+        mw._sweep_expired(0.0)
+        assert len(mw._requests) == 0

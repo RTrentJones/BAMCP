@@ -26,10 +26,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     * **Proxy-aware client IP.** ``X-Forwarded-For`` is honored only when the direct peer is a
       configured trusted proxy; otherwise the header is ignored and the real socket IP is used.
       An untrusted client therefore cannot spoof rotating identities to bypass per-IP limits or
-      balloon the tracking table.
-    * **Bounded memory.** The per-IP table is an LRU capped at ``max_tracked_ips``; a global
-      sweep drops fully-expired entries each request, and the least-recently-seen IP is evicted
-      when the cap is reached — so churn/spoofing cannot grow it without bound.
+      balloon the tracking table. Behind the proxy, ``CF-Connecting-IP`` is preferred and any
+      chosen header value must be a valid IP.
+    * **Bounded memory.** The per-IP table is an LRU capped at ``max_tracked_ips``; fully-expired
+      entries are popped off the LRU front (amortized), and the least-recently-seen IP is
+      evicted when the cap is reached — so churn/spoofing cannot grow it without bound.
 
     Args:
         app: The ASGI application.
@@ -42,7 +43,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(
         self,
         app,  # noqa: ANN001
-        requests_per_minute: int = 60,
+        requests_per_minute: int = 120,
         trusted_proxies: list[str] | None = None,
         max_tracked_ips: int = 10_000,
     ):
@@ -73,27 +74,60 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return False
         return any(addr in net for net in self._trusted_networks)
 
-    def _get_client_ip(self, request: Request) -> str:
-        """Resolve the client IP, honoring X-Forwarded-For only behind a trusted proxy."""
-        peer = request.client.host if request.client else "unknown"
+    @staticmethod
+    def _valid_ip(value: str | None) -> str | None:
+        """Return ``value`` normalized if it parses as an IP address, else None."""
+        if not value:
+            return None
+        try:
+            return str(ipaddress.ip_address(value.strip()))
+        except ValueError:
+            return None
 
-        # Only trust XFF if the direct peer is a trusted proxy. Walk the header right-to-left and
-        # return the first hop that is not itself a trusted proxy — the real client.
-        if self._is_trusted_proxy(peer):
-            forwarded = request.headers.get("x-forwarded-for")
-            if forwarded:
-                for hop in reversed([h.strip() for h in forwarded.split(",") if h.strip()]):
-                    if not self._is_trusted_proxy(hop):
-                        return hop
+    def _get_client_ip(self, request: Request) -> str:
+        """Resolve the client IP, honoring proxy headers only behind a trusted proxy.
+
+        Behind a trusted peer (default: loopback, i.e. the co-located cloudflared sidecar):
+
+        1. ``CF-Connecting-IP`` — Cloudflare sets it to the single real client IP and overwrites
+           any client-supplied value at the edge, so it is the most reliable source.
+        2. ``X-Forwarded-For`` walked right-to-left; the first hop that is not itself a trusted
+           proxy is the client.
+
+        Whatever header value is chosen must parse as a real IP address; garbage (or a spoofed
+        non-IP token that would mint a fresh bucket per request) falls back to the socket peer.
+        """
+        peer = request.client.host if request.client else "unknown"
+        if not self._is_trusted_proxy(peer):
+            return peer
+
+        cf_ip = self._valid_ip(request.headers.get("cf-connecting-ip"))
+        if cf_ip is not None:
+            return cf_ip
+
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            for hop in reversed([h.strip() for h in forwarded.split(",") if h.strip()]):
+                if not self._is_trusted_proxy(hop):
+                    return self._valid_ip(hop) or peer
         return peer
 
     def _sweep_expired(self, now: float) -> None:
-        """Drop entries whose entire window has expired (bounds memory under churn)."""
+        """Drop fully-expired entries from the LRU front (amortized O(1) per request).
+
+        The table is ordered by last activity, so stale IPs collect at the front: pop while the
+        front entry's newest timestamp is outside the window and stop at the first live one.
+        Each entry is popped at most once, so the cost is amortized over the requests that
+        created it — no full 10k-IP scan per request. (Ordering is approximate — a throttled
+        request refreshes recency without a new timestamp — so a few stale entries may linger
+        behind a live one; the ``max_tracked_ips`` cap still bounds the table.)
+        """
         cutoff = now - self.window_seconds
-        for ip in list(self._requests.keys()):
-            self._requests[ip] = [t for t in self._requests[ip] if t > cutoff]
-            if not self._requests[ip]:
-                del self._requests[ip]
+        while self._requests:
+            ip, timestamps = next(iter(self._requests.items()))
+            if timestamps and timestamps[-1] > cutoff:
+                break
+            del self._requests[ip]
 
     def _prune_within_window(self, ip: str, now: float) -> list[float]:
         cutoff = now - self.window_seconds

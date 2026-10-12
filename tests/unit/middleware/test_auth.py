@@ -332,3 +332,147 @@ class TestServiceToken:
         monkeypatch.setenv("BAMCP_VERIFY_TOKEN", "from-env")
         cfg = BAMCPConfig.from_env()
         assert cfg.verify_token == "from-env"
+
+
+class TestServiceTokenNonAscii:
+    """A latin-1-decoded non-ASCII bearer must be rejected, never raise (was a 500)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bearer", ["\xe9", "svc-secr\xe9t", "☃", "\ud800"])
+    async def test_non_ascii_bearer_is_rejected(self, bearer):
+        provider = BAMCPAuthProvider(verify_token="svc-secret", verify_scopes=["read"])
+        assert await provider.load_access_token(bearer) is None
+
+    @pytest.mark.asyncio
+    async def test_non_ascii_service_token_still_matches(self):
+        provider = BAMCPAuthProvider(verify_token="s\xe9cret", verify_scopes=["read"])
+        assert await provider.load_access_token("s\xe9cret") is not None
+        assert await provider.load_access_token("secret") is None
+
+
+def _client(cid: str) -> OAuthClientInformationFull:
+    return OAuthClientInformationFull(
+        client_id=cid,
+        redirect_uris=[AnyUrl("http://localhost:3000/callback")],
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        token_endpoint_auth_method="none",
+    )
+
+
+async def _mint(provider, client, params):
+    redirect = await provider.authorize(client, params)
+    code = redirect.split("code=")[1].split("&")[0]
+    auth_code = await provider.load_authorization_code(client, code)
+    return await provider.exchange_authorization_code(client, auth_code)
+
+
+class TestBoundedStores:
+    """The open demo lets anyone register and mint tokens — memory must stay bounded."""
+
+    @pytest.mark.asyncio
+    async def test_client_cap_evicts_oldest(self):
+        provider = BAMCPAuthProvider(allow_dynamic_registration=True, max_clients=3)
+        for i in range(5):
+            await provider.register_client(_client(f"c{i}"))
+        assert list(provider._clients) == ["c2", "c3", "c4"]
+        assert await provider.get_client("c0") is None
+        assert await provider.get_client("c4") is not None
+
+    @pytest.mark.asyncio
+    async def test_reregistration_refreshes_client_slot(self):
+        provider = BAMCPAuthProvider(allow_dynamic_registration=True, max_clients=2)
+        await provider.register_client(_client("a"))
+        await provider.register_client(_client("b"))
+        await provider.register_client(_client("a"))
+        await provider.register_client(_client("c"))
+        assert list(provider._clients) == ["a", "c"]
+
+    @pytest.mark.asyncio
+    async def test_token_caps_evict_oldest(self, client_info, auth_params):
+        provider = BAMCPAuthProvider(allow_dynamic_registration=True, max_tokens=2)
+        await provider.register_client(client_info)
+        first = await _mint(provider, client_info, auth_params)
+        for _ in range(3):
+            await _mint(provider, client_info, auth_params)
+        assert len(provider._access_tokens) == 2
+        assert len(provider._refresh_tokens) == 2
+        assert len(provider._refresh_to_access) <= 2
+        assert await provider.load_access_token(first.access_token) is None
+        for _ in range(3):
+            await provider.authorize(client_info, auth_params)
+        assert len(provider._auth_codes) == 2
+
+    @pytest.mark.asyncio
+    async def test_refresh_tokens_have_a_ttl(self, client_info, auth_params, monkeypatch):
+        provider = BAMCPAuthProvider(allow_dynamic_registration=True, refresh_token_expiry=100)
+        await provider.register_client(client_info)
+        token = await _mint(provider, client_info, auth_params)
+        rt = await provider.load_refresh_token(client_info, token.refresh_token)
+        assert rt is not None and rt.expires_at is not None
+        real = time.time()
+        monkeypatch.setattr(time, "time", lambda: real + 101)
+        assert await provider.load_refresh_token(client_info, token.refresh_token) is None
+        assert token.refresh_token not in provider._refresh_tokens
+
+    @pytest.mark.asyncio
+    async def test_rotation_revokes_old_access_token(self, client_info, auth_params):
+        provider = BAMCPAuthProvider(allow_dynamic_registration=True)
+        await provider.register_client(client_info)
+        token = await _mint(provider, client_info, auth_params)
+        rt = await provider.load_refresh_token(client_info, token.refresh_token)
+        new = await provider.exchange_refresh_token(client_info, rt, [])
+        assert await provider.load_access_token(token.access_token) is None
+        assert await provider.load_access_token(new.access_token) is not None
+        assert token.refresh_token not in provider._refresh_to_access
+
+    @pytest.mark.asyncio
+    async def test_revoking_refresh_revokes_paired_access(self, client_info, auth_params):
+        provider = BAMCPAuthProvider(allow_dynamic_registration=True)
+        await provider.register_client(client_info)
+        token = await _mint(provider, client_info, auth_params)
+        rt = await provider.load_refresh_token(client_info, token.refresh_token)
+        await provider.revoke_token(rt)
+        assert await provider.load_access_token(token.access_token) is None
+
+    @pytest.mark.asyncio
+    async def test_periodic_sweep_drops_expired_entries(
+        self, client_info, auth_params, monkeypatch
+    ):
+        provider = BAMCPAuthProvider(
+            allow_dynamic_registration=True,
+            token_expiry=10,
+            refresh_token_expiry=20,
+            sweep_interval=60,
+        )
+        await provider.register_client(client_info)
+        await _mint(provider, client_info, auth_params)
+        await provider.authorize(client_info, auth_params)  # an unused code
+        assert provider._access_tokens and provider._auth_codes and provider._refresh_tokens
+
+        real_wall, real_mono = time.time(), time.monotonic()
+        monkeypatch.setattr(time, "time", lambda: real_wall + 1000)
+        monkeypatch.setattr(time, "monotonic", lambda: real_mono + 61)
+        await provider.register_client(_client("trigger"))
+        assert provider._auth_codes == {}
+        assert provider._access_tokens == {}
+        assert provider._refresh_tokens == {}
+        assert provider._refresh_to_access == {}
+
+    @pytest.mark.asyncio
+    async def test_sweep_is_rate_limited(self, client_info, auth_params, monkeypatch):
+        provider = BAMCPAuthProvider(allow_dynamic_registration=True, token_expiry=10)
+        await provider.register_client(client_info)
+        await _mint(provider, client_info, auth_params)
+        real_wall = time.time()
+        monkeypatch.setattr(time, "time", lambda: real_wall + 1000)
+        # Within sweep_interval of construction: the expired token stays until lookup.
+        await provider.register_client(_client("other"))
+        assert len(provider._access_tokens) == 1
+
+    @pytest.mark.asyncio
+    async def test_sweep_drops_orphaned_pairings(self):
+        provider = BAMCPAuthProvider()
+        provider._refresh_to_access["gone"] = "x"
+        provider._sweep_expired(time.time())
+        assert provider._refresh_to_access == {}

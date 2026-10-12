@@ -1,6 +1,8 @@
 """Configuration for BAMCP server, loaded from environment variables."""
 
+import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +26,91 @@ from .constants import (
     DEFAULT_TRANSPORT,
     DEFAULT_WINDOW_SIZE,
 )
+
+logger = logging.getLogger(__name__)
+
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Read a boolean env var: 1/true/yes/on or 0/false/no/off (case-insensitive).
+
+    Unset or empty uses ``default``. Anything else raises a ValueError naming the variable —
+    a typo like ``BAMCP_AUTH_ENABLED=ture`` must fail loudly, not silently disable auth.
+    """
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in _TRUE_VALUES:
+        return True
+    if raw in _FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"{name}={os.environ[name]!r} is not a boolean; use one of 1/true/yes/on or 0/false/no/off"
+    )
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an integer env var; unset or empty uses ``default``, junk names the variable."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"{name}={raw!r} is not an integer") from None
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float env var; unset or empty uses ``default``, junk names the variable."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(f"{name}={raw!r} is not a number") from None
+
+
+def _ensure_cache_dir(explicit: str | None) -> str:
+    """Create the cache directory, tolerating a read-only home.
+
+    An explicit ``BAMCP_CACHE_DIR`` that cannot be created is a deployment error and raises
+    with the variable named. The default (``~/.cache/bamcp``) is read-only under a
+    ``read_only: true`` container (only ``/tmp`` is a tmpfs), so it falls back to a directory
+    under the system temp dir with a warning instead of crashing at start-up.
+    """
+    if explicit:
+        try:
+            Path(explicit).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ValueError(
+                f"BAMCP_CACHE_DIR={explicit!r} cannot be created ({exc.strerror or exc}); "
+                "point it at a writable directory"
+            ) from None
+        return explicit
+
+    default = str(DEFAULT_CACHE_DIR)
+    try:
+        Path(default).mkdir(parents=True, exist_ok=True)
+        return default
+    except OSError as exc:
+        fallback = Path(tempfile.gettempdir()) / "bamcp-cache"
+        try:
+            fallback.mkdir(parents=True, exist_ok=True)
+        except OSError as exc2:
+            raise ValueError(
+                f"No writable cache directory: {default} ({exc.strerror or exc}) and "
+                f"{fallback} ({exc2.strerror or exc2}); set BAMCP_CACHE_DIR"
+            ) from None
+        logger.warning(
+            "Cache dir %s is not writable (%s); using %s. Set BAMCP_CACHE_DIR to choose.",
+            default,
+            exc.strerror or exc,
+            fallback,
+        )
+        return str(fallback)
 
 
 @dataclass
@@ -76,7 +163,7 @@ class BAMCPConfig:
     allow_remote_files: bool = False
     allowed_remote_hosts: list[str] | None = None
     trusted_hosts: list[str] | None = None
-    rate_limit: int = 60  # requests per minute per IP
+    rate_limit: int = 120  # requests per minute per IP (every MCP JSON-RPC POST counts)
     # IPs/CIDRs of trusted reverse proxies. X-Forwarded-For is honored ONLY when the direct peer
     # is one of these (default: loopback, since the cloudflared tunnel sidecar is co-located).
     # Otherwise XFF is ignored and the direct socket IP is used — an untrusted client cannot spoof
@@ -152,11 +239,8 @@ class BAMCPConfig:
         # NB: the auth-on "default to bamcp:read when scope-less" invariant lives in
         # __post_init__ so direct construction gets it too (not just this env path).
 
-        # Set up cache directory
-        cache_dir = env.get("BAMCP_CACHE_DIR") or str(DEFAULT_CACHE_DIR)
-
-        # Ensure cache directory exists
-        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        # Set up (and create) the cache directory; falls back to a tempdir on a read-only home.
+        cache_dir = _ensure_cache_dir(env.get("BAMCP_CACHE_DIR") or None)
 
         return cls(
             # `or None`: os.environ.get returns "" for a var that is SET BUT EMPTY
@@ -168,38 +252,37 @@ class BAMCPConfig:
             # construction), and reference_sequence came back null with nothing to
             # explain it. Same idiom as verify_token below.
             reference=env.get("BAMCP_REFERENCE") or None,
-            max_reads=int(env.get("BAMCP_MAX_READS", str(DEFAULT_MAX_READS))),
-            default_window=int(env.get("BAMCP_DEFAULT_WINDOW", str(DEFAULT_WINDOW_SIZE))),
-            min_vaf=float(env.get("BAMCP_MIN_VAF", str(DEFAULT_MIN_VAF))),
-            min_depth=int(env.get("BAMCP_MIN_DEPTH", str(DEFAULT_MIN_DEPTH))),
-            min_mapq=int(env.get("BAMCP_MIN_MAPQ", str(DEFAULT_MIN_MAPQ))),
-            min_baseq=int(env.get("BAMCP_MIN_BASEQ", str(DEFAULT_MIN_BASEQ))),
+            max_reads=_env_int("BAMCP_MAX_READS", DEFAULT_MAX_READS),
+            default_window=_env_int("BAMCP_DEFAULT_WINDOW", DEFAULT_WINDOW_SIZE),
+            min_vaf=_env_float("BAMCP_MIN_VAF", DEFAULT_MIN_VAF),
+            min_depth=_env_int("BAMCP_MIN_DEPTH", DEFAULT_MIN_DEPTH),
+            min_mapq=_env_int("BAMCP_MIN_MAPQ", DEFAULT_MIN_MAPQ),
+            min_baseq=_env_int("BAMCP_MIN_BASEQ", DEFAULT_MIN_BASEQ),
             transport=env.get("BAMCP_TRANSPORT", DEFAULT_TRANSPORT),
             host=env.get("BAMCP_HOST", DEFAULT_HOST),
-            port=int(env.get("BAMCP_PORT", str(DEFAULT_PORT))),
-            auth_enabled=env.get("BAMCP_AUTH_ENABLED", "").lower() == "true",
+            port=_env_int("BAMCP_PORT", DEFAULT_PORT),
+            auth_enabled=_env_bool("BAMCP_AUTH_ENABLED", False),
             issuer_url=env.get("BAMCP_ISSUER_URL", DEFAULT_ISSUER_URL),
             resource_server_url=env.get("BAMCP_RESOURCE_SERVER_URL", DEFAULT_RESOURCE_SERVER_URL),
             required_scopes=scopes,
-            token_expiry=int(env.get("BAMCP_TOKEN_EXPIRY", str(DEFAULT_TOKEN_EXPIRY_SECONDS))),
+            token_expiry=_env_int("BAMCP_TOKEN_EXPIRY", DEFAULT_TOKEN_EXPIRY_SECONDS),
             verify_token=env.get("BAMCP_VERIFY_TOKEN") or None,
-            allow_dynamic_registration=env.get("BAMCP_ALLOW_DYNAMIC_REGISTRATION", "").lower()
-            == "true",
+            allow_dynamic_registration=_env_bool("BAMCP_ALLOW_DYNAMIC_REGISTRATION", False),
             ncbi_api_key=env.get("BAMCP_NCBI_API_KEY"),
-            clinvar_enabled=env.get("BAMCP_CLINVAR_ENABLED", "true").lower() == "true",
-            gnomad_enabled=env.get("BAMCP_GNOMAD_ENABLED", "true").lower() == "true",
+            clinvar_enabled=_env_bool("BAMCP_CLINVAR_ENABLED", True),
+            gnomad_enabled=_env_bool("BAMCP_GNOMAD_ENABLED", True),
             gnomad_dataset=env.get("BAMCP_GNOMAD_DATASET", DEFAULT_GNOMAD_DATASET),
             genome_build=env.get("BAMCP_GENOME_BUILD", DEFAULT_GENOME_BUILD),
             cache_dir=cache_dir,
-            cache_ttl=int(env.get("BAMCP_CACHE_TTL", str(DEFAULT_CACHE_TTL_SECONDS))),
-            max_remote_index_bytes=int(
-                env.get("BAMCP_MAX_REMOTE_INDEX_BYTES", str(DEFAULT_MAX_REMOTE_INDEX_BYTES))
+            cache_ttl=_env_int("BAMCP_CACHE_TTL", DEFAULT_CACHE_TTL_SECONDS),
+            max_remote_index_bytes=_env_int(
+                "BAMCP_MAX_REMOTE_INDEX_BYTES", DEFAULT_MAX_REMOTE_INDEX_BYTES
             ),
             allowed_directories=[
                 d.strip() for d in env.get("BAMCP_ALLOWED_DIRECTORIES", "").split(",") if d.strip()
             ]
             or None,
-            allow_remote_files=env.get("BAMCP_ALLOW_REMOTE_FILES", "false").lower() == "true",
+            allow_remote_files=_env_bool("BAMCP_ALLOW_REMOTE_FILES", False),
             allowed_remote_hosts=[
                 h.strip() for h in env.get("BAMCP_ALLOWED_REMOTE_HOSTS", "").split(",") if h.strip()
             ]
@@ -208,14 +291,14 @@ class BAMCPConfig:
                 h.strip() for h in env.get("BAMCP_TRUSTED_HOSTS", "").split(",") if h.strip()
             ]
             or None,
-            rate_limit=int(env.get("BAMCP_RATE_LIMIT", "60")),
+            rate_limit=_env_int("BAMCP_RATE_LIMIT", 120),
             rate_limit_trusted_proxies=[
                 p.strip()
                 for p in env.get("BAMCP_RATE_LIMIT_TRUSTED_PROXIES", "").split(",")
                 if p.strip()
             ]
             or None,
-            telemetry_enabled=env.get("BAMCP_TELEMETRY_ENABLED", "").lower() == "true",
+            telemetry_enabled=_env_bool("BAMCP_TELEMETRY_ENABLED", False),
             telemetry_path=env.get("BAMCP_TELEMETRY_PATH", ""),
-            telemetry_otel_enabled=env.get("BAMCP_TELEMETRY_OTEL", "").lower() == "true",
+            telemetry_otel_enabled=_env_bool("BAMCP_TELEMETRY_OTEL", False),
         )

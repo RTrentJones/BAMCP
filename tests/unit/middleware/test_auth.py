@@ -332,3 +332,19 @@ class TestServiceToken:
         monkeypatch.setenv("BAMCP_VERIFY_TOKEN", "from-env")
         cfg = BAMCPConfig.from_env()
         assert cfg.verify_token == "from-env"
+
+
+class TestServiceTokenNonAscii:
+    """A latin-1-decoded non-ASCII bearer must be rejected, never raise (was a 500)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bearer", ["\xe9", "svc-secr\xe9t", "☃", "\ud800"])
+    async def test_non_ascii_bearer_is_rejected(self, bearer):
+        provider = BAMCPAuthProvider(verify_token="svc-secret", verify_scopes=["read"])
+        assert await provider.load_access_token(bearer) is None
+
+    @pytest.mark.asyncio
+    async def test_non_ascii_service_token_still_matches(self):
+        provider = BAMCPAuthProvider(verify_token="s\xe9cret", verify_scopes=["read"])
+        assert await provider.load_access_token("s\xe9cret") is not None
+        assert await provider.load_access_token("secret") is None

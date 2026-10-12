@@ -69,6 +69,12 @@ class BAMCPAuthProvider(
         # Optional M2M service token (CI verify): a single configured bearer accepted statelessly,
         # so it survives restarts (the OAuth stores below are in-memory and reset on every restart).
         self._verify_token = verify_token or None
+        # Compared as bytes: secrets.compare_digest raises TypeError on non-ASCII str, and
+        # Starlette decodes header bytes as latin-1, so `Authorization: Bearer \xe9` was a 500.
+        # ``surrogatepass`` keeps even a lone surrogate from raising.
+        self._verify_token_bytes = (
+            verify_token.encode("utf-8", "surrogatepass") if verify_token else None
+        )
         self._verify_scopes = verify_scopes or []
         # Dynamic client registration (default OFF). When off, register_client refuses, so no
         # anonymous client can self-register and mint a token — access is the service token only.
@@ -169,7 +175,9 @@ class BAMCPAuthProvider(
     async def load_access_token(self, token: str) -> AccessToken | None:
         # M2M service token (CI verify): accepted statelessly with the required scopes and no
         # expiry, so it works right after a restart. Constant-time compare avoids a timing oracle.
-        if self._verify_token is not None and secrets.compare_digest(token, self._verify_token):
+        if self._verify_token_bytes is not None and secrets.compare_digest(
+            token.encode("utf-8", "surrogatepass"), self._verify_token_bytes
+        ):
             return AccessToken(
                 token=token,
                 client_id="bamcp-verify",

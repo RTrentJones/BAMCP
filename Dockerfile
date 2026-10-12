@@ -32,17 +32,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-COPY pyproject.toml README.md ./
+# uv is used only to export the lockfile; it never reaches the runtime stage.
+COPY --from=ghcr.io/astral-sh/uv:0.11.32@sha256:df4cae8f3a96d175e2e5f992e597550000edbe78fdc2594d5cd8de1a217f504c /uv /usr/local/bin/uv
+
+COPY pyproject.toml uv.lock README.md ./
 COPY src/ src/
 
 # Copy bundled viewer into source tree so hatchling includes it in the wheel
 COPY --from=frontend /frontend/dist/viewer.html src/bamcp/static/dist/viewer.html
 
-# Install the package and its dependencies into a prefix we can copy later.
-# Include [telemetry] so the OTel SDK ships with the image — JSONL is built-in,
-# but the OpenTelemetry exporter requires the extras. [eval] is intentionally
-# excluded: it pulls in anthropic/openai/playwright which are dev-only.
-RUN pip install --no-cache-dir --prefix=/install ".[telemetry]"
+# Install the dependencies FROM uv.lock (exact versions + hashes) — the same set CI tests and
+# pip-audit checks — rather than letting pip resolve the newest versions within pyproject's
+# ranges. `--frozen` fails the build if the lock is stale instead of silently re-resolving.
+# Include [telemetry] so the OTel SDK ships with the image — JSONL is built-in, but the
+# OpenTelemetry exporter requires the extras. [eval] is intentionally excluded: it pulls in
+# anthropic/openai/playwright which are dev-only. The project itself is then installed with
+# --no-deps so pip cannot pull anything the lock did not pin.
+RUN uv export --frozen --no-dev --extra telemetry --no-emit-project -o /tmp/requirements.txt \
+    && pip install --no-cache-dir --prefix=/install --require-hashes -r /tmp/requirements.txt \
+    && pip install --no-cache-dir --prefix=/install --no-deps .
 
 # ---------------------------------------------------------------------------
 # Stage 2 — Runtime

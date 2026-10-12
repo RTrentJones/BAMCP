@@ -329,6 +329,22 @@ else
 fi
 echo
 
+# ---------- remote-fetch allow-list ----------
+# Remote BAM/CRAM/FASTA fetch stays ON (streaming public datasets is a core feature), but it is
+# bounded to trusted public genomics hosts rather than "any public IP" — the same SSRF blast-radius
+# bound prod applies via BAMCP_ALLOWED_REMOTE_HOSTS in RTrentJones.dev infra/bamcp.tf. Keep this
+# default in sync with that list. Override with a comma-separated BAMCP_ALLOWED_REMOTE_HOSTS env var
+# (e.g. to add your own bucket host); matching is exact per host, no subdomain wildcards.
+DEFAULT_ALLOWED_REMOTE_HOSTS="hgdownload.soe.ucsc.edu,ftp.ncbi.nlm.nih.gov,ftp-trace.ncbi.nlm.nih.gov,ftp.1000genomes.ebi.ac.uk,1000genomes.s3.amazonaws.com"
+BAMCP_ALLOWED_REMOTE_HOSTS="${BAMCP_ALLOWED_REMOTE_HOSTS:-$DEFAULT_ALLOWED_REMOTE_HOSTS}"
+if [[ ! "$BAMCP_ALLOWED_REMOTE_HOSTS" =~ ^[A-Za-z0-9.,-]+$ ]]; then
+    echo "Error: BAMCP_ALLOWED_REMOTE_HOSTS must be a comma-separated list of hostnames." >&2
+    exit 1
+fi
+
+# BAMCP_RATE_LIMIT_TRUSTED_PROXIES (below) also mirrors prod: cloudflared is a co-located sidecar,
+# so the immediate peer is loopback and X-Forwarded-For is trusted only from there.
+
 # ---------- build container instance JSON ----------
 
 CONTAINER_JSON_FILE=$(mktemp)
@@ -347,7 +363,9 @@ cat > "$CONTAINER_JSON_FILE" <<JSONEOF
       "BAMCP_ISSUER_URL": "$BAMCP_PUBLIC_URL",
       "BAMCP_RESOURCE_SERVER_URL": "$BAMCP_PUBLIC_URL",
       "BAMCP_ALLOW_REMOTE_FILES": "true",
+      "BAMCP_ALLOWED_REMOTE_HOSTS": "$BAMCP_ALLOWED_REMOTE_HOSTS",
       "BAMCP_RATE_LIMIT": "60",
+      "BAMCP_RATE_LIMIT_TRUSTED_PROXIES": "127.0.0.1,::1",
       "BAMCP_MAX_READS": "10000",
       "BAMCP_DEFAULT_WINDOW": "500",
       "BAMCP_MIN_VAF": "0.1",
@@ -402,6 +420,7 @@ if $USE_REGISTRY_CREDS; then
 else
     echo "  Pull secret:     none (public GHCR image)"
 fi
+echo "  Remote hosts:    $BAMCP_ALLOWED_REMOTE_HOSTS"
 echo "  Tunnel token:    ${TUNNEL_TOKEN:0:20}..."
 echo "============================================"
 echo

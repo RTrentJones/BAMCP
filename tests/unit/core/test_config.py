@@ -424,3 +424,7 @@ class TestGenomeBuildNormalization:
         monkeypatch.setenv("BAMCP_GENOME_BUILD", "hg19")
         monkeypatch.setenv("BAMCP_CACHE_DIR", str(tmp_path))
         assert BAMCPConfig.from_env().genome_build == "GRCh37"
+
+    @pytest.mark.unit
+    def test_gnomad_dataset_defaults_to_per_build(self):
+        assert BAMCPConfig().gnomad_dataset == "auto"

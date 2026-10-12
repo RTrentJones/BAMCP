@@ -54,7 +54,13 @@ DEFAULT_TOKEN_EXPIRY_SECONDS = 3_600
 # When auth is enabled with no explicit BAMCP_REQUIRED_SCOPES, require this scope so tokens
 # are never scope-less. BAMCP is a read-only evidence viewer, hence a single read scope.
 DEFAULT_REQUIRED_SCOPES = ("bamcp:read",)
-DEFAULT_GNOMAD_DATASET = "gnomad_r4"
+# gnomAD dataset. "auto" selects the release matching each lookup's genome build
+# (GNOMAD_DATASET_BY_BUILD) — gnomad_r4 is GRCh38-only, so querying it with GRCh37
+# coordinates returns a different (or no) variant and reads as false rarity. An explicit
+# dataset (BAMCP_GNOMAD_DATASET) is honored only for lookups in its own build.
+DEFAULT_GNOMAD_DATASET = "auto"
+GNOMAD_DATASET_BY_BUILD = {"GRCh37": "gnomad_r2_1", "GRCh38": "gnomad_r4"}
+GNOMAD_DATASET_BUILD = {"gnomad_r2_1": "GRCh37", "gnomad_r3": "GRCh38", "gnomad_r4": "GRCh38"}
 DEFAULT_GENOME_BUILD = "GRCh38"
 # Accepted spellings of the two supported human builds (case-insensitive).
 GENOME_BUILD_ALIASES = {

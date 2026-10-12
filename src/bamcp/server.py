@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
+
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from .analysis.acmg import handle_classify_variant
 from .analysis.curation import handle_get_variant_curation_summary
@@ -385,5 +389,20 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     )
     def viewer() -> str:
         return get_viewer_html()
+
+    # -- Deploy identity -----------------------------------------------------
+    # Greenlight's verify gate compares the commit the image was built from (GREENLIGHT_SHA, baked
+    # in at docker build) against the sha CI just shipped, so a stale container can't pass as the
+    # new build. Served unauthenticated (a commit sha is public in this repo) at the root and under
+    # the MCP path, because the verify base URL is <host>/mcp. A build without the arg reports null.
+
+    async def deploy_version(request: Request) -> JSONResponse:
+        return JSONResponse(
+            {"sha": os.environ.get("GREENLIGHT_SHA") or None},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    mcp.custom_route("/__version", methods=["GET"])(deploy_version)
+    mcp.custom_route("/mcp/__version", methods=["GET"])(deploy_version)
 
     return mcp

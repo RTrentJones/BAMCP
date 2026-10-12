@@ -34,6 +34,10 @@ plan and `docs/ENGINEERING_RETROSPECTIVE.md` for the write-up.
 
 ### Added
 
+- **`/__version` deploy identity** — serves `{"sha": …}` (the commit the image was built from,
+  baked in via the `GREENLIGHT_SHA` build-arg) at `/__version` and `/mcp/__version`, so the
+  Greenlight deploy gate can prove the running container is the build CI just shipped rather than
+  the still-running previous image. Unauthenticated; a build without the arg reports `null`.
 - `schema_version` stamp on the viewer payload + a server↔viewer compatibility test.
 - Eval grader scores **tool selection and answer correctness separately** (a case can no longer
   pass on the tool call alone); nightly runs both truth sets and both LLM providers.

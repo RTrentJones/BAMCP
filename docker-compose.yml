@@ -148,9 +148,15 @@ services:
       - BAMCP_RESOURCE_SERVER_URL=http://localhost:8000
       - BAMCP_ALLOW_REMOTE_FILES=true
       - BAMCP_RATE_LIMIT=60
+      # read_only root fs: BAMCPConfig.from_env() mkdirs the index cache at start-up (default
+      # ~/.cache/bamcp), which would crash with EROFS. Point it at the tmpfs below instead.
+      - BAMCP_CACHE_DIR=/home/bamcp/.cache/bamcp
     read_only: true
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
+      # Writable $HOME/.cache for the BAM index cache (and any library cache). mode=1777 because
+      # the image's non-root uid is assigned by `useradd -r`, not fixed, so uid= can't be pinned.
+      - /home/bamcp/.cache:noexec,nosuid,size=256m,mode=1777
     cap_drop:
       - ALL
     security_opt:

@@ -23,6 +23,7 @@ from .constants import (
     DEFAULT_TOKEN_EXPIRY_SECONDS,
     DEFAULT_TRANSPORT,
     DEFAULT_WINDOW_SIZE,
+    normalize_genome_build,
 )
 
 
@@ -114,6 +115,17 @@ class BAMCPConfig:
 
         if self.default_window < 1:
             raise ValueError(f"default_window must be at least 1, got {self.default_window}")
+
+        # Normalize the genome build (hg19/b37/GRCh37 -> GRCh37, hg38 -> GRCh38) so every
+        # consumer compares canonical names: a raw "hg19" never equals "GRCh37", which used to
+        # route GRCh37 lookups to GRCh38 sources. An unrecognized build fails loudly here
+        # rather than silently querying the wrong assembly later.
+        canonical_build = normalize_genome_build(self.genome_build)
+        if canonical_build is None:
+            raise ValueError(
+                f"genome_build must be GRCh37/hg19/b37 or GRCh38/hg38, got {self.genome_build!r}"
+            )
+        self.genome_build = canonical_build
 
         # Validate transport settings
         valid_transports = ("stdio", "sse", "streamable-http")

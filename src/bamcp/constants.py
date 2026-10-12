@@ -56,6 +56,25 @@ DEFAULT_TOKEN_EXPIRY_SECONDS = 3_600
 DEFAULT_REQUIRED_SCOPES = ("bamcp:read",)
 DEFAULT_GNOMAD_DATASET = "gnomad_r4"
 DEFAULT_GENOME_BUILD = "GRCh38"
+# Accepted spellings of the two supported human builds (case-insensitive).
+GENOME_BUILD_ALIASES = {
+    "grch37": "GRCh37",
+    "hg19": "GRCh37",
+    "b37": "GRCh37",
+    "hs37d5": "GRCh37",
+    "grch38": "GRCh38",
+    "hg38": "GRCh38",
+    "grch38.p13": "GRCh38",
+    "grch38.p14": "GRCh38",
+}
+
+
+def normalize_genome_build(name: object) -> str | None:
+    """Return the canonical build (``GRCh37`` / ``GRCh38``) for an alias, else ``None``."""
+    if not isinstance(name, str):
+        return None
+    return GENOME_BUILD_ALIASES.get(name.strip().lower())
+
 
 # Cache behavior
 DEFAULT_CACHE_TTL_SECONDS = 86_400  # 24 hours

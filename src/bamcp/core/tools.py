@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.parse import urljoin
 
 import httpx
 import pysam
@@ -391,28 +392,56 @@ def _set_cached_region(
     return data
 
 
+# Redirects for index downloads are followed by hand so every hop is re-validated
+# (httpx's follow_redirects would only validate the first URL).
+_INDEX_MAX_REDIRECTS = 5
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
 async def _download_index_streaming(
     client: httpx.AsyncClient,
     index_url: str,
     index_path: str,
     config: BAMCPConfig,
 ) -> str | None:
-    """Download an index with SSRF revalidation, streaming, and a size cap."""
-    validate_remote_url(index_url, config)
+    """Download an index with SSRF revalidation, streaming, and a size cap.
+
+    Redirects are followed manually (at most ``_INDEX_MAX_REDIRECTS`` hops) and
+    every ``Location`` is re-run through :func:`validate_remote_url`, so an allowed
+    host cannot bounce the download to an internal address. The DNS-resolving
+    validation runs in a worker thread to keep the event loop responsive. A
+    partially written temp file is always removed on failure.
+    """
+    url = index_url
+    for _hop in range(_INDEX_MAX_REDIRECTS + 1):
+        await asyncio.to_thread(validate_remote_url, url, config)
+        async with client.stream("GET", url) as resp:
+            if resp.status_code in _REDIRECT_STATUSES:
+                location = resp.headers.get("location")
+                if not location:
+                    logger.warning("Index redirect without Location: %s", url)
+                    return None
+                url = urljoin(url, location)
+                continue
+            if resp.status_code == 404:
+                return None
+            if resp.status_code != 200:
+                logger.warning("Index download failed (%d): %s", resp.status_code, url)
+                return None
+            return await _stream_index_to_file(resp, index_path, config)
+    raise ValueError(f"Index download exceeded {_INDEX_MAX_REDIRECTS} redirects")
+
+
+async def _stream_index_to_file(resp: httpx.Response, index_path: str, config: BAMCPConfig) -> str:
+    """Stream ``resp`` into ``index_path`` atomically, enforcing the size cap."""
+    content_length = resp.headers.get("content-length")
+    if content_length and int(content_length) > config.max_remote_index_bytes:
+        raise ValueError("Remote index exceeds configured maximum size")
+
+    Path(index_path).parent.mkdir(parents=True, exist_ok=True)
     total = 0
     tmp_path = ""
-    async with client.stream("GET", index_url) as resp:
-        if resp.status_code == 404:
-            return None
-        if resp.status_code != 200:
-            logger.warning("Index download failed (%d): %s", resp.status_code, index_url)
-            return None
-
-        content_length = resp.headers.get("content-length")
-        if content_length and int(content_length) > config.max_remote_index_bytes:
-            raise ValueError("Remote index exceeds configured maximum size")
-
-        Path(index_path).parent.mkdir(parents=True, exist_ok=True)
+    try:
         with tempfile.NamedTemporaryFile(
             dir=str(Path(index_path).parent),
             prefix=".index-",
@@ -425,8 +454,14 @@ async def _download_index_streaming(
                 if total > config.max_remote_index_bytes:
                     raise ValueError("Remote index exceeds configured maximum size")
                 tmp.write(chunk)
+        Path(tmp_path).replace(index_path)
+    except BaseException:
+        # Oversized body, network error mid-stream, cancellation, failed rename:
+        # never leave a ``.index-XXXX.tmp`` behind in the cache directory.
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
+        raise
 
-    Path(tmp_path).replace(index_path)
     logger.info("Cached index (%d bytes): %s", total, index_path)
     return index_path
 
@@ -474,7 +509,7 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
             return index_path
 
         logger.info("Downloading index for remote BAM: %s", file_path)
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
             for index_url in index_urls:
                 try:
                     downloaded = await _download_index_streaming(

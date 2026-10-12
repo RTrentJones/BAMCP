@@ -285,8 +285,8 @@ class BAMCPConfig:
             max_remote_index_bytes=_env_int(
                 "BAMCP_MAX_REMOTE_INDEX_BYTES", DEFAULT_MAX_REMOTE_INDEX_BYTES
             ),
-            max_index_cache_bytes=int(
-                env.get("BAMCP_MAX_INDEX_CACHE_BYTES", str(DEFAULT_MAX_INDEX_CACHE_BYTES))
+            max_index_cache_bytes=_env_int(
+                "BAMCP_MAX_INDEX_CACHE_BYTES", DEFAULT_MAX_INDEX_CACHE_BYTES
             ),
             allowed_directories=[
                 d.strip() for d in env.get("BAMCP_ALLOWED_DIRECTORIES", "").split(",") if d.strip()

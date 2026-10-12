@@ -113,7 +113,7 @@ def _perfect_router():
         1101: _curation(["read_position_bias", "strand_bias"], 0.7, "high"),
         2076: _curation(["low_depth"], 0.3, "medium"),
         2501: _curation([], 0.0, "low"),
-        1151: _curation(["read_position_bias"], 0.3, "medium"),
+        1151: _curation([], 0.0, "low"),  # clean control: no flags since the position-bias fix
         2801: _curation([], 0.0, "low", confidence="high"),  # earns high confidence
     }
     negatives = {"chr1:2100-2150": [], "chr1:300-600": [], "chr2:100-400": []}

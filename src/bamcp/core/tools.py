@@ -972,7 +972,7 @@ async def _fetch_region_data(
     ttl = min(config.cache_ttl, DEFAULT_CACHE_TTL_SECONDS)
 
     if vcf_path is not None:
-        validate_variant_file_path(vcf_path, config)
+        await asyncio.to_thread(validate_variant_file_path, vcf_path, config)
 
     # Readless coverage/variant queries (no reads, no VCF overlay) are tile-cached
     # so overlapping viewports reuse work. variants mode needs a reference for the
@@ -1126,7 +1126,9 @@ def _format_variant_line(variant: dict[str, Any]) -> str:
     return line
 
 
-def _resolve_reference(args: dict[str, Any], config: BAMCPConfig) -> tuple[str | None, str | None]:
+async def _resolve_reference(
+    args: dict[str, Any], config: BAMCPConfig
+) -> tuple[str | None, str | None]:
     """Return ``(explicit_reference, effective_reference)`` for a tool call.
 
     Validates only a caller-supplied reference — that is the untrusted SSRF vector. A
@@ -1136,7 +1138,7 @@ def _resolve_reference(args: dict[str, Any], config: BAMCPConfig) -> tuple[str |
     """
     explicit_reference = args.get("reference")
     if explicit_reference:
-        validate_reference_path(explicit_reference, config)
+        await asyncio.to_thread(validate_reference_path, explicit_reference, config)
     return explicit_reference, explicit_reference or config.reference
 
 
@@ -1171,10 +1173,10 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
       - ``"bamcp"``: BAMCP's read-level candidates only; any ``vcf_path`` is ignored.
     """
     file_path = args["file_path"]
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     region = args["region"]
     validate_region(region)
-    _, reference = _resolve_reference(args, config)
+    _, reference = await _resolve_reference(args, config)
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
     min_vaf = args.get("min_vaf", config.min_vaf)
@@ -1227,10 +1229,10 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
 async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Return coverage statistics."""
     file_path = args["file_path"]
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     region = args["region"]
     validate_region(region)
-    _, reference = _resolve_reference(args, config)
+    _, reference = await _resolve_reference(args, config)
 
     data = await _fetch_region_with_timeout(file_path, region, reference, config, mode="coverage")
 
@@ -1269,7 +1271,7 @@ async def _detect_bam_build(file_path: str, config: BAMCPConfig) -> dict:
     """Detect a BAM/CRAM's genome build from its header. Returns detect_genome_build()'s dict."""
     from .reference import detect_genome_build
 
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     index_path = await _ensure_cached_index(file_path, config)
     contigs = await asyncio.wait_for(
         _run_in_parse_pool(_read_contigs_sync, file_path, config.reference, index_path),
@@ -1289,8 +1291,8 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
     )
 
     file_path = args["file_path"]
-    validate_path(file_path, config)
-    _, reference = _resolve_reference(args, config)
+    await asyncio.to_thread(validate_path, file_path, config)
+    _, reference = await _resolve_reference(args, config)
 
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
@@ -1549,10 +1551,10 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     ``validate_region`` as visualize_region, so both tools accept exactly the same contigs.
     """
     file_path = args["file_path"]
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     position = args["position"]
     window = args.get("window", config.default_window)
-    explicit_reference, reference = _resolve_reference(args, config)
+    explicit_reference, reference = await _resolve_reference(args, config)
     contig = args.get("contig") or await _first_contig(file_path, reference, config)
 
     # ``position`` is 1-based; build a 1-based inclusive window of ``window`` bases
@@ -1580,10 +1582,10 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     Primary MCP Apps tool — returns serialized region data with UI metadata.
     """
     file_path = args["file_path"]
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     region = args["region"]
     validate_region(region)
-    explicit_reference, reference = _resolve_reference(args, config)
+    explicit_reference, reference = await _resolve_reference(args, config)
 
     return await _viewer_response(
         args,
@@ -1603,10 +1605,10 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     Text-only summary for LLM reasoning — no UI metadata.
     """
     file_path = args["file_path"]
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     region = args["region"]
     validate_region(region)
-    _, reference = _resolve_reference(args, config)
+    _, reference = await _resolve_reference(args, config)
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
@@ -1812,8 +1814,8 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
     ``contig``, the BAM's first contig is scanned.
     """
     file_path = args["file_path"]
-    validate_path(file_path, config)
-    _, reference = _resolve_reference(args, config)
+    await asyncio.to_thread(validate_path, file_path, config)
+    _, reference = await _resolve_reference(args, config)
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
 

@@ -13,6 +13,7 @@ Research-grade only. Not a clinical determination.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -371,7 +372,7 @@ async def handle_classify_variant(args: dict[str, Any], config: BAMCPConfig) -> 
     from ..core.validation import validate_path, validate_variant_input
 
     file_path = args["file_path"]
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     chrom = args["chrom"]
     pos = args["pos"]
     ref = args["ref"]

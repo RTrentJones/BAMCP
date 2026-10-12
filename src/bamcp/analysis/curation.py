@@ -323,7 +323,7 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     from ..core.tools import _applied_filters, _fetch_region_with_timeout
 
     file_path = args["file_path"]
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     chrom = args["chrom"]
     pos = args["pos"]
     ref = args["ref"]
@@ -333,7 +333,7 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     # is used as-is. See the same pattern in core/tools.py handlers.
     explicit_reference = args.get("reference")
     if explicit_reference:
-        validate_reference_path(explicit_reference, config)
+        await asyncio.to_thread(validate_reference_path, explicit_reference, config)
     reference = explicit_reference or config.reference
     output_format = args.get("format", "text")
     if output_format not in _VALID_FORMATS:

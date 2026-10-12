@@ -18,6 +18,7 @@ from bamcp.core.validation import (
     validate_remote_url,
     validate_variant_file_path,
     validate_variant_input,
+    warn_if_remote_unrestricted,
 )
 
 _PUBLIC_IP_ADDRINFO = [(2, 1, 6, "", ("93.184.216.34", 443))]
@@ -740,3 +741,26 @@ class TestIsCram:
         with patch("bamcp.core.parsers.pysam.AlignmentFile") as af:
             parsers._open_alignment("https://h.example.com/S1.CRAM?sig=1")
         assert af.call_args[0][1] == "rc"
+
+
+class TestWarnIfRemoteUnrestricted:
+    """Startup warning: htslib redirects can't be hooked, so the allow-list is the control."""
+
+    @pytest.mark.unit
+    def test_warns_without_allow_list(self, caplog):
+        with caplog.at_level("WARNING", logger="bamcp.core.validation"):
+            assert warn_if_remote_unrestricted(BAMCPConfig(allow_remote_files=True)) is True
+        assert "BAMCP_ALLOWED_REMOTE_HOSTS" in caplog.text
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "config",
+        [
+            BAMCPConfig(allow_remote_files=False),
+            BAMCPConfig(allow_remote_files=True, allowed_remote_hosts=["data.example.com"]),
+        ],
+    )
+    def test_silent_when_safe(self, config, caplog):
+        with caplog.at_level("WARNING", logger="bamcp.core.validation"):
+            assert warn_if_remote_unrestricted(config) is False
+        assert caplog.text == ""

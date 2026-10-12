@@ -6,6 +6,7 @@ from typing import Literal, get_args
 
 from .config import BAMCPConfig
 from .core.tools import get_cache
+from .core.validation import warn_if_remote_unrestricted
 from .server import create_server
 
 Transport = Literal["stdio", "sse", "streamable-http"]
@@ -55,6 +56,8 @@ def main() -> None:
         jsonl_path=config.telemetry_path,
         otel_enabled=config.telemetry_otel_enabled,
     )
+
+    warn_if_remote_unrestricted(config)
 
     # Register cleanup on exit to remove this session's cache files
     def cleanup_on_exit() -> None:

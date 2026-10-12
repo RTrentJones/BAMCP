@@ -7,6 +7,7 @@ and variant parameters (chromosome, position, alleles).
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import socket
 from pathlib import Path
@@ -14,6 +15,8 @@ from urllib.parse import urlparse
 
 from ..config import BAMCPConfig
 from ..constants import REMOTE_FILE_SCHEMES
+
+logger = logging.getLogger(__name__)
 
 # Pattern for valid chromosome names (chr prefix optional, allows chr1-chr99 or 1-99, X, Y, M, MT)
 CHROM_PATTERN = re.compile(r"^(chr)?(\d{1,2}|[XYM]|MT)$", re.IGNORECASE)
@@ -110,6 +113,13 @@ def validate_remote_url(url: str, config: BAMCPConfig) -> None:
         downloads) to narrow the window, but the only robust defense for
         untrusted input is the ``allowed_remote_hosts`` allow-list. Host matching
         is exact per-host (no implicit subdomain wildcards).
+
+        Redirects: BAMCP's own index downloads follow redirects by hand and
+        re-validate every hop, but the BAM/CRAM, reference and VCF URLs are fetched
+        by htslib/libcurl, whose redirect handling cannot be hooked from Python. An
+        allowed host that redirects (or is rebound) to an internal address is
+        therefore only stopped by the allow-list — see
+        :func:`warn_if_remote_unrestricted`.
     """
     # htslib reads ``<url>##idx##<index-url>`` as "load the index from <index-url>".
     # urlparse sees everything after the first '#' as a fragment, so only the first
@@ -167,6 +177,25 @@ def validate_remote_url(url: str, config: BAMCPConfig) -> None:
         ip_str = str(addr_info[4][0])
         if _is_private_ip(ip_str):
             raise ValueError("Remote URL resolves to private/internal address (blocked)")
+
+
+def warn_if_remote_unrestricted(config: BAMCPConfig) -> bool:
+    """Log a startup warning when remote files are on without a host allow-list.
+
+    Per-URL validation cannot see redirects followed inside htslib/libcurl or DNS
+    rebinding between check and fetch, so on an internet-facing server the
+    ``BAMCP_ALLOWED_REMOTE_HOSTS`` allow-list is the real SSRF control. This only
+    warns (startup must not fail); returns True when the warning was emitted.
+    """
+    if config.allow_remote_files and not config.allowed_remote_hosts:
+        logger.warning(
+            "BAMCP_ALLOW_REMOTE_FILES is enabled without BAMCP_ALLOWED_REMOTE_HOSTS: "
+            "remote URLs are only checked for private/internal addresses, which does "
+            "not cover redirects followed by htslib or DNS rebinding. Set an exact-host "
+            "allow-list for any internet-facing deployment."
+        )
+        return True
+    return False
 
 
 def validate_region(region: str) -> None:

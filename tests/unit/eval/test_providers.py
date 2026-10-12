@@ -65,3 +65,67 @@ def test_get_provider_none_model_uses_provider_default():
     assert get_provider("anthropic", None).model.startswith("claude")
     # An explicit model is still honored.
     assert get_provider("openai", "gpt-4o").model == "gpt-4o"
+
+
+# ── Fixed, separate, deterministic judge ────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_resolve_judge_defaults_to_fixed_separate_model():
+    from bamcp.eval.providers import DEFAULT_JUDGE_MODEL, DEFAULT_JUDGE_PROVIDER, resolve_judge
+
+    for subject in ("claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4-5"):
+        assert resolve_judge("anthropic", subject) == (DEFAULT_JUDGE_PROVIDER, DEFAULT_JUDGE_MODEL)
+    assert resolve_judge("mock", "mock") is None
+
+
+@pytest.mark.unit
+def test_resolve_judge_refuses_self_grading():
+    from bamcp.eval.providers import DEFAULT_JUDGE_MODEL, resolve_judge
+
+    with pytest.raises(ValueError, match="model under test"):
+        resolve_judge("anthropic", DEFAULT_JUDGE_MODEL)
+    with pytest.raises(ValueError, match="model under test"):
+        resolve_judge("anthropic", "claude-x", "anthropic", "claude-x")
+    # An explicit override that differs is fine, and openai falls back to its default.
+    assert resolve_judge("anthropic", "claude-x", "anthropic", "claude-y") == (
+        "anthropic",
+        "claude-y",
+    )
+    assert resolve_judge("anthropic", "claude-x", "openai")[0] == "openai"
+
+
+@pytest.mark.unit
+def test_judge_runs_at_temperature_zero():
+    pytest.importorskip("anthropic")
+    from bamcp.eval.providers import build_judge_provider
+
+    judge = build_judge_provider("anthropic", "claude-y")
+    assert judge.temperature == 0.0
+    assert judge.model == "claude-y"
+
+
+@pytest.mark.unit
+async def test_anthropic_provider_forwards_temperature(monkeypatch):
+    anthropic = pytest.importorskip("anthropic")
+    from bamcp.eval.providers import AnthropicProvider
+
+    seen = {}
+
+    class _Resp:
+        content = []
+
+    class _Messages:
+        async def create(self, **kwargs):
+            seen.update(kwargs)
+            return _Resp()
+
+    class _Client:
+        messages = _Messages()
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", lambda: _Client())
+    await AnthropicProvider("m", temperature=0.0).chat_with_tools([], [])
+    assert seen["temperature"] == 0.0
+    seen.clear()
+    await AnthropicProvider("m").chat_with_tools([], [])
+    assert "temperature" not in seen

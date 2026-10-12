@@ -13,7 +13,15 @@ import json
 import sys
 from pathlib import Path
 
-from .providers import LLMProvider, default_model, get_provider
+from .providers import (
+    DEFAULT_JUDGE_MODEL,
+    DEFAULT_JUDGE_PROVIDER,
+    LLMProvider,
+    build_judge_provider,
+    default_model,
+    get_provider,
+    resolve_judge,
+)
 from .report import write_reports, write_summary_line
 from .router import InProcessRouter, ToolRouter
 from .runner import run_cases
@@ -51,9 +59,18 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
         "(so --provider openai does not inherit an Anthropic model id).",
     )
     p.add_argument(
+        "--judge-provider",
+        default=None,
+        choices=["anthropic", "openai"],
+        help=f"Provider for the LLM judge (default: {DEFAULT_JUDGE_PROVIDER}).",
+    )
+    p.add_argument(
         "--judge-model",
         default=None,
-        help="Override model for the LLM judge (defaults to the same model).",
+        help=(
+            f"Model for the LLM judge (default: {DEFAULT_JUDGE_MODEL}). The judge is fixed, "
+            "runs at temperature 0, and must differ from the model under test."
+        ),
     )
     p.add_argument(
         "--cache",
@@ -119,6 +136,7 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
         # Resolve --model to the provider's actual default when omitted, so run_config.yaml and
         # the HTML report record the model that was really used (not `null`).
         model=args.model or default_model(args.provider),
+        judge_provider=args.judge_provider,
         judge_model=args.judge_model,
         cache=args.cache,
         subset=subset,
@@ -133,15 +151,24 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
     )
 
 
-def _filter_cached(results_path: Path, cases):  # noqa: ANN001, ANN201
-    """Drop cases that have a passing result in ``results.json``."""
+def _filter_cached(results_path: Path, cases, provider: str, model: str):  # noqa: ANN001, ANN201
+    """Drop cases that have a passing result in ``results.json`` from the SAME
+    provider + model. A pass by a different model (or an older row that does not
+    record one) is not reused."""
     if not results_path.exists():
         return cases
     try:
         prior = json.loads(results_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return cases
-    passed = {r.get("case_name") for r in prior if r.get("passed")}
+    passed = {
+        r.get("case_name")
+        for r in prior
+        if isinstance(r, dict)
+        and r.get("passed")
+        and r.get("provider") == provider
+        and r.get("model") == model
+    }
     return [c for c in cases if c.name not in passed]
 
 
@@ -154,10 +181,14 @@ def _build_router(config: RunConfig) -> ToolRouter:
 
 
 def _build_judge(config: RunConfig) -> LLMProvider | None:
-    if config.provider == "mock":
+    resolved = resolve_judge(
+        config.provider, config.model, config.judge_provider, config.judge_model
+    )
+    if resolved is None:
         return None  # No judge in fully-offline runs.
-    model = config.judge_model or config.model
-    return get_provider(config.provider, model)
+    # Record what actually graded the run (run_config.yaml / the HTML report).
+    config.judge_provider, config.judge_model = resolved
+    return build_judge_provider(*resolved)
 
 
 async def _run(config: RunConfig) -> int:
@@ -165,15 +196,22 @@ async def _run(config: RunConfig) -> int:
         print(f"Test cases file not found: {config.test_cases_path}", file=sys.stderr)
         return 2
 
-    cases = load_cases(config.test_cases_path)
-    cases = apply_subset(cases, config.subset)
+    all_cases = load_cases(config.test_cases_path)
+    cases = apply_subset(all_cases, config.subset)
+    if not cases:
+        # An empty selection must not "pass" (all([]) is True).
+        where = f" (subset {config.subset} of {len(all_cases)})" if config.subset else ""
+        print(f"No cases selected{where}.", file=sys.stderr)
+        return 2
 
     if config.dry_run:
         print(f"Parsed {len(cases)} cases from {config.test_cases_path}")
         return 0
 
     if config.cache:
-        cases = _filter_cached(config.output_dir / "results.json", cases)
+        cases = _filter_cached(
+            config.output_dir / "results.json", cases, config.provider, config.model
+        )
         if not cases:
             print("All cases cached. Nothing to do.")
             return 0
@@ -208,7 +246,11 @@ async def _run(config: RunConfig) -> int:
 
     write_reports(results, config, config.output_dir)
     print(write_summary_line(results))
-    return 0 if all(r.verdict.passed for r in results) else 1
+    graded = [r for r in results if not r.skipped]
+    if not graded:
+        print("No case was graded (all skipped).", file=sys.stderr)
+        return 1
+    return 0 if all(r.verdict.passed for r in graded) else 1
 
 
 def main(argv: list[str] | None = None) -> int:

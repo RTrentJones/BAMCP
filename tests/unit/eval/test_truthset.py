@@ -37,9 +37,17 @@ def test_load_truthset_parses_manifest():
     keys = {s.key for s in ts.variant_sites}
     assert ("chr1", 2501, "A", "G") in keys
     assert ("chr1", 2501, "A", "T") in keys
-    # Exactly one clean control, three artifact sites, one confidence control.
+    # Exactly one clean control, five artifact sites, one confidence control.
     assert sum(s.is_clean_control for s in ts.variant_sites) == 1
-    assert sum(s.expected_artifact is not None for s in ts.variant_sites) == 3
+    assert {s.expected_artifact for s in ts.variant_sites} - {None} == {
+        "strand_bias",
+        "read_position_bias",
+        "low_mapq",
+        "homopolymer",
+        "low_depth",
+    }
+    assert ts.vaf_tolerance == 0.02
+    assert all(s.expected_vaf is not None for s in ts.variant_sites)
     assert sum(s.expected_confidence is not None for s in ts.variant_sites) == 1
     assert len(ts.negative_regions) == 3
 
@@ -66,8 +74,12 @@ class FakeRouter:
         return RouterResult(ok=False, text="", error="unknown")
 
 
-def _variant(pos, alt, ref="A", contig="chr1"):
-    return {"contig": contig, "position": pos, "ref": ref, "alt": alt}
+_VAFS = {1051: 0.4, 1101: 0.353, 1151: 0.435, 1201: 0.278, 1803: 0.273, 2076: 1.0}
+
+
+def _variant(pos, alt, ref="A", contig="chr1", vaf=None):
+    vaf = vaf if vaf is not None else _VAFS.get(pos, 0.15 if pos == 2501 else 0.417)
+    return {"contig": contig, "position": pos, "ref": ref, "alt": alt, "vaf": vaf}
 
 
 def _curation(risk_types, risk_score, likelihood, confidence="low"):
@@ -98,6 +110,9 @@ def _perfect_router():
         1051: _curation(["strand_bias", "read_position_bias"], 0.7, "high"),
         1201: _curation(["low_mapq", "strand_bias"], 0.95, "high"),
         1803: _curation(["homopolymer"], 0.6, "high"),
+        1101: _curation(["read_position_bias", "strand_bias"], 0.7, "high"),
+        2076: _curation(["low_depth"], 0.3, "medium"),
+        2501: _curation([], 0.0, "low"),
         1151: _curation(["read_position_bias"], 0.3, "medium"),
         2801: _curation([], 0.0, "low", confidence="high"),  # earns high confidence
     }
@@ -238,3 +253,143 @@ async def test_score_truthset_tolerates_failed_tool_calls():
     # Nothing detected => recall 0, but scoring degrades instead of raising.
     assert report.detection.recall == 0.0
     assert report.false_positives == 0
+    # ...and every failed call is recorded and fails the gate — 0 FPs from a
+    # negative region that errored is not evidence of anything.
+    assert any("(negative)" in f for f in report.tool_failures)
+    passed, failures = report.meets_floors()
+    assert not passed
+    assert any("tool calls failed" in f for f in failures)
+
+
+# ── Review fixes: failures are failures; labels are checked ─────────────────
+
+
+async def test_failed_negative_region_call_fails_gate():
+    ts = load_truthset(MANIFEST)
+    router = _perfect_router()
+    original = router.call
+
+    async def call(name, arguments):
+        if name == "get_variants" and arguments["region"] == "chr2:100-400":
+            return RouterResult(ok=False, text="", error="contig missing")
+        return await original(name, arguments)
+
+    router.call = call
+    report = await score_truthset(ts, BAMCPConfig(), router=router)
+    assert report.false_positives == 0
+    assert report.tool_failures == ["get_variants chr2:100-400 (negative): contig missing"]
+    passed, failures = report.meets_floors()
+    assert not passed
+
+
+async def test_negative_region_error_payload_fails_gate():
+    ts = load_truthset(MANIFEST)
+    router = _perfect_router()
+    original = router.call
+
+    async def call(name, arguments):
+        if name == "get_variants" and arguments["region"] == "chr1:300-600":
+            return RouterResult(ok=True, text=json.dumps({"error": "invalid region"}))
+        return await original(name, arguments)
+
+    router.call = call
+    report = await score_truthset(ts, BAMCPConfig(), router=router)
+    assert any("invalid region" in f for f in report.tool_failures)
+    assert not report.meets_floors()[0]
+
+
+async def test_curation_not_found_payload_does_not_pass_as_clean():
+    # get_variant_curation_summary answers ok=True with {"error": "...not found"};
+    # that used to read as risk 0 / likelihood unknown and pass clean_discriminated.
+    ts = load_truthset(MANIFEST)
+    router = _perfect_router()
+    router._curations[1151] = {"error": "Variant chr1:1151 A>G not found in region."}
+    report = await score_truthset(ts, BAMCPConfig(), router=router)
+    assert report.clean_discriminated is False
+    assert any("not found" in f for f in report.tool_failures)
+    passed, failures = report.meets_floors()
+    assert not passed
+    assert any("tool calls failed" in f for f in failures)
+
+
+async def test_curation_without_likelihood_is_a_tool_failure():
+    ts = load_truthset(MANIFEST)
+    router = _perfect_router()
+    router._curations[2801] = {"confidence": "high"}
+    report = await score_truthset(ts, BAMCPConfig(), router=router)
+    assert any("no artifact_likelihood" in f for f in report.tool_failures)
+    assert not report.meets_floors()[0]
+
+
+async def test_artifact_site_below_expected_likelihood_fails():
+    ts = load_truthset(MANIFEST)
+    router = _perfect_router()
+    # Type still surfaced, but the assessment is too weak for the label (>= medium).
+    router._curations[1803] = _curation(["homopolymer"], 0.15, "low")
+    report = await score_truthset(ts, BAMCPConfig(), router=router)
+    assert report.artifact_recall == 1.0
+    assert report.likelihood_mismatches == ["chr1:1803A likelihood low (expected >= medium)"]
+    passed, failures = report.meets_floors()
+    assert not passed
+    assert any("likelihood" in f for f in failures)
+
+
+async def test_non_artifact_site_above_expected_likelihood_fails():
+    ts = load_truthset(MANIFEST)
+    router = _perfect_router()
+    router._curations[2801] = _curation(["strand_bias"], 0.4, "medium", confidence="high")
+    report = await score_truthset(ts, BAMCPConfig(), router=router)
+    assert report.likelihood_mismatches == ["chr1:2801T likelihood medium (expected <= low)"]
+
+
+async def test_vaf_outside_tolerance_fails():
+    ts = load_truthset(MANIFEST)
+    router = _perfect_router()
+    router._detected = [
+        _variant(1051, "T", vaf=0.25) if v["position"] == 1051 else v for v in router._detected
+    ]
+    report = await score_truthset(ts, BAMCPConfig(), router=router)
+    assert len(report.vaf_mismatches) == 1 and "chr1:1051" in report.vaf_mismatches[0]
+    passed, failures = report.meets_floors()
+    assert not passed
+    assert any("VAF" in f for f in failures)
+
+
+def test_likelihood_mismatch_rejects_unknown_labels():
+    from bamcp.eval.truthset import _likelihood_mismatch
+
+    assert _likelihood_mismatch("medium", "high", floor=True) is None
+    assert _likelihood_mismatch("medium", "low", floor=False) is None
+    assert "unrecognized" in _likelihood_mismatch("severe", "high", floor=True)
+    assert "unknown" in _likelihood_mismatch("low", "unknown", floor=False)
+
+
+def test_empty_truthset_manifest_is_rejected(tmp_path):
+    manifest = tmp_path / "m.yaml"
+    manifest.write_text("dataset: t\nversion: 1\ndetection_region: chr1:1-10\nvariant_sites: []\n")
+    with pytest.raises(ValueError, match="no variant_sites"):
+        load_truthset(manifest)
+
+
+def test_empty_detection_fails_floors():
+    report = TruthsetReport(
+        dataset="t", version=1, detection=PRF(tp=0, fp=0, fn=0), false_positives=0
+    )
+    passed, failures = report.meets_floors()
+    assert not passed
+    assert any("empty truth set" in f for f in failures)
+
+
+def test_format_report_lists_new_checks():
+    from bamcp.eval.truthset import _format_report
+
+    report = TruthsetReport(
+        dataset="t",
+        version=1,
+        detection=PRF(tp=1, fp=0, fn=0),
+        false_positives=0,
+        tool_failures=["x"],
+        vaf_mismatches=["y"],
+    )
+    text = _format_report(report, False, [])
+    assert "tool failures" in text and "VAF mismatches" in text

@@ -12,7 +12,14 @@
  */
 
 import { BAMCPClient, DebugInfo } from "./client";
-import { BASE_COLORS, displayPos, escapeHtml, svColor, svTypeLabel } from "./constants";
+import {
+    BASE_COLORS,
+    displayPos,
+    escapeHtml,
+    svColor,
+    svTypeLabel,
+    toRegionString,
+} from "./constants";
 import { Renderer } from "./renderer";
 import { StateManager, DEFAULT_SETTINGS } from "./state";
 import {
@@ -115,6 +122,7 @@ class BAMCPViewer {
 
             // Host data always resets viewport
             this.state.loadData(data);
+            this.syncRegionInput();
             this.renderVariantTable();
             this.renderer.resize();
             this.scheduleContextUpdate();
@@ -563,9 +571,9 @@ class BAMCPViewer {
         this.sequenceNotice.classList.add('loading');
 
         // Build request parameters
-        const start = Math.max(0, Math.floor(this.state.viewport.start));
-        const end = Math.ceil(this.state.viewport.end);
-        const region = `${this.state.data.contig}:${start}-${end}`;
+        const region = toRegionString(
+            this.state.data.contig, this.state.viewport.start, this.state.viewport.end,
+        );
         const filePath = this.state.data.file_path;
 
         // Use direct tool call if file_path available (reliable), else fallback to sendMessage
@@ -619,9 +627,9 @@ class BAMCPViewer {
     private loadDetailView(): void {
         if (!this.state.data || this.pendingSequenceRequest) return;
 
-        const start = Math.max(0, Math.floor(this.state.viewport.start));
-        const end = Math.ceil(this.state.viewport.end);
-        const region = `${this.state.data.contig}:${start}-${end}`;
+        const region = toRegionString(
+            this.state.data.contig, this.state.viewport.start, this.state.viewport.end,
+        );
         const filePath = this.state.data.file_path;
 
         this.pendingSequenceRequest = true;
@@ -709,9 +717,7 @@ class BAMCPViewer {
 
             // Pad fetch region by 50% each side to reduce subsequent refetches
             const padding = sp * 0.5;
-            const fetchStart = Math.max(0, Math.floor(vs - padding));
-            const fetchEnd = Math.ceil(ve + padding);
-            const region = `${d.contig}:${fetchStart}-${fetchEnd}`;
+            const region = toRegionString(d.contig, vs - padding, ve + padding);
 
             const data = await this.client.fetchRegionDirect(
                 d.file_path, region, d.reference, d.vcf_path, d.variant_source,
@@ -738,13 +744,30 @@ class BAMCPViewer {
                 : '0';
 
             const context = {
-                region: `${this.state.data.contig}:${this.state.viewport.start.toFixed(0)}-${this.state.viewport.end.toFixed(0)}`,
+                region: toRegionString(
+                    this.state.data.contig, this.state.viewport.start, this.state.viewport.end,
+                ),
                 reads: this.state.data.reads.length,
                 meanCoverage: parseFloat(meanCov),
                 variantCount: this.state.data.variants.length,
             };
             this.client.updateModelContext(context);
+            this.syncRegionInput();
         }, CONTEXT_UPDATE_DEBOUNCE_MS);
+    }
+
+    /**
+     * Mirror the current viewport into the region box as a 1-based inclusive
+     * samtools-style string (what the user would type, and what tools accept).
+     * Skipped while the user is editing the box so we never clobber their input.
+     */
+    private syncRegionInput(): void {
+        if (!this.state.data) return;
+        const input = document.getElementById('region-input') as HTMLInputElement | null;
+        if (!input || document.activeElement === input) return;
+        input.value = toRegionString(
+            this.state.data.contig, this.state.viewport.start, this.state.viewport.end,
+        );
     }
 
     private renderVariantTable(): void {
@@ -1237,7 +1260,9 @@ class BAMCPViewer {
     private syncToAI(): void {
         if (!this.state.data) return;
 
-        const region = `${this.state.data.contig}:${Math.floor(this.state.viewport.start)}-${Math.floor(this.state.viewport.end)}`;
+        const region = toRegionString(
+            this.state.data.contig, this.state.viewport.start, this.state.viewport.end,
+        );
         this.client.syncContext(region);
     }
 }

@@ -159,3 +159,17 @@ export function escapeHtml(value: string): string {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
 }
+
+/**
+ * Build a samtools-style region string (1-based, inclusive on both ends) from the
+ * viewer's internal 0-based half-open interval [start0, end0). This is the contract
+ * every tool's `region` argument speaks: `chr1:1051-1051` is exactly one base (the
+ * internal 0-based position 1050). Fractional viewport edges are widened outward so
+ * the whole visible span is covered, a negative start clamps to the first base, and
+ * an empty/inverted interval still yields a single base rather than an invalid range.
+ */
+export function toRegionString(contig: string, start0: number, end0: number): string {
+    const s = Math.max(0, Math.floor(start0));
+    const e = Math.max(s + 1, Math.ceil(end0));
+    return `${contig}:${s + 1}-${e}`;
+}

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { displayPos, EXPECTED_SCHEMA_VERSION, formatRulerLabel } from "./constants";
+import {
+  displayPos,
+  EXPECTED_SCHEMA_VERSION,
+  formatRulerLabel,
+  toRegionString,
+} from "./constants";
 
 describe("displayPos — internal 0-based → user-facing 1-based", () => {
   it("adds one to convert the internal frame to the display frame", () => {
@@ -59,5 +64,37 @@ describe("payload schema version", () => {
   it("is a positive integer the server can match against", () => {
     expect(Number.isInteger(EXPECTED_SCHEMA_VERSION)).toBe(true);
     expect(EXPECTED_SCHEMA_VERSION).toBeGreaterThan(0);
+  });
+});
+
+describe("toRegionString — internal 0-based half-open → 1-based inclusive region", () => {
+  it("renders a single base as start == end (samtools convention)", () => {
+    // Internal [1050, 1051) is the one 1-based base 1051.
+    expect(toRegionString("chr1", 1050, 1051)).toBe("chr1:1051-1051");
+  });
+
+  it("maps [0, 100) to the first hundred bases 1-100", () => {
+    expect(toRegionString("chr1", 0, 100)).toBe("chr1:1-100");
+  });
+
+  it("covers the span exactly: inclusive length equals end0 - start0", () => {
+    const region = toRegionString("chr2", 999, 2000);
+    expect(region).toBe("chr2:1000-2000");
+    const [, a, b] = region.match(/:(\d+)-(\d+)$/)!;
+    expect(Number(b) - Number(a) + 1).toBe(2000 - 999);
+  });
+
+  it("widens fractional viewport edges outward", () => {
+    // [10.4, 20.2) touches internal bases 10..20 → 1-based 11..21.
+    expect(toRegionString("chr1", 10.4, 20.2)).toBe("chr1:11-21");
+  });
+
+  it("clamps a negative start to the first base", () => {
+    expect(toRegionString("chr1", -50, 50)).toBe("chr1:1-50");
+  });
+
+  it("never emits an empty or inverted range", () => {
+    expect(toRegionString("chr1", 100, 100)).toBe("chr1:101-101");
+    expect(toRegionString("chr1", 100, 90)).toBe("chr1:101-101");
   });
 });

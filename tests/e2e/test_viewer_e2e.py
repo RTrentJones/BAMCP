@@ -3391,3 +3391,19 @@ class TestVariantRowNavigation:
         selected = viewer_page.locator("#variant-table tr.selected")
         assert selected.count() == 1
         assert selected.get_attribute("data-key") == "chr1:250:G>C"
+
+
+class TestDragDoesNotLockTooltip:
+    @pytest.mark.e2e
+    def test_drag_pan_does_not_lock_tooltip(self, viewer_page: Page):
+        send_init_data(viewer_page, NARROW_DATA)
+        box = viewer_page.locator("#reads-canvas").bounding_box()
+        assert box is not None
+        x, y = box["x"] + box["width"] / 2, box["y"] + 6
+        viewer_page.mouse.move(x, y)
+        viewer_page.mouse.down()
+        viewer_page.mouse.move(x + 60, y, steps=6)
+        viewer_page.mouse.up()
+        viewer_page.wait_for_timeout(100)
+        locked = viewer_page.evaluate("() => viewer.state.lockedTooltip !== null")
+        assert not locked, "a drag-pan must not end by locking a tooltip"

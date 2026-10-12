@@ -161,6 +161,10 @@ class BAMCPViewer {
 
         // Window resize
         window.addEventListener('resize', () => this.renderer.resize());
+        // A devicePixelRatio change without a resize (dragging the window to a
+        // monitor with a different density, or browser zoom on some platforms)
+        // would leave the backing stores at the old density and render blurry.
+        this.watchDevicePixelRatio();
 
         // Init client and update UI based on available modes
         this.client.init().then(() => {
@@ -169,6 +173,22 @@ class BAMCPViewer {
 
         // Initial render
         this.renderer.resize();
+    }
+
+    /**
+     * Re-run resize() whenever devicePixelRatio changes. A resolution media query
+     * only matches the DPR it was built for, so re-arm it with the new value on
+     * every change.
+     */
+    private watchDevicePixelRatio(): void {
+        if (typeof window.matchMedia !== 'function') return;
+        const mql = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+        const onChange = () => {
+            mql.removeEventListener?.('change', onChange);
+            this.renderer.resize();
+            this.watchDevicePixelRatio();
+        };
+        mql.addEventListener?.('change', onChange);
     }
 
     private updateDisplayModeButtons(): void {
@@ -273,23 +293,34 @@ class BAMCPViewer {
         // Settings controls
         this.setupSettingsControls();
 
-        // Pan via drag on reads canvas
+        // Pan via drag on reads canvas. mouseup clears isDragging before the
+        // click event fires, so a drag would end by locking a tooltip; track how
+        // far the pointer moved and swallow the click that ends a real drag.
         let isDragging = false;
         let lastX = 0;
+        let dragDistance = 0;
+        let suppressClick = false;
+        const DRAG_CLICK_THRESHOLD_PX = 4;
 
         this.readsCanvas.addEventListener('mousedown', (e) => {
             isDragging = true;
             lastX = e.clientX;
+            dragDistance = 0;
+            suppressClick = false;
         });
 
         window.addEventListener('mousemove', (e) => {
             if (!isDragging) return;
             const dx = e.clientX - lastX;
             lastX = e.clientX;
-            this.pan(-dx);
+            dragDistance += Math.abs(dx);
+            if (dx !== 0) this.pan(-dx);
         });
 
-        window.addEventListener('mouseup', () => isDragging = false);
+        window.addEventListener('mouseup', () => {
+            if (isDragging && dragDistance > DRAG_CLICK_THRESHOLD_PX) suppressClick = true;
+            isDragging = false;
+        });
 
         // Tooltips and hover state
         this.readsCanvas.addEventListener('mousemove', (e) => {
@@ -335,6 +366,10 @@ class BAMCPViewer {
         // Click to lock tooltip
         this.readsCanvas.addEventListener('click', (e) => {
             if (isDragging) return;
+            if (suppressClick) {
+                suppressClick = false;
+                return;
+            }
             const read = this.renderer.getReadAtPosition(e);
             if (read) {
                 this.state.lockedTooltip = { read, x: e.clientX, y: e.clientY };

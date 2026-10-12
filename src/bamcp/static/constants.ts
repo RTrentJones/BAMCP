@@ -149,10 +149,13 @@ export function svColor(svType: string): string {
 /**
  * Escape a string for safe interpolation into innerHTML. VCF-derived fields such as
  * a symbolic SV alt (`<DEL>`, `<DUP>`) contain angle brackets that would otherwise be
- * parsed as markup, so escape before injecting them into any HTML template.
+ * parsed as markup, so escape before injecting them into any HTML template. Also
+ * applies to BAM-derived text: a SAM QNAME may legally contain `<`, `>`, `"`, `'`, `&`.
+ * Non-string values are stringified first (null/undefined become empty), so numeric
+ * fields from an untrusted payload can be passed through it too.
  */
-export function escapeHtml(value: string): string {
-    return value
+export function escapeHtml(value: unknown): string {
+    return String(value ?? '')
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
@@ -172,4 +175,9 @@ export function toRegionString(contig: string, start0: number, end0: number): st
     const s = Math.max(0, Math.floor(start0));
     const e = Math.max(s + 1, Math.ceil(end0));
     return `${contig}:${s + 1}-${e}`;
+}
+
+/** Color for a single nucleotide, or `fallback` — never a prototype member like `constructor`. */
+export function baseColor(base: string, fallback: string): string {
+    return Object.prototype.hasOwnProperty.call(BASE_COLORS, base) ? BASE_COLORS[base] : fallback;
 }

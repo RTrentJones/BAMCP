@@ -13,7 +13,7 @@
 
 import { BAMCPClient, DebugInfo } from "./client";
 import {
-    BASE_COLORS,
+    baseColor,
     displayPos,
     escapeHtml,
     svColor,
@@ -801,16 +801,16 @@ class BAMCPViewer {
             const vafColor = v.vaf >= 0.4 ? '#22c55e' : v.vaf >= 0.2 ? '#f97316' : '#ef4444';
 
             // Quality color coding: green ≥30, orange 20-30, red <20
-            const qual = v.mean_quality || 0;
+            const qual = Number(v.mean_quality) || 0;
             const qualColor = qual >= 30 ? '#22c55e' : qual >= 20 ? '#f97316' : '#ef4444';
 
             // Strand counts: "5F:3R" format from accumulated evidence
             const evidence = this.state.store.getEvidence(`${v.position}:${v.ref}>${v.alt}`);
-            const strandDisplay = evidence
+            const strandDisplay = escapeHtml(evidence
                 ? `${evidence.forward_count}F:${evidence.reverse_count}R`
                 : (v.strand_forward != null && v.strand_reverse != null)
                     ? `${v.strand_forward}F:${v.strand_reverse}R`
-                    : '-';
+                    : '-');
 
             // Structural variants carry a symbolic alt (<DEL>/<DUP>/…); render it as a
             // typed badge and escape all VCF-derived text before injecting it as HTML.
@@ -818,25 +818,25 @@ class BAMCPViewer {
             if (v.variant_kind === 'sv') {
                 const svType = svTypeLabel(v.sv_type, v.alt);
                 const span = v.sv_end
-                    ? `${displayPos(v.position).toLocaleString()}–${Number(v.sv_end).toLocaleString()}`
+                    ? `${displayPos(Number(v.position)).toLocaleString()}–${Number(v.sv_end).toLocaleString()}`
                     : '';
                 // Badge color matches the canvas SV-span color for that type.
-                altCell = `<span class="sv-badge" style="background:${svColor(svType)}" title="${escapeHtml(v.alt)}${span ? ` (${span})` : ''}">${escapeHtml(svType)}</span>`;
+                altCell = `<span class="sv-badge" style="background:${svColor(svType)}" title="${escapeHtml(v.alt)}${span ? ` (${escapeHtml(span)})` : ''}">${escapeHtml(svType)}</span>`;
             } else {
-                altCell = `<span style="color:${BASE_COLORS[v.alt] || '#333'};font-weight:bold">${escapeHtml(v.alt)}</span>`;
+                altCell = `<span style="color:${baseColor(v.alt, '#333')};font-weight:bold">${escapeHtml(v.alt)}</span>`;
             }
             // A multi-sample VCF gets a small sample-count marker on the position cell.
-            const sampleCount = v.sample_names?.length ?? 0;
+            const sampleCount = Array.isArray(v.sample_names) ? v.sample_names.length : 0;
             const sampleMarker = sampleCount > 1
                 ? ` <span class="sample-count" title="${sampleCount} samples genotyped">×${sampleCount}</span>`
                 : '';
 
             tr.innerHTML = `
-                <td>${displayPos(v.position).toLocaleString()}${sampleMarker}</td>
+                <td>${escapeHtml(displayPos(Number(v.position)).toLocaleString())}${sampleMarker}</td>
                 <td>${escapeHtml(v.ref)}</td>
                 <td>${altCell}</td>
-                <td style="color:${vafColor};font-weight:500">${(v.vaf * 100).toFixed(1)}%</td>
-                <td>${v.depth}</td>
+                <td style="color:${vafColor};font-weight:500">${(Number(v.vaf) * 100).toFixed(1)}%</td>
+                <td>${escapeHtml(v.depth)}</td>
                 <td>${strandDisplay}</td>
                 <td style="color:${qualColor}">Q${qual.toFixed(0)}</td>
                 <td>
@@ -913,8 +913,9 @@ class BAMCPViewer {
         let mismatchHtml = '';
         if (read.mismatches.length > 0) {
             const mmList = read.mismatches.slice(0, 5).map(mm =>
-                `${displayPos(mm.pos).toLocaleString()}: <span style="color:${BASE_COLORS[mm.ref] || '#666'}">${mm.ref}</span>→` +
-                `<span style="color:${BASE_COLORS[mm.alt] || '#666'}">${mm.alt}</span>`
+                `${escapeHtml(displayPos(Number(mm.pos)).toLocaleString())}: ` +
+                `<span style="color:${baseColor(mm.ref, '#666')}">${escapeHtml(mm.ref)}</span>→` +
+                `<span style="color:${baseColor(mm.alt, '#666')}">${escapeHtml(mm.alt)}</span>`
             ).join(', ');
             const more = read.mismatches.length > 5 ? ` +${read.mismatches.length - 5} more` : '';
             mismatchHtml = `<br><span style="color:var(--color-text-muted)">Mismatches:</span> ${mmList}${more}`;
@@ -925,14 +926,18 @@ class BAMCPViewer {
         if (read.is_paired && read.insert_size) {
             const insertColor = Math.abs(read.insert_size) > 1000 ? 'var(--color-danger)' :
                                Math.abs(read.insert_size) < 100 ? 'var(--color-warning)' : 'var(--color-success)';
-            pairInfo += ` | Insert: <span style="color:${insertColor}">${Math.abs(read.insert_size)}bp</span>`;
+            pairInfo += ` | Insert: <span style="color:${insertColor}">${escapeHtml(Math.abs(read.insert_size))}bp</span>`;
         }
 
+        // Every BAM/server-derived value is escaped: a SAM QNAME may legally contain
+        // `<`, `>`, `"`, `'` and `&`, so an unescaped name is an XSS vector.
+        const pos = displayPos(Number(read.position)).toLocaleString();
+        const end = Number(read.end_position).toLocaleString();
         this.tooltip.innerHTML = `
-            <strong>${read.name}</strong><br>
-            Pos: ${displayPos(read.position).toLocaleString()}-${read.end_position.toLocaleString()}<br>
-            CIGAR: <span style="font-family:monospace">${read.cigar}</span><br>
-            MAPQ: <span style="color:${mapqColor};font-weight:bold">${read.mapping_quality}</span><br>
+            <strong>${escapeHtml(read.name)}</strong><br>
+            Pos: ${escapeHtml(pos)}-${escapeHtml(end)}<br>
+            CIGAR: <span style="font-family:monospace">${escapeHtml(read.cigar)}</span><br>
+            MAPQ: <span style="color:${mapqColor};font-weight:bold">${escapeHtml(read.mapping_quality)}</span><br>
             ${pairInfo}${mismatchHtml}
         `;
 
@@ -1196,7 +1201,9 @@ class BAMCPViewer {
         }
 
         // Risk meter visualization
-        const score = artifactRisk.risk_score;
+        // Clamp to a finite [0, 1] so a malformed score can't inject into the style attr.
+        const rawScore = Number(artifactRisk.risk_score);
+        const score = Number.isFinite(rawScore) ? Math.min(1, Math.max(0, rawScore)) : 0;
         const likelihood = artifactRisk.artifact_likelihood;
         const color = likelihood === 'high' ? 'var(--color-danger)' :
                       likelihood === 'medium' ? 'var(--color-warning)' : 'var(--color-success)';
@@ -1207,16 +1214,17 @@ class BAMCPViewer {
                     <div style="width:${score * 100}%;height:100%;background:${color};"></div>
                 </div>
                 <span style="color:${color};font-weight:600;text-transform:uppercase;font-size:11px;">
-                    ${likelihood}
+                    ${escapeHtml(likelihood)}
                 </span>
             </div>
         `;
 
         // Risk list
-        if (artifactRisk.risks.length > 0) {
-            listEl.innerHTML = artifactRisk.risks.map(risk => `
+        const risks = Array.isArray(artifactRisk.risks) ? artifactRisk.risks : [];
+        if (risks.length > 0) {
+            listEl.innerHTML = risks.map(risk => `
                 <li style="color:${risk.severity === 'high' ? 'var(--color-danger)' : 'var(--color-warning)'};">
-                    ${risk.description}
+                    ${escapeHtml(risk.description)}
                 </li>
             `).join('');
         } else {

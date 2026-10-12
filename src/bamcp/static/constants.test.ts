@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  baseColor,
+  BASE_COLORS,
   displayPos,
+  escapeHtml,
   EXPECTED_SCHEMA_VERSION,
   formatRulerLabel,
   toRegionString,
@@ -96,5 +99,37 @@ describe("toRegionString — internal 0-based half-open → 1-based inclusive re
   it("never emits an empty or inverted range", () => {
     expect(toRegionString("chr1", 100, 100)).toBe("chr1:101-101");
     expect(toRegionString("chr1", 100, 90)).toBe("chr1:101-101");
+  });
+});
+
+describe("escapeHtml — BAM/VCF/server text is never parsed as markup", () => {
+  it("escapes every HTML-significant character a SAM QNAME may carry", () => {
+    const qname = `r1<img src=x onerror="alert('x')">&`;
+    const out = escapeHtml(qname);
+    expect(out).toBe(
+      "r1&lt;img src=x onerror=&quot;alert(&#39;x&#39;)&quot;&gt;&amp;",
+    );
+    expect(out).not.toMatch(/[<>"']/);
+  });
+
+  it("stringifies non-string payload values and blanks null/undefined", () => {
+    expect(escapeHtml(42)).toBe("42");
+    expect(escapeHtml(null)).toBe("");
+    expect(escapeHtml(undefined)).toBe("");
+  });
+
+  it("leaves a symbolic SV alt readable once rendered", () => {
+    expect(escapeHtml("<DEL>")).toBe("&lt;DEL&gt;");
+  });
+});
+
+describe("baseColor — nucleotide lookup that ignores prototype members", () => {
+  it("returns the palette color for a base", () => {
+    expect(baseColor("A", "#000")).toBe(BASE_COLORS.A);
+  });
+
+  it("falls back for unknown or prototype-named keys", () => {
+    expect(baseColor("constructor", "#000")).toBe("#000");
+    expect(baseColor("<x>", "#111")).toBe("#111");
   });
 });

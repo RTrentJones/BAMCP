@@ -3179,3 +3179,59 @@ class TestDeepVariantModes:
         assert px["g"] > 100 and px["b"] > 100 and px["r"] < 80, (
             f"Expected cyan-ish pixel at mismatch position, got {px}"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Review fixes: XSS, large regions, stale responses, navigation limits
+# ══════════════════════════════════════════════════════════════════════
+
+XSS_PAYLOAD = '<img src=x onerror="window.__xss=1">'
+
+
+class TestHtmlEscaping:
+    """BAM/server-derived strings must never be parsed as markup."""
+
+    @pytest.mark.e2e
+    def test_tooltip_escapes_read_name_and_cigar(self, viewer_page: Page):
+        """A SAM QNAME may legally contain < > \" ' — the tooltip must show it as text."""
+        read = {**SAMPLE_DATA["reads"][0], "name": XSS_PAYLOAD, "cigar": "<b>50M</b>"}
+        send_init_data(viewer_page, {**SAMPLE_DATA, "reads": [read]})
+        result = viewer_page.evaluate(
+            """() => {
+                const read = viewer.state.data.reads[0];
+                viewer.showTooltipForRead(read, 50, 50);
+                const tip = document.getElementById('tooltip');
+                return {
+                    imgs: tip.querySelectorAll('img').length,
+                    bolds: tip.querySelectorAll('b').length,
+                    text: tip.textContent,
+                };
+            }"""
+        )
+        assert result["imgs"] == 0 and result["bolds"] == 0, result
+        assert XSS_PAYLOAD in result["text"]
+        assert "<b>50M</b>" in result["text"]
+
+    @pytest.mark.e2e
+    def test_artifact_risk_text_is_escaped(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        result = viewer_page.evaluate(
+            """(payload) => {
+                viewer.renderArtifactRisk({
+                    risk_score: 0.5,
+                    artifact_likelihood: payload,
+                    risks: [{type: 'strand_bias', severity: 'high',
+                             description: payload, value: 1}],
+                });
+                const meter = document.getElementById('artifact-risk-meter');
+                const list = document.getElementById('artifact-risk-list');
+                return {
+                    imgs: meter.querySelectorAll('img').length
+                        + list.querySelectorAll('img').length,
+                    listText: list.textContent,
+                };
+            }""",
+            XSS_PAYLOAD,
+        )
+        assert result["imgs"] == 0, result
+        assert XSS_PAYLOAD in result["listText"]

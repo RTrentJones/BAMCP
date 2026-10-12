@@ -64,6 +64,29 @@ class TestBAMIndexCache:
         assert "sample.cram" in index_path
 
     @pytest.mark.unit
+    def test_get_index_path_signed_uppercase_cram(self, tmp_path: Path):
+        """A signed (query-string) or upper-case CRAM URL still maps to a .crai."""
+        cache = BAMIndexCache(str(tmp_path))
+
+        index_path = cache.get_index_path("https://example.com/d/S1.CRAM?X-Amz-Signature=a/b.bam")
+
+        assert index_path is not None
+        assert index_path.endswith("_S1.CRAM.crai")
+        # The query string never leaks into the filename.
+        assert "Signature" not in index_path
+        assert Path(index_path).parent == cache.cache_dir
+
+    @pytest.mark.unit
+    def test_get_index_path_long_name_truncated(self, tmp_path: Path):
+        """An over-long URL basename is truncated so the filename stays valid."""
+        cache = BAMIndexCache(str(tmp_path))
+
+        index_path = cache.get_index_path("https://example.com/" + "a" * 400 + ".bam")
+
+        assert index_path is not None
+        assert len(Path(index_path).name) < 255
+
+    @pytest.mark.unit
     def test_get_index_path_http_url(self, tmp_path: Path):
         """HTTP URLs (not just HTTPS) should work."""
         cache = BAMIndexCache(str(tmp_path))

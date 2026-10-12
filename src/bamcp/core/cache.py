@@ -7,12 +7,17 @@ import hashlib
 import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from ..constants import (
     CACHE_SESSION_ID_LENGTH,
     DEFAULT_CACHE_TTL_SECONDS,
     REMOTE_FILE_SCHEMES,
 )
+from .validation import is_cram
+
+# Cap on the URL-derived part of a cache filename (filesystems limit names to 255 bytes).
+_MAX_BASENAME_CHARS = 100
 
 
 class BAMIndexCache:
@@ -59,10 +64,12 @@ class BAMIndexCache:
         if not bam_path.startswith(REMOTE_FILE_SCHEMES):
             return None
 
-        # Hash URL + basename for unique filename (not used for security)
+        # Hash URL + basename for unique filename (not used for security). The
+        # basename comes from the URL *path* so a signed URL's query string can't
+        # leak '/'-split fragments or an over-long name into the cache filename.
         hash_prefix = hashlib.md5(bam_path.encode()).hexdigest()[:8]  # noqa: S324
-        basename = Path(bam_path).name
-        suffix = ".crai" if bam_path.endswith(".cram") else ".bai"
+        basename = (Path(urlparse(bam_path).path).name or "remote")[:_MAX_BASENAME_CHARS]
+        suffix = ".crai" if is_cram(bam_path) else ".bai"
         return str(self.cache_dir / f"{hash_prefix}_{basename}{suffix}")
 
     def is_valid(self, cache_path: str) -> bool:

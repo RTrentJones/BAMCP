@@ -52,6 +52,7 @@ from .parsers import (
 )
 from .serialization import serialize_region_data
 from .validation import (
+    is_cram,
     validate_path,
     validate_reference_path,
     validate_region,
@@ -460,8 +461,7 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
         return index_path
 
     # Determine index URL - try common extensions
-    is_cram = file_path.endswith(".cram")
-    if is_cram:
+    if is_cram(file_path):
         index_urls = [file_path + ".crai"]
     else:
         # BAM files: try .bam.bai first, then .bai
@@ -1017,7 +1017,7 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
 
 def _read_contigs_sync(file_path: str, reference: str | None, index_path: str | None) -> list[dict]:
     """Read (name, length) contigs from a BAM/CRAM header. Runs in the parse pool."""
-    mode = "rc" if file_path.endswith(".cram") else "rb"
+    mode = "rc" if is_cram(file_path) else "rb"
     with pysam.AlignmentFile(
         file_path,
         mode,  # type: ignore[arg-type]

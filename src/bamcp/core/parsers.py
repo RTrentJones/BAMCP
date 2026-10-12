@@ -7,6 +7,8 @@ from typing import Any
 import numpy as np
 import pysam
 
+from .validation import is_cram
+
 
 @dataclass
 class SoftClip:
@@ -183,7 +185,7 @@ def _open_alignment(
     index_filename: str | None = None,
 ) -> pysam.AlignmentFile:
     """Open a BAM/CRAM with the correct mode and shared options."""
-    mode = "rc" if bam_path.endswith(".cram") else "rb"
+    mode = "rc" if is_cram(bam_path) else "rb"
     return pysam.AlignmentFile(
         bam_path,
         mode,  # type: ignore[arg-type]

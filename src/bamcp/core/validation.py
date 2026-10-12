@@ -53,6 +53,15 @@ def _ext_target(path_or_url: str) -> str:
     return path_or_url.lower()
 
 
+def is_cram(path_or_url: str) -> bool:
+    """True when a local path or remote URL names a CRAM (vs BAM) file.
+
+    Judged on the URL *path* (not the query string of a signed URL) and
+    case-insensitively, so ``https://h/S1.CRAM?sig=…`` is recognized as CRAM.
+    """
+    return _ext_target(path_or_url).endswith(".cram")
+
+
 def _is_private_ip(addr: str) -> bool:
     """Check if an IP address is anything other than a public unicast address.
 

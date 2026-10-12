@@ -10,6 +10,7 @@ from bamcp.core.validation import (
     CHROM_PATTERN,
     REGION_PATTERN,
     _is_private_ip,
+    is_cram,
     validate_data_sources,
     validate_path,
     validate_reference_path,
@@ -711,3 +712,31 @@ class TestRemoteUrlHardening:
             m.return_value = [(2, 1, 6, "", ("100.100.100.200", 443))]
             with pytest.raises(ValueError, match="private/internal address"):
                 validate_path("https://example.com/x.bam", config)
+
+
+class TestIsCram:
+    """BAM vs CRAM is decided on the URL path, case-insensitively."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("sample.cram", True),
+            ("/data/SAMPLE.CRAM", True),
+            ("https://h.example.com/s.cram", True),
+            ("https://h.example.com/s.Cram?X-Amz-Signature=abc", True),
+            ("https://h.example.com/s.bam?name=x.cram", False),
+            ("sample.bam", False),
+            ("https://h.example.com/s.bam", False),
+        ],
+    )
+    def test_is_cram(self, path, expected):
+        assert is_cram(path) is expected
+
+    @pytest.mark.unit
+    def test_open_alignment_uses_cram_mode_for_signed_url(self):
+        from bamcp.core import parsers
+
+        with patch("bamcp.core.parsers.pysam.AlignmentFile") as af:
+            parsers._open_alignment("https://h.example.com/S1.CRAM?sig=1")
+        assert af.call_args[0][1] == "rc"

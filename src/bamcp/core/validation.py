@@ -7,6 +7,7 @@ and variant parameters (chromosome, position, alleles).
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import socket
 from pathlib import Path
@@ -14,6 +15,8 @@ from urllib.parse import urlparse
 
 from ..config import BAMCPConfig
 from ..constants import REMOTE_FILE_SCHEMES
+
+logger = logging.getLogger(__name__)
 
 # Pattern for valid chromosome names (chr prefix optional, allows chr1-chr99 or 1-99, X, Y, M, MT)
 CHROM_PATTERN = re.compile(r"^(chr)?(\d{1,2}|[XYM]|MT)$", re.IGNORECASE)
@@ -37,6 +40,10 @@ ALLOWED_FILE_EXTENSIONS = (".bam", ".cram")
 ALLOWED_VARIANT_FILE_EXTENSIONS = (".vcf", ".vcf.gz", ".bcf")
 ALLOWED_REFERENCE_EXTENSIONS = (".fa", ".fasta", ".fa.gz", ".fasta.gz", ".fna", ".fna.gz")
 
+# Remote access is restricted to the default web ports (an explicit :80/:443 is fine).
+ALLOWED_REMOTE_PORTS = (80, 443)
+_REMOTE_SCHEMES = tuple(s.split("://", 1)[0] for s in REMOTE_FILE_SCHEMES)
+
 
 def _ext_target(path_or_url: str) -> str:
     """Lower-cased string to run the file-extension check against.
@@ -49,24 +56,48 @@ def _ext_target(path_or_url: str) -> str:
     return path_or_url.lower()
 
 
-def _is_private_ip(addr: str) -> bool:
-    """Check if an IP address is private, loopback, or link-local.
+def is_cram(path_or_url: str) -> bool:
+    """True when a local path or remote URL names a CRAM (vs BAM) file.
 
-    Blocks access to internal networks and cloud metadata endpoints
-    (e.g., 169.254.169.254) to prevent SSRF attacks.
+    Judged on the URL *path* (not the query string of a signed URL) and
+    case-insensitively, so ``https://h/S1.CRAM?sig=…`` is recognized as CRAM.
+    """
+    return _ext_target(path_or_url).endswith(".cram")
+
+
+def _is_private_ip(addr: str) -> bool:
+    """Check if an IP address is anything other than a public unicast address.
+
+    Blocks private, loopback, link-local (incl. the 169.254.169.254 cloud metadata
+    endpoint), CGNAT (100.64.0.0/10), multicast, unspecified, and reserved ranges —
+    i.e. anything that is not ``is_global`` — to prevent SSRF attacks. IPv4-mapped
+    IPv6 addresses (``::ffff:10.0.0.1``) are judged by their embedded IPv4 address.
     """
     try:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return True  # If we can't parse it, block it
 
-    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+
+    return (
+        not ip.is_global
+        or ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
 
 
 def validate_remote_url(url: str, config: BAMCPConfig) -> None:
     """Validate a remote URL is safe to access (SSRF prevention).
 
-    Resolves the hostname to IP addresses and blocks private/internal ranges.
+    Rejects fragments (htslib ``##idx##`` index smuggling), userinfo, parser-
+    differential characters, non-http(s) schemes and non-web ports, then resolves
+    the hostname and blocks every address that is not public unicast.
 
     Args:
         url: The remote URL to validate.
@@ -82,12 +113,48 @@ def validate_remote_url(url: str, config: BAMCPConfig) -> None:
         downloads) to narrow the window, but the only robust defense for
         untrusted input is the ``allowed_remote_hosts`` allow-list. Host matching
         is exact per-host (no implicit subdomain wildcards).
+
+        Redirects: BAMCP's own index downloads follow redirects by hand and
+        re-validate every hop, but the BAM/CRAM, reference and VCF URLs are fetched
+        by htslib/libcurl, whose redirect handling cannot be hooked from Python. An
+        allowed host that redirects (or is rebound) to an internal address is
+        therefore only stopped by the allow-list — see
+        :func:`warn_if_remote_unrestricted`.
     """
+    # htslib reads ``<url>##idx##<index-url>`` as "load the index from <index-url>".
+    # urlparse sees everything after the first '#' as a fragment, so only the first
+    # host would be validated and htslib would happily fetch an arbitrary second URL
+    # (e.g. the cloud metadata endpoint). A fragment is meaningless for a data file,
+    # so reject '#' outright rather than trying to parse htslib's syntax.
+    if "#" in url:
+        raise ValueError("Remote URL must not contain '#' (fragments are not allowed)")
+    # Characters that URL parsers disagree on (urlparse vs libcurl) are a classic
+    # SSRF parser-differential vector; none belong in a legitimate data URL.
+    if "\\" in url or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in url):
+        raise ValueError("Remote URL contains disallowed characters")
+
     parsed = urlparse(url)
+    if parsed.scheme.lower() not in _REMOTE_SCHEMES:
+        raise ValueError(f"Scheme not supported for remote URL: {parsed.scheme or '(none)'}")
+
     hostname = parsed.hostname
 
     if not hostname:
         raise ValueError("Remote URL has no hostname")
+
+    # Userinfo ("user:pass@host") is another parser-differential vector (which '@'
+    # delimits the host?) and is never needed for public genomic data.
+    if "@" in parsed.netloc:
+        raise ValueError("Remote URL must not contain credentials (userinfo)")
+
+    # Only the standard web ports: an open demo must not be usable to probe
+    # arbitrary services on an allowed host.
+    try:
+        port = parsed.port
+    except ValueError as e:
+        raise ValueError("Remote URL has an invalid port") from e
+    if port is not None and port not in ALLOWED_REMOTE_PORTS:
+        raise ValueError(f"Remote URL port {port} is not allowed (only 80/443)")
 
     # Check domain allowlist if configured. Hostnames are case-insensitive
     # (urlparse already lower-cases parsed.hostname), so normalize the allow-list
@@ -99,7 +166,7 @@ def validate_remote_url(url: str, config: BAMCPConfig) -> None:
 
     # Resolve hostname to IP addresses and check each one
     try:
-        addr_infos = socket.getaddrinfo(hostname, parsed.port or 443, proto=socket.IPPROTO_TCP)
+        addr_infos = socket.getaddrinfo(hostname, port or 443, proto=socket.IPPROTO_TCP)
     except socket.gaierror as e:
         raise ValueError(f"Cannot resolve hostname '{hostname}': {e}") from e
 
@@ -110,6 +177,25 @@ def validate_remote_url(url: str, config: BAMCPConfig) -> None:
         ip_str = str(addr_info[4][0])
         if _is_private_ip(ip_str):
             raise ValueError("Remote URL resolves to private/internal address (blocked)")
+
+
+def warn_if_remote_unrestricted(config: BAMCPConfig) -> bool:
+    """Log a startup warning when remote files are on without a host allow-list.
+
+    Per-URL validation cannot see redirects followed inside htslib/libcurl or DNS
+    rebinding between check and fetch, so on an internet-facing server the
+    ``BAMCP_ALLOWED_REMOTE_HOSTS`` allow-list is the real SSRF control. This only
+    warns (startup must not fail); returns True when the warning was emitted.
+    """
+    if config.allow_remote_files and not config.allowed_remote_hosts:
+        logger.warning(
+            "BAMCP_ALLOW_REMOTE_FILES is enabled without BAMCP_ALLOWED_REMOTE_HOSTS: "
+            "remote URLs are only checked for private/internal addresses, which does "
+            "not cover redirects followed by htslib or DNS rebinding. Set an exact-host "
+            "allow-list for any internet-facing deployment."
+        )
+        return True
+    return False
 
 
 def validate_region(region: str) -> None:
@@ -148,6 +234,13 @@ def validate_path(file_path: str, config: BAMCPConfig) -> None:
 
         if not file_path.startswith(REMOTE_FILE_SCHEMES):
             raise ValueError(f"Scheme not supported for remote file: {file_path}")
+
+        # Same extension policy as local files, judged on the URL *path* so a signed
+        # URL's query string neither defeats nor breaks the check.
+        if not any(_ext_target(file_path).endswith(ext) for ext in ALLOWED_FILE_EXTENSIONS):
+            raise ValueError(
+                f"Unsupported file type. Allowed extensions: {ALLOWED_FILE_EXTENSIONS}"
+            )
 
         # SSRF prevention: validate the URL target
         validate_remote_url(file_path, config)

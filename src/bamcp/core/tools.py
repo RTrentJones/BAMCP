@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.parse import urljoin
 
 import httpx
 import pysam
@@ -52,6 +53,7 @@ from .parsers import (
 )
 from .serialization import serialize_region_data
 from .validation import (
+    is_cram,
     validate_path,
     validate_reference_path,
     validate_region,
@@ -120,7 +122,13 @@ class BAMCPServices:
 
     @classmethod
     def from_config(cls, config: BAMCPConfig) -> BAMCPServices:
-        return cls(config=config, cache=BAMIndexCache(config.cache_dir, config.cache_ttl))
+        cache = BAMIndexCache(
+            config.cache_dir, config.cache_ttl, max_total_bytes=config.max_index_cache_bytes
+        )
+        # Sweep index dirs left behind by expired sessions (e.g. a crashed process whose
+        # atexit cleanup never ran) so the shared cache dir can't accumulate forever.
+        cache.cleanup_expired_sessions()
+        return cls(config=config, cache=cache)
 
     def clinvar(self) -> ClinVarClient:
         if self._clinvar is None:
@@ -390,28 +398,56 @@ def _set_cached_region(
     return data
 
 
+# Redirects for index downloads are followed by hand so every hop is re-validated
+# (httpx's follow_redirects would only validate the first URL).
+_INDEX_MAX_REDIRECTS = 5
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
 async def _download_index_streaming(
     client: httpx.AsyncClient,
     index_url: str,
     index_path: str,
     config: BAMCPConfig,
 ) -> str | None:
-    """Download an index with SSRF revalidation, streaming, and a size cap."""
-    validate_remote_url(index_url, config)
+    """Download an index with SSRF revalidation, streaming, and a size cap.
+
+    Redirects are followed manually (at most ``_INDEX_MAX_REDIRECTS`` hops) and
+    every ``Location`` is re-run through :func:`validate_remote_url`, so an allowed
+    host cannot bounce the download to an internal address. The DNS-resolving
+    validation runs in a worker thread to keep the event loop responsive. A
+    partially written temp file is always removed on failure.
+    """
+    url = index_url
+    for _hop in range(_INDEX_MAX_REDIRECTS + 1):
+        await asyncio.to_thread(validate_remote_url, url, config)
+        async with client.stream("GET", url) as resp:
+            if resp.status_code in _REDIRECT_STATUSES:
+                location = resp.headers.get("location")
+                if not location:
+                    logger.warning("Index redirect without Location: %s", url)
+                    return None
+                url = urljoin(url, location)
+                continue
+            if resp.status_code == 404:
+                return None
+            if resp.status_code != 200:
+                logger.warning("Index download failed (%d): %s", resp.status_code, url)
+                return None
+            return await _stream_index_to_file(resp, index_path, config)
+    raise ValueError(f"Index download exceeded {_INDEX_MAX_REDIRECTS} redirects")
+
+
+async def _stream_index_to_file(resp: httpx.Response, index_path: str, config: BAMCPConfig) -> str:
+    """Stream ``resp`` into ``index_path`` atomically, enforcing the size cap."""
+    content_length = resp.headers.get("content-length")
+    if content_length and int(content_length) > config.max_remote_index_bytes:
+        raise ValueError("Remote index exceeds configured maximum size")
+
+    Path(index_path).parent.mkdir(parents=True, exist_ok=True)
     total = 0
     tmp_path = ""
-    async with client.stream("GET", index_url) as resp:
-        if resp.status_code == 404:
-            return None
-        if resp.status_code != 200:
-            logger.warning("Index download failed (%d): %s", resp.status_code, index_url)
-            return None
-
-        content_length = resp.headers.get("content-length")
-        if content_length and int(content_length) > config.max_remote_index_bytes:
-            raise ValueError("Remote index exceeds configured maximum size")
-
-        Path(index_path).parent.mkdir(parents=True, exist_ok=True)
+    try:
         with tempfile.NamedTemporaryFile(
             dir=str(Path(index_path).parent),
             prefix=".index-",
@@ -424,8 +460,14 @@ async def _download_index_streaming(
                 if total > config.max_remote_index_bytes:
                     raise ValueError("Remote index exceeds configured maximum size")
                 tmp.write(chunk)
+        Path(tmp_path).replace(index_path)
+    except BaseException:
+        # Oversized body, network error mid-stream, cancellation, failed rename:
+        # never leave a ``.index-XXXX.tmp`` behind in the cache directory.
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
+        raise
 
-    Path(tmp_path).replace(index_path)
     logger.info("Cached index (%d bytes): %s", total, index_path)
     return index_path
 
@@ -460,32 +502,40 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
         return index_path
 
     # Determine index URL - try common extensions
-    is_cram = file_path.endswith(".cram")
-    if is_cram:
+    if is_cram(file_path):
         index_urls = [file_path + ".crai"]
     else:
         # BAM files: try .bam.bai first, then .bai
         index_urls = [file_path + ".bai", file_path.rsplit(".", 1)[0] + ".bai"]
 
-    lock = services.index_download_locks.setdefault(index_path, asyncio.Lock())
-    async with lock:
-        if cache.is_valid(index_path):
-            logger.debug("Using cached index after waiting for download lock: %s", index_path)
-            return index_path
+    locks = services.index_download_locks
+    lock = locks.setdefault(index_path, asyncio.Lock())
+    try:
+        async with lock:
+            if cache.is_valid(index_path):
+                logger.debug("Using cached index after waiting for download lock: %s", index_path)
+                return index_path
 
-        logger.info("Downloading index for remote BAM: %s", file_path)
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-            for index_url in index_urls:
-                try:
-                    downloaded = await _download_index_streaming(
-                        client, index_url, index_path, config
-                    )
-                    if downloaded:
-                        return downloaded
-                    logger.debug("Index not found at %s, trying next", index_url)
-                except (httpx.RequestError, OSError, ValueError) as e:
-                    logger.warning("Index download error for %s: %s", index_url, e)
-                    continue
+            logger.info("Downloading index for remote BAM: %s", file_path)
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+                for index_url in index_urls:
+                    try:
+                        downloaded = await _download_index_streaming(
+                            client, index_url, index_path, config
+                        )
+                        if downloaded:
+                            cache.enforce_budget(keep=downloaded)
+                            return downloaded
+                        logger.debug("Index not found at %s, trying next", index_url)
+                    except (httpx.RequestError, OSError, ValueError) as e:
+                        logger.warning("Index download error for %s: %s", index_url, e)
+                        continue
+    finally:
+        # Drop the per-URL lock once nobody holds it so the dict can't grow one entry per
+        # URL forever. A waiter already woken keeps its reference; at worst a racing new
+        # caller creates a fresh lock and repeats an (atomic, idempotent) download.
+        if not lock.locked() and locks.get(index_path) is lock:
+            del locks[index_path]
 
     # All attempts failed - let pysam try its own resolution
     logger.warning("Could not download index for %s, falling back to pysam", file_path)
@@ -1017,7 +1067,7 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
 
 def _read_contigs_sync(file_path: str, reference: str | None, index_path: str | None) -> list[dict]:
     """Read (name, length) contigs from a BAM/CRAM header. Runs in the parse pool."""
-    mode = "rc" if file_path.endswith(".cram") else "rb"
+    mode = "rc" if is_cram(file_path) else "rb"
     with pysam.AlignmentFile(
         file_path,
         mode,  # type: ignore[arg-type]

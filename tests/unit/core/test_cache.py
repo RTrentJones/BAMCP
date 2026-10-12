@@ -1,5 +1,6 @@
 """Unit tests for bamcp.cache module."""
 
+import os
 import time
 from pathlib import Path
 
@@ -62,6 +63,29 @@ class TestBAMIndexCache:
         assert index_path is not None
         assert index_path.endswith(".crai")
         assert "sample.cram" in index_path
+
+    @pytest.mark.unit
+    def test_get_index_path_signed_uppercase_cram(self, tmp_path: Path):
+        """A signed (query-string) or upper-case CRAM URL still maps to a .crai."""
+        cache = BAMIndexCache(str(tmp_path))
+
+        index_path = cache.get_index_path("https://example.com/d/S1.CRAM?X-Amz-Signature=a/b.bam")
+
+        assert index_path is not None
+        assert index_path.endswith("_S1.CRAM.crai")
+        # The query string never leaks into the filename.
+        assert "Signature" not in index_path
+        assert Path(index_path).parent == cache.cache_dir
+
+    @pytest.mark.unit
+    def test_get_index_path_long_name_truncated(self, tmp_path: Path):
+        """An over-long URL basename is truncated so the filename stays valid."""
+        cache = BAMIndexCache(str(tmp_path))
+
+        index_path = cache.get_index_path("https://example.com/" + "a" * 400 + ".bam")
+
+        assert index_path is not None
+        assert len(Path(index_path).name) < 255
 
     @pytest.mark.unit
     def test_get_index_path_http_url(self, tmp_path: Path):
@@ -240,3 +264,94 @@ class TestBAMIndexCache:
         """Default cache TTL should come from shared constants."""
         cache = BAMIndexCache(str(tmp_path))
         assert cache.ttl_seconds == DEFAULT_CACHE_TTL_SECONDS
+
+
+def _write(path: Path, size: int, age_seconds: float) -> Path:
+    path.write_bytes(b"x" * size)
+    ts = time.time() - age_seconds
+    os.utime(path, (ts, ts))
+    return path
+
+
+class TestIndexCacheBudget:
+    """The session's index cache is bounded by a total byte budget (LRU by mtime)."""
+
+    @pytest.mark.unit
+    def test_evicts_oldest_until_within_budget(self, tmp_path: Path):
+        cache = BAMIndexCache(str(tmp_path), session_id="s", max_total_bytes=250)
+        oldest = _write(cache.cache_dir / "a.bai", 100, 30)
+        middle = _write(cache.cache_dir / "b.bai", 100, 20)
+        newest = _write(cache.cache_dir / "c.bai", 100, 10)
+
+        assert cache.enforce_budget() == 1
+        assert not oldest.exists()
+        assert middle.exists() and newest.exists()
+
+    @pytest.mark.unit
+    def test_keep_file_never_evicted(self, tmp_path: Path):
+        cache = BAMIndexCache(str(tmp_path), session_id="s", max_total_bytes=50)
+        old = _write(cache.cache_dir / "a.bai", 40, 30)
+        kept = _write(cache.cache_dir / "big.bai", 100, 60)  # oldest AND over budget alone
+
+        cache.enforce_budget(keep=str(kept))
+
+        assert kept.exists()
+        assert not old.exists()
+
+    @pytest.mark.unit
+    def test_expired_files_dropped_and_tmp_ignored(self, tmp_path: Path):
+        cache = BAMIndexCache(str(tmp_path), session_id="s", ttl_seconds=100)
+        expired = _write(cache.cache_dir / "old.bai", 10, 200)
+        fresh = _write(cache.cache_dir / "new.bai", 10, 1)
+        in_flight = _write(cache.cache_dir / ".index-abc.tmp", 10, 200)
+
+        assert cache.enforce_budget() == 1
+        assert not expired.exists()
+        assert fresh.exists() and in_flight.exists()
+
+    @pytest.mark.unit
+    def test_missing_cache_dir_is_noop(self, tmp_path: Path):
+        cache = BAMIndexCache(str(tmp_path), session_id="s")
+        cache.cache_dir.rmdir()
+        assert cache.enforce_budget() == 0
+
+    @pytest.mark.unit
+    def test_unlink_failure_tolerated(self, tmp_path: Path):
+        assert BAMIndexCache._unlink(tmp_path / "does-not-exist") is False
+
+    @pytest.mark.unit
+    def test_cleanup_expired_sessions_missing_base_dir(self, tmp_path: Path):
+        cache = BAMIndexCache(str(tmp_path / "base"), session_id="s")
+        cache.cache_dir.rmdir()
+        cache.base_cache_dir.rmdir()
+        assert cache.cleanup_expired_sessions() == (0, 0)
+
+
+class TestServicesCacheWiring:
+    """BAMCPServices wires the budget from config and sweeps expired sessions at init."""
+
+    @pytest.mark.unit
+    def test_budget_from_config_and_expired_sweep(self, tmp_path: Path):
+        from bamcp.config import BAMCPConfig
+        from bamcp.core.tools import BAMCPServices
+
+        stale = tmp_path / "stale_session"
+        stale.mkdir()
+        _write(stale / "old.bai", 10, 10_000)
+
+        config = BAMCPConfig(cache_dir=str(tmp_path), cache_ttl=60, max_index_cache_bytes=1234)
+        services = BAMCPServices.from_config(config)
+
+        assert services.cache.max_total_bytes == 1234
+        assert not stale.exists()
+
+    @pytest.mark.unit
+    def test_config_budget_from_env_and_validation(self, monkeypatch):
+        from bamcp.config import BAMCPConfig
+        from bamcp.constants import DEFAULT_MAX_INDEX_CACHE_BYTES
+
+        assert BAMCPConfig().max_index_cache_bytes == DEFAULT_MAX_INDEX_CACHE_BYTES
+        monkeypatch.setenv("BAMCP_MAX_INDEX_CACHE_BYTES", "4096")
+        assert BAMCPConfig.from_env().max_index_cache_bytes == 4096
+        with pytest.raises(ValueError, match="max_index_cache_bytes must be at least 1"):
+            BAMCPConfig(max_index_cache_bytes=0)

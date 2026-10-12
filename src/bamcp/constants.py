@@ -62,6 +62,10 @@ DEFAULT_CACHE_TTL_SECONDS = 86_400  # 24 hours
 CACHE_SESSION_ID_LENGTH = 8
 REMOTE_FILE_SCHEMES = ("http://", "https://")
 DEFAULT_MAX_REMOTE_INDEX_BYTES = 64 * 1024 * 1024
+# Total on-disk budget for one session's cached remote indexes. Each distinct URL (and a new
+# query string is a new URL) can add up to DEFAULT_MAX_REMOTE_INDEX_BYTES, so without a cap an
+# open server's cache could be grown without bound; oldest files are evicted past this.
+DEFAULT_MAX_INDEX_CACHE_BYTES = 512 * 1024 * 1024
 
 # Timeout for BAM/CRAM parsing operations (seconds)
 BAM_PARSE_TIMEOUT_SECONDS = 30.0

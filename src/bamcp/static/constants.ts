@@ -149,13 +149,179 @@ export function svColor(svType: string): string {
 /**
  * Escape a string for safe interpolation into innerHTML. VCF-derived fields such as
  * a symbolic SV alt (`<DEL>`, `<DUP>`) contain angle brackets that would otherwise be
- * parsed as markup, so escape before injecting them into any HTML template.
+ * parsed as markup, so escape before injecting them into any HTML template. Also
+ * applies to BAM-derived text: a SAM QNAME may legally contain `<`, `>`, `"`, `'`, `&`.
+ * Non-string values are stringified first (null/undefined become empty), so numeric
+ * fields from an untrusted payload can be passed through it too.
  */
-export function escapeHtml(value: string): string {
-    return value
+export function escapeHtml(value: unknown): string {
+    return String(value ?? '')
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+/**
+ * Build a samtools-style region string (1-based, inclusive on both ends) from the
+ * viewer's internal 0-based half-open interval [start0, end0). This is the contract
+ * every tool's `region` argument speaks: `chr1:1051-1051` is exactly one base (the
+ * internal 0-based position 1050). Fractional viewport edges are widened outward so
+ * the whole visible span is covered, a negative start clamps to the first base, and
+ * an empty/inverted interval still yields a single base rather than an invalid range.
+ */
+export function toRegionString(contig: string, start0: number, end0: number): string {
+    const s = Math.max(0, Math.floor(start0));
+    const e = Math.max(s + 1, Math.ceil(end0));
+    return `${contig}:${s + 1}-${e}`;
+}
+
+/** Color for a single nucleotide, or `fallback` — never a prototype member like `constructor`. */
+export function baseColor(base: string, fallback: string): string {
+    return Object.prototype.hasOwnProperty.call(BASE_COLORS, base) ? BASE_COLORS[base] : fallback;
+}
+
+/**
+ * Largest value in `values`, or `floor` if none is larger (NaN entries are ignored).
+ * A loop, not `Math.max(...values)`: spreading passes every element as a call
+ * argument, which throws RangeError once an array outgrows the engine's argument
+ * limit (~125k in V8) — i.e. any coverage array for a region over ~125 kb.
+ */
+export function maxOf(values: ArrayLike<number> | null | undefined, floor = -Infinity): number {
+    let max = floor;
+    if (!values) return max;
+    for (let i = 0; i < values.length; i++) {
+        const v = values[i];
+        if (v > max) max = v;
+    }
+    return max;
+}
+
+// Server-side cap on a single region request (bamcp.core.parsers.MAX_REGION_SIZE).
+export const MAX_REGION_SIZE = 1_000_000;
+// Navigation limits. Zooming in below ~20 bp shows nothing useful (and a sub-1 bp
+// span divides the scale by ~0); zooming out is capped at half the server limit so
+// the padded refetch window (viewport + 50% each side) still fits in one request.
+export const MIN_VIEW_SPAN = 20;
+export const MAX_VIEW_SPAN = MAX_REGION_SIZE / 2;
+
+export interface Span {
+    start: number;
+    end: number;
+}
+
+/**
+ * Zoom `vp` about its center by `factor` (<1 zooms in), clamping the span to
+ * [minSpan, maxSpan] and the start to >= 0. A view already outside the limits
+ * (e.g. a host-loaded 1 Mb region) is never pushed further out of them, but is
+ * not forcibly snapped either: zooming in from it still works.
+ */
+export function zoomViewport(
+    vp: Span, factor: number, minSpan = MIN_VIEW_SPAN, maxSpan = MAX_VIEW_SPAN,
+): Span {
+    const span = Math.max(vp.end - vp.start, 1);
+    const center = (vp.start + vp.end) / 2;
+    const lo = Math.min(minSpan, span);
+    const hi = Math.max(maxSpan, span);
+    const newSpan = Math.min(hi, Math.max(lo, span * factor));
+    const start = Math.max(0, center - newSpan / 2);
+    return { start, end: start + newSpan };
+}
+
+/** Shift `vp` by `deltaBp`, never past the start of the contig. */
+export function panViewport(vp: Span, deltaBp: number): Span {
+    const delta = Math.max(deltaBp, -vp.start);
+    return { start: vp.start + delta, end: vp.end + delta };
+}
+
+/**
+ * Viewport-refetch window: the view padded by `padFrac` of its span on each side,
+ * shrunk so the resulting 1-based inclusive request (see toRegionString) stays
+ * within `maxSize` bases, and never starting before 0.
+ */
+export function paddedFetchWindow(
+    vp: Span, padFrac = 0.5, maxSize = MAX_REGION_SIZE,
+): Span {
+    const budget = maxSize - 2; // floor/ceil of fractional edges can add a base each
+    const span = vp.end - vp.start;
+    if (span >= budget) {
+        const start = Math.max(0, vp.start);
+        return { start, end: start + budget };
+    }
+    const pad = Math.max(0, Math.min(span * padFrac, (budget - span) / 2));
+    const start = Math.max(0, vp.start - pad);
+    return { start, end: Math.min(start + budget, vp.end + pad) };
+}
+
+/**
+ * Read-position line for the evidence panel. The bias call belongs to the server
+ * (it flags `read_position_bias` only when supporting bases sit within N bp of an
+ * aligned read end beyond what uniform placement predicts), so prefer its
+ * near-end fraction and only say "Warning" when the server raised that risk.
+ * Older payloads without the fraction get a neutral histogram description that
+ * makes no bias claim of its own.
+ */
+export function formatNearEndSummary(evidence: {
+    near_end_fraction?: number;
+    near_end_cutoff_bp?: number;
+    near_end_expected_fraction?: number | null;
+    position_histogram?: number[];
+    artifact_risk?: { risks?: Array<{ type?: string }> };
+}): string {
+    const flagged = Array.isArray(evidence.artifact_risk?.risks) &&
+        evidence.artifact_risk!.risks!.some(r => r?.type === 'read_position_bias');
+    const frac = Number(evidence.near_end_fraction);
+    if (evidence.near_end_fraction != null && Number.isFinite(frac)) {
+        const cutoff = Number(evidence.near_end_cutoff_bp);
+        const within = Number.isFinite(cutoff) ? `within ${cutoff}bp of a read end` : 'near a read end';
+        let text = `${Math.round(frac * 100)}% ${within}`;
+        const expected = Number(evidence.near_end_expected_fraction);
+        if (evidence.near_end_expected_fraction != null && Number.isFinite(expected)) {
+            text += ` (~${Math.round(expected * 100)}% expected)`;
+        }
+        return flagged ? `Warning: ${text}` : text;
+    }
+
+    const histogram = evidence.position_histogram;
+    if (!Array.isArray(histogram) || histogram.length === 0) return '';
+    let total = 0;
+    for (const v of histogram) total += Number(v) || 0;
+    if (total === 0) return '';
+    const firstBins = (Number(histogram[0]) || 0) + (Number(histogram[1]) || 0);
+    const text = `${Math.round((firstBins / total) * 100)}% in position bins 0-50`;
+    return flagged ? `Warning: ${text}` : text;
+}
+
+const MAX_PROMPT_ALLELE = 50;
+
+/**
+ * Collapse a payload-derived string to one bounded line before it goes into a
+ * sendMessage prompt: control characters/newlines become spaces (no smuggled
+ * extra "instructions" on new lines) and the result is truncated to `max` chars.
+ */
+export function promptText(value: unknown, max = 200): string {
+    // eslint-disable-next-line no-control-regex
+    const flat = String(value ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').trim();
+    return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+/** A file path for a prompt: flattened, bounded, and quoted so it reads as data. */
+export function promptPath(path: unknown): string {
+    return JSON.stringify(promptText(path, 512));
+}
+
+/**
+ * A VCF REF/ALT allele for a prompt. Only nucleotide strings ([ACGTN*], upper-cased,
+ * long ones truncated) or a symbolic allele like `<DEL>` / `<INS:ME>` pass through;
+ * anything else is replaced, so a crafted VCF can't put free text in the user turn.
+ */
+export function promptAllele(allele: unknown): string {
+    const a = String(allele ?? '');
+    if (/^[ACGTN*]+$/i.test(a)) {
+        const up = a.toUpperCase();
+        return up.length > MAX_PROMPT_ALLELE ? `${up.slice(0, MAX_PROMPT_ALLELE)}…(${up.length}bp)` : up;
+    }
+    if (/^<[A-Za-z0-9:_.-]{1,40}>$/.test(a)) return a;
+    return '<invalid-allele>';
 }

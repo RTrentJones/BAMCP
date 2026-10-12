@@ -11,8 +11,21 @@
  * This module is bundled into viewer.html by Vite.
  */
 
-import { BAMCPClient, DebugInfo } from "./client";
-import { BASE_COLORS, displayPos, escapeHtml, svColor, svTypeLabel } from "./constants";
+import { BAMCPClient, DebugInfo, FetchResult } from "./client";
+import {
+    baseColor,
+    displayPos,
+    escapeHtml,
+    formatNearEndSummary,
+    maxOf,
+    paddedFetchWindow,
+    panViewport,
+    svColor,
+    svTypeLabel,
+    toRegionString,
+    zoomViewport,
+} from "./constants";
+import { variantKey } from "./data-store";
 import { Renderer } from "./renderer";
 import { StateManager, DEFAULT_SETTINGS } from "./state";
 import {
@@ -80,6 +93,8 @@ class BAMCPViewer {
     private variantTableTimer: ReturnType<typeof setTimeout> | null = null;
     private static readonly VIEWPORT_REFETCH_OVERLAP = 0.8;     // refetch when <80% overlap
     private static readonly VIEWPORT_REFETCH_DEBOUNCE_MS = 300;
+    private fetchErrorTimer: ReturnType<typeof setTimeout> | null = null;
+    private static readonly FETCH_ERROR_MS = 8000;
 
     constructor() {
         this.client = new BAMCPClient();
@@ -112,9 +127,11 @@ class BAMCPViewer {
                 clearTimeout(this.sequenceFallbackTimer);
                 this.sequenceFallbackTimer = null;
             }
+            this.hideFetchError();
 
             // Host data always resets viewport
             this.state.loadData(data);
+            this.syncRegionInput();
             this.renderVariantTable();
             this.renderer.resize();
             this.scheduleContextUpdate();
@@ -124,6 +141,10 @@ class BAMCPViewer {
         this.client.setOnDebugUpdate((info: DebugInfo) => {
             this.debugContext.textContent = info.lastContext || '—';
             this.debugToolCall.textContent = info.lastToolCall || '—';
+        });
+
+        document.getElementById('fetch-error-close')?.addEventListener('click', () => {
+            this.hideFetchError();
         });
 
         // Debug close button
@@ -141,6 +162,10 @@ class BAMCPViewer {
 
         // Window resize
         window.addEventListener('resize', () => this.renderer.resize());
+        // A devicePixelRatio change without a resize (dragging the window to a
+        // monitor with a different density, or browser zoom on some platforms)
+        // would leave the backing stores at the old density and render blurry.
+        this.watchDevicePixelRatio();
 
         // Init client and update UI based on available modes
         this.client.init().then(() => {
@@ -149,6 +174,22 @@ class BAMCPViewer {
 
         // Initial render
         this.renderer.resize();
+    }
+
+    /**
+     * Re-run resize() whenever devicePixelRatio changes. A resolution media query
+     * only matches the DPR it was built for, so re-arm it with the new value on
+     * every change.
+     */
+    private watchDevicePixelRatio(): void {
+        if (typeof window.matchMedia !== 'function') return;
+        const mql = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+        const onChange = () => {
+            mql.removeEventListener?.('change', onChange);
+            this.renderer.resize();
+            this.watchDevicePixelRatio();
+        };
+        mql.addEventListener?.('change', onChange);
     }
 
     private updateDisplayModeButtons(): void {
@@ -253,23 +294,34 @@ class BAMCPViewer {
         // Settings controls
         this.setupSettingsControls();
 
-        // Pan via drag on reads canvas
+        // Pan via drag on reads canvas. mouseup clears isDragging before the
+        // click event fires, so a drag would end by locking a tooltip; track how
+        // far the pointer moved and swallow the click that ends a real drag.
         let isDragging = false;
         let lastX = 0;
+        let dragDistance = 0;
+        let suppressClick = false;
+        const DRAG_CLICK_THRESHOLD_PX = 4;
 
         this.readsCanvas.addEventListener('mousedown', (e) => {
             isDragging = true;
             lastX = e.clientX;
+            dragDistance = 0;
+            suppressClick = false;
         });
 
         window.addEventListener('mousemove', (e) => {
             if (!isDragging) return;
             const dx = e.clientX - lastX;
             lastX = e.clientX;
-            this.pan(-dx);
+            dragDistance += Math.abs(dx);
+            if (dx !== 0) this.pan(-dx);
         });
 
-        window.addEventListener('mouseup', () => isDragging = false);
+        window.addEventListener('mouseup', () => {
+            if (isDragging && dragDistance > DRAG_CLICK_THRESHOLD_PX) suppressClick = true;
+            isDragging = false;
+        });
 
         // Tooltips and hover state
         this.readsCanvas.addEventListener('mousemove', (e) => {
@@ -315,6 +367,10 @@ class BAMCPViewer {
         // Click to lock tooltip
         this.readsCanvas.addEventListener('click', (e) => {
             if (isDragging) return;
+            if (suppressClick) {
+                suppressClick = false;
+                return;
+            }
             const read = this.renderer.getReadAtPosition(e);
             if (read) {
                 this.state.lockedTooltip = { read, x: e.clientX, y: e.clientY };
@@ -480,9 +536,9 @@ class BAMCPViewer {
         const regionSpan = this.state.viewport.end - this.state.viewport.start;
         const scale = width / regionSpan;
         const bpDelta = dxPixels / scale;
+        if (!Number.isFinite(bpDelta)) return;
 
-        this.state.viewport.start += bpDelta;
-        this.state.viewport.end += bpDelta;
+        this.state.viewport = panViewport(this.state.viewport, bpDelta);
         this.renderer.render();
         this.scheduleContextUpdate();
         this.scheduleVariantTableUpdate();
@@ -490,12 +546,9 @@ class BAMCPViewer {
     }
 
     private zoom(factor: number): void {
-        const span = this.state.viewport.end - this.state.viewport.start;
-        const center = (this.state.viewport.start + this.state.viewport.end) / 2;
-        const newSpan = span * factor;
-
-        this.state.viewport.start = center - newSpan / 2;
-        this.state.viewport.end = center + newSpan / 2;
+        // Clamped to [MIN_VIEW_SPAN, MAX_VIEW_SPAN] and start >= 0, so a refetch
+        // can never ask the server for more than its 1 Mb region limit.
+        this.state.viewport = zoomViewport(this.state.viewport, factor);
         this.renderer.render();
         this.scheduleContextUpdate();
         this.scheduleVariantTableUpdate();
@@ -505,14 +558,14 @@ class BAMCPViewer {
         this.checkAndFetchViewport();
     }
 
-    /** Debounced variant table re-render for in-view highlighting during pan/zoom. */
+    /** Debounced in-view highlighting of the variant table during pan/zoom. */
     private scheduleVariantTableUpdate(): void {
         if (this.variantTableTimer) {
             clearTimeout(this.variantTableTimer);
         }
         this.variantTableTimer = setTimeout(() => {
             this.variantTableTimer = null;
-            this.renderVariantTable();
+            this.updateVariantInView();
         }, 150);
     }
 
@@ -563,9 +616,9 @@ class BAMCPViewer {
         this.sequenceNotice.classList.add('loading');
 
         // Build request parameters
-        const start = Math.max(0, Math.floor(this.state.viewport.start));
-        const end = Math.ceil(this.state.viewport.end);
-        const region = `${this.state.data.contig}:${start}-${end}`;
+        const region = toRegionString(
+            this.state.data.contig, this.state.viewport.start, this.state.viewport.end,
+        );
         const filePath = this.state.data.file_path;
 
         // Use direct tool call if file_path available (reliable), else fallback to sendMessage
@@ -583,7 +636,7 @@ class BAMCPViewer {
             this.client.fetchRegionDirect(
                 filePath, region, this.state.data?.reference,
                 this.state.data?.vcf_path, this.state.data?.variant_source,
-            ).then(data => {
+            ).then(result => {
                 this.pendingSequenceRequest = false;
                 if (this.sequenceFallbackTimer) {
                     clearTimeout(this.sequenceFallbackTimer);
@@ -591,12 +644,7 @@ class BAMCPViewer {
                 }
                 this.sequenceNotice.classList.add('hidden');
                 this.sequenceNotice.classList.remove('loading');
-                if (data) {
-                    this.state.loadTile(data);
-                    this.renderVariantTable();
-                    this.renderer.resize();
-                    this.scheduleContextUpdate();
-                }
+                this.applyFetchResult(result);
             });
         } else {
             this.client.requestRegion(region);
@@ -619,9 +667,9 @@ class BAMCPViewer {
     private loadDetailView(): void {
         if (!this.state.data || this.pendingSequenceRequest) return;
 
-        const start = Math.max(0, Math.floor(this.state.viewport.start));
-        const end = Math.ceil(this.state.viewport.end);
-        const region = `${this.state.data.contig}:${start}-${end}`;
+        const region = toRegionString(
+            this.state.data.contig, this.state.viewport.start, this.state.viewport.end,
+        );
         const filePath = this.state.data.file_path;
 
         this.pendingSequenceRequest = true;
@@ -631,16 +679,11 @@ class BAMCPViewer {
             this.client.fetchRegionDirect(
                 filePath, region, this.state.data?.reference,
                 this.state.data?.vcf_path, this.state.data?.variant_source,
-            ).then(data => {
+            ).then(result => {
                 this.pendingSequenceRequest = false;
                 this.sequenceNotice.classList.add('hidden');
                 this.sequenceNotice.classList.remove('loading');
-                if (data) {
-                    this.state.loadTile(data);
-                    this.renderVariantTable();
-                    this.renderer.resize();
-                    this.scheduleContextUpdate();
-                }
+                this.applyFetchResult(result);
             });
         } else {
             // sendMessage path — response comes via ontoolresult → onDataReceived
@@ -707,22 +750,59 @@ class BAMCPViewer {
                 return;
             }
 
-            // Pad fetch region by 50% each side to reduce subsequent refetches
-            const padding = sp * 0.5;
-            const fetchStart = Math.max(0, Math.floor(vs - padding));
-            const fetchEnd = Math.ceil(ve + padding);
-            const region = `${d.contig}:${fetchStart}-${fetchEnd}`;
+            // Pad fetch region by 50% each side to reduce subsequent refetches,
+            // capped so the request stays within the server's region limit.
+            const win = paddedFetchWindow({ start: vs, end: ve });
+            const region = toRegionString(d.contig, win.start, win.end);
 
-            const data = await this.client.fetchRegionDirect(
+            const result = await this.client.fetchRegionDirect(
                 d.file_path, region, d.reference, d.vcf_path, d.variant_source,
             );
-            if (data) {
-                this.state.loadTile(data);
-                this.renderVariantTable();
-                this.renderer.resize();
-                this.scheduleContextUpdate();
-            }
+            this.applyFetchResult(result);
         }, BAMCPViewer.VIEWPORT_REFETCH_DEBOUNCE_MS);
+    }
+
+    /**
+     * Apply an app-initiated fetch. Stale responses (superseded by a newer request
+     * or by host data) are dropped; errors are shown to the user instead of being
+     * swallowed; a tile is only activated if it is on the current contig and still
+     * overlaps the viewport (the user may have moved on while it was in flight).
+     */
+    private applyFetchResult(result: FetchResult): void {
+        if (result.status === 'stale') return;
+        if (result.status === 'error') {
+            this.showFetchError(result.message);
+            return;
+        }
+        this.hideFetchError();
+        const data = result.data;
+        const current = this.state.data;
+        const vp = this.state.viewport;
+        if (current && data.contig !== current.contig) return;
+        if (!(data.end > vp.start && data.start < vp.end)) return;
+
+        this.state.loadTile(data);
+        this.renderVariantTable();
+        this.renderer.resize();
+        this.scheduleContextUpdate();
+    }
+
+    private showFetchError(message: string): void {
+        const banner = document.getElementById('fetch-error');
+        const text = document.getElementById('fetch-error-text');
+        if (!banner || !text) return;
+        text.textContent = `Could not load this view: ${message}`;
+        banner.classList.remove('hidden');
+        if (this.fetchErrorTimer) clearTimeout(this.fetchErrorTimer);
+        this.fetchErrorTimer = setTimeout(() => this.hideFetchError(), BAMCPViewer.FETCH_ERROR_MS);
+    }
+
+    private hideFetchError(): void {
+        if (this.fetchErrorTimer) {
+            clearTimeout(this.fetchErrorTimer);
+            this.fetchErrorTimer = null;
+        }
+        document.getElementById('fetch-error')?.classList.add('hidden');
     }
 
     private scheduleContextUpdate(): void {
@@ -738,13 +818,30 @@ class BAMCPViewer {
                 : '0';
 
             const context = {
-                region: `${this.state.data.contig}:${this.state.viewport.start.toFixed(0)}-${this.state.viewport.end.toFixed(0)}`,
+                region: toRegionString(
+                    this.state.data.contig, this.state.viewport.start, this.state.viewport.end,
+                ),
                 reads: this.state.data.reads.length,
                 meanCoverage: parseFloat(meanCov),
                 variantCount: this.state.data.variants.length,
             };
             this.client.updateModelContext(context);
+            this.syncRegionInput();
         }, CONTEXT_UPDATE_DEBOUNCE_MS);
+    }
+
+    /**
+     * Mirror the current viewport into the region box as a 1-based inclusive
+     * samtools-style string (what the user would type, and what tools accept).
+     * Skipped while the user is editing the box so we never clobber their input.
+     */
+    private syncRegionInput(): void {
+        if (!this.state.data) return;
+        const input = document.getElementById('region-input') as HTMLInputElement | null;
+        if (!input || document.activeElement === input) return;
+        input.value = toRegionString(
+            this.state.data.contig, this.state.viewport.start, this.state.viewport.end,
+        );
     }
 
     private renderVariantTable(): void {
@@ -752,42 +849,29 @@ class BAMCPViewer {
         // variantTable IS the tbody element (id="variant-table")
         this.variantTable.innerHTML = '';
 
-        const vpStart = this.state.viewport.start;
-        const vpEnd = this.state.viewport.end;
-
-        // Count in-view variants for badge
-        const inViewCount = variants.filter(v => v.position >= vpStart && v.position <= vpEnd).length;
-        const totalCount = this.state.store.getAllVariants().length;
-        const badge = document.getElementById('variant-count')!;
-        badge.textContent = inViewCount < variants.length
-            ? `${inViewCount} in view / ${totalCount}`
-            : totalCount.toString();
-
         variants.forEach((v, idx) => {
             const tr = document.createElement('tr');
+            const key = variantKey(v);
             tr.dataset.index = idx.toString();
-            tr.className = idx === this.state.selectedVariantIndex ? 'selected' : '';
+            tr.dataset.key = key;
+            tr.dataset.pos = String(v.position);
+            tr.className = key === this.state.selectedVariantKey ? 'selected' : '';
             if (v.is_low_confidence) tr.classList.add('low-confidence');
-
-            // Mark variants within the current viewport
-            if (v.position >= vpStart && v.position <= vpEnd) {
-                tr.classList.add('in-view');
-            }
 
             // VAF color coding: green ≥40%, orange 20-40%, red <20%
             const vafColor = v.vaf >= 0.4 ? '#22c55e' : v.vaf >= 0.2 ? '#f97316' : '#ef4444';
 
             // Quality color coding: green ≥30, orange 20-30, red <20
-            const qual = v.mean_quality || 0;
+            const qual = Number(v.mean_quality) || 0;
             const qualColor = qual >= 30 ? '#22c55e' : qual >= 20 ? '#f97316' : '#ef4444';
 
             // Strand counts: "5F:3R" format from accumulated evidence
             const evidence = this.state.store.getEvidence(`${v.position}:${v.ref}>${v.alt}`);
-            const strandDisplay = evidence
+            const strandDisplay = escapeHtml(evidence
                 ? `${evidence.forward_count}F:${evidence.reverse_count}R`
                 : (v.strand_forward != null && v.strand_reverse != null)
                     ? `${v.strand_forward}F:${v.strand_reverse}R`
-                    : '-';
+                    : '-');
 
             // Structural variants carry a symbolic alt (<DEL>/<DUP>/…); render it as a
             // typed badge and escape all VCF-derived text before injecting it as HTML.
@@ -795,25 +879,25 @@ class BAMCPViewer {
             if (v.variant_kind === 'sv') {
                 const svType = svTypeLabel(v.sv_type, v.alt);
                 const span = v.sv_end
-                    ? `${displayPos(v.position).toLocaleString()}–${Number(v.sv_end).toLocaleString()}`
+                    ? `${displayPos(Number(v.position)).toLocaleString()}–${Number(v.sv_end).toLocaleString()}`
                     : '';
                 // Badge color matches the canvas SV-span color for that type.
-                altCell = `<span class="sv-badge" style="background:${svColor(svType)}" title="${escapeHtml(v.alt)}${span ? ` (${span})` : ''}">${escapeHtml(svType)}</span>`;
+                altCell = `<span class="sv-badge" style="background:${svColor(svType)}" title="${escapeHtml(v.alt)}${span ? ` (${escapeHtml(span)})` : ''}">${escapeHtml(svType)}</span>`;
             } else {
-                altCell = `<span style="color:${BASE_COLORS[v.alt] || '#333'};font-weight:bold">${escapeHtml(v.alt)}</span>`;
+                altCell = `<span style="color:${baseColor(v.alt, '#333')};font-weight:bold">${escapeHtml(v.alt)}</span>`;
             }
             // A multi-sample VCF gets a small sample-count marker on the position cell.
-            const sampleCount = v.sample_names?.length ?? 0;
+            const sampleCount = Array.isArray(v.sample_names) ? v.sample_names.length : 0;
             const sampleMarker = sampleCount > 1
                 ? ` <span class="sample-count" title="${sampleCount} samples genotyped">×${sampleCount}</span>`
                 : '';
 
             tr.innerHTML = `
-                <td>${displayPos(v.position).toLocaleString()}${sampleMarker}</td>
+                <td>${escapeHtml(displayPos(Number(v.position)).toLocaleString())}${sampleMarker}</td>
                 <td>${escapeHtml(v.ref)}</td>
                 <td>${altCell}</td>
-                <td style="color:${vafColor};font-weight:500">${(v.vaf * 100).toFixed(1)}%</td>
-                <td>${v.depth}</td>
+                <td style="color:${vafColor};font-weight:500">${(Number(v.vaf) * 100).toFixed(1)}%</td>
+                <td>${escapeHtml(v.depth)}</td>
                 <td>${strandDisplay}</td>
                 <td style="color:${qualColor}">Q${qual.toFixed(0)}</td>
                 <td>
@@ -838,25 +922,63 @@ class BAMCPViewer {
                     return;
                 }
 
-                this.state.selectedVariantIndex = idx;
-                // Mark this variant as the active one for the DeepVariant
-                // "supports-variant" channel.
-                this.state.settings.activeVariantPosition = v.position;
-                this.state.settings.activeVariantAlt = v.alt;
-                this.renderVariantTable();
-
-                // Show evidence
-                this.showVariantEvidence(v);
-
-                // Jump to variant
-                const span = 100;
-                this.state.viewport.start = v.position - span / 2;
-                this.state.viewport.end = v.position + span / 2;
-                this.renderer.render();
+                this.selectVariant(v, key);
             });
 
             this.variantTable.appendChild(tr);
         });
+
+        this.updateVariantInView();
+    }
+
+    /**
+     * Refresh the in-view highlighting and badge without rebuilding the rows —
+     * this runs on every pan/zoom, where a full rebuild of a large table is costly.
+     */
+    private updateVariantInView(): void {
+        const vpStart = this.state.viewport.start;
+        const vpEnd = this.state.viewport.end;
+        const rows = this.variantTable.children;
+        let inViewCount = 0;
+        for (let i = 0; i < rows.length; i++) {
+            const tr = rows[i] as HTMLElement;
+            const pos = Number(tr.dataset.pos);
+            const inView = pos >= vpStart && pos <= vpEnd;
+            if (inView) inViewCount++;
+            tr.classList.toggle('in-view', inView);
+        }
+        const totalCount = this.state.store.getAllVariants().length;
+        const badge = document.getElementById('variant-count')!;
+        badge.textContent = inViewCount < rows.length
+            ? `${inViewCount} in view / ${totalCount}`
+            : totalCount.toString();
+    }
+
+    /** Select a variant row: highlight it, show evidence, and jump the view to it. */
+    private selectVariant(v: Variant, key: string): void {
+        this.state.selectedVariantKey = key;
+        // Mark this variant as the active one for the DeepVariant
+        // "supports-variant" channel.
+        this.state.settings.activeVariantPosition = v.position;
+        this.state.settings.activeVariantAlt = v.alt;
+        for (const row of Array.from(this.variantTable.children) as HTMLElement[]) {
+            row.classList.toggle('selected', row.dataset.key === key);
+        }
+
+        // Show evidence
+        this.showVariantEvidence(v);
+
+        // Jump to variant, then load what the new view needs: the data tile (the
+        // variant may sit outside the loaded range), sequences at base-level zoom,
+        // and the model context — exactly as a pan/zoom would.
+        const span = 100;
+        const start = Math.max(0, v.position - span / 2);
+        this.state.viewport = { start, end: start + span };
+        this.renderer.render();
+        this.updateVariantInView();
+        this.scheduleContextUpdate();
+        this.checkAndRequestSequences();
+        this.checkAndFetchViewport();
     }
 
     private showTooltip(e: MouseEvent, read: Read | null): void {
@@ -890,8 +1012,9 @@ class BAMCPViewer {
         let mismatchHtml = '';
         if (read.mismatches.length > 0) {
             const mmList = read.mismatches.slice(0, 5).map(mm =>
-                `${displayPos(mm.pos).toLocaleString()}: <span style="color:${BASE_COLORS[mm.ref] || '#666'}">${mm.ref}</span>→` +
-                `<span style="color:${BASE_COLORS[mm.alt] || '#666'}">${mm.alt}</span>`
+                `${escapeHtml(displayPos(Number(mm.pos)).toLocaleString())}: ` +
+                `<span style="color:${baseColor(mm.ref, '#666')}">${escapeHtml(mm.ref)}</span>→` +
+                `<span style="color:${baseColor(mm.alt, '#666')}">${escapeHtml(mm.alt)}</span>`
             ).join(', ');
             const more = read.mismatches.length > 5 ? ` +${read.mismatches.length - 5} more` : '';
             mismatchHtml = `<br><span style="color:var(--color-text-muted)">Mismatches:</span> ${mmList}${more}`;
@@ -902,14 +1025,18 @@ class BAMCPViewer {
         if (read.is_paired && read.insert_size) {
             const insertColor = Math.abs(read.insert_size) > 1000 ? 'var(--color-danger)' :
                                Math.abs(read.insert_size) < 100 ? 'var(--color-warning)' : 'var(--color-success)';
-            pairInfo += ` | Insert: <span style="color:${insertColor}">${Math.abs(read.insert_size)}bp</span>`;
+            pairInfo += ` | Insert: <span style="color:${insertColor}">${escapeHtml(Math.abs(read.insert_size))}bp</span>`;
         }
 
+        // Every BAM/server-derived value is escaped: a SAM QNAME may legally contain
+        // `<`, `>`, `"`, `'` and `&`, so an unescaped name is an XSS vector.
+        const pos = displayPos(Number(read.position)).toLocaleString();
+        const end = Number(read.end_position).toLocaleString();
         this.tooltip.innerHTML = `
-            <strong>${read.name}</strong><br>
-            Pos: ${displayPos(read.position).toLocaleString()}-${read.end_position.toLocaleString()}<br>
-            CIGAR: <span style="font-family:monospace">${read.cigar}</span><br>
-            MAPQ: <span style="color:${mapqColor};font-weight:bold">${read.mapping_quality}</span><br>
+            <strong>${escapeHtml(read.name)}</strong><br>
+            Pos: ${escapeHtml(pos)}-${escapeHtml(end)}<br>
+            CIGAR: <span style="font-family:monospace">${escapeHtml(read.cigar)}</span><br>
+            MAPQ: <span style="color:${mapqColor};font-weight:bold">${escapeHtml(read.mapping_quality)}</span><br>
             ${pairInfo}${mismatchHtml}
         `;
 
@@ -1046,7 +1173,7 @@ class BAMCPViewer {
             '#10b981'
         );
         document.getElementById('position-stats')!.textContent =
-            this.getPositionSummary(evidence.position_histogram);
+            formatNearEndSummary(evidence);
 
         // Draw MAPQ Histogram
         this.renderHistogram(
@@ -1114,7 +1241,7 @@ class BAMCPViewer {
             return;
         }
 
-        const maxValue = Math.max(...data, 1);
+        const maxValue = maxOf(data, 1);
         const barWidth = (width - 20) / data.length;
         const barGap = 2;
 
@@ -1146,22 +1273,6 @@ class BAMCPViewer {
         });
     }
 
-    private getPositionSummary(histogram: number[] | undefined): string {
-        if (!histogram || histogram.length === 0) return '';
-
-        const total = histogram.reduce((a, b) => a + b, 0);
-        if (total === 0) return '';
-
-        // First two bins (0-25, 25-50) represent near-end positions
-        const nearEnd = (histogram[0] || 0) + (histogram[1] || 0);
-        const pct = Math.round((nearEnd / total) * 100);
-
-        if (pct > 50) {
-            return `Warning: ${pct}% near ends`;
-        }
-        return `${pct}% near ends`;
-    }
-
     private renderArtifactRisk(artifactRisk: ArtifactAssessment | undefined): void {
         const meterEl = document.getElementById('artifact-risk-meter')!;
         const listEl = document.getElementById('artifact-risk-list')!;
@@ -1173,7 +1284,9 @@ class BAMCPViewer {
         }
 
         // Risk meter visualization
-        const score = artifactRisk.risk_score;
+        // Clamp to a finite [0, 1] so a malformed score can't inject into the style attr.
+        const rawScore = Number(artifactRisk.risk_score);
+        const score = Number.isFinite(rawScore) ? Math.min(1, Math.max(0, rawScore)) : 0;
         const likelihood = artifactRisk.artifact_likelihood;
         const color = likelihood === 'high' ? 'var(--color-danger)' :
                       likelihood === 'medium' ? 'var(--color-warning)' : 'var(--color-success)';
@@ -1184,16 +1297,17 @@ class BAMCPViewer {
                     <div style="width:${score * 100}%;height:100%;background:${color};"></div>
                 </div>
                 <span style="color:${color};font-weight:600;text-transform:uppercase;font-size:11px;">
-                    ${likelihood}
+                    ${escapeHtml(likelihood)}
                 </span>
             </div>
         `;
 
         // Risk list
-        if (artifactRisk.risks.length > 0) {
-            listEl.innerHTML = artifactRisk.risks.map(risk => `
+        const risks = Array.isArray(artifactRisk.risks) ? artifactRisk.risks : [];
+        if (risks.length > 0) {
+            listEl.innerHTML = risks.map(risk => `
                 <li style="color:${risk.severity === 'high' ? 'var(--color-danger)' : 'var(--color-warning)'};">
-                    ${risk.description}
+                    ${escapeHtml(risk.description)}
                 </li>
             `).join('');
         } else {
@@ -1237,7 +1351,9 @@ class BAMCPViewer {
     private syncToAI(): void {
         if (!this.state.data) return;
 
-        const region = `${this.state.data.contig}:${Math.floor(this.state.viewport.start)}-${Math.floor(this.state.viewport.end)}`;
+        const region = toRegionString(
+            this.state.data.contig, this.state.viewport.start, this.state.viewport.end,
+        );
         this.client.syncContext(region);
     }
 }

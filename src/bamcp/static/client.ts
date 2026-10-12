@@ -1,8 +1,42 @@
 import { App } from "@modelcontextprotocol/ext-apps";
 import { RegionData, ToolResultParams, Variant } from "./types";
-import { EXPECTED_SCHEMA_VERSION, displayPos } from "./constants";
+import {
+    EXPECTED_SCHEMA_VERSION,
+    displayPos,
+    promptAllele,
+    promptPath,
+    promptText,
+} from "./constants";
+
+/** `contig:pos REF>ALT` for a prompt, with every payload-derived part sanitized. */
+function promptVariant(v: Variant): string {
+    return `${promptText(v.contig, 64)}:${displayPos(Number(v.position))} ` +
+        `${promptAllele(v.ref)}>${promptAllele(v.alt)}`;
+}
 
 export type DisplayMode = 'inline' | 'fullscreen' | 'pip';
+
+/**
+ * Outcome of an app-initiated fetch. `stale` means a newer request (or host data)
+ * superseded this one, so the caller must drop it silently; `error` carries a
+ * short, user-presentable message.
+ */
+export type FetchResult =
+    | { status: 'ok'; data: RegionData }
+    | { status: 'stale' }
+    | { status: 'error'; message: string };
+
+/** First text block of a tool result, trimmed to something safe to show a user. */
+function errorText(content: unknown): string {
+    if (Array.isArray(content)) {
+        for (const c of content) {
+            if (c && typeof c === 'object' && 'text' in c && typeof c.text === 'string') {
+                return c.text.slice(0, 300);
+            }
+        }
+    }
+    return 'the server returned an error';
+}
 
 export interface DebugInfo {
     lastContext: string | null;
@@ -23,6 +57,10 @@ export class BAMCPClient {
     // Bumped by ontoolresult (host-initiated data) so in-flight app-initiated
     // fetches don't overwrite newer data.
     private dataVersion = 0;
+    // Monotonic id of the latest app-initiated fetch. Overlapping fetches (a pan
+    // refetch racing a sequence fetch, or two refetches) can resolve out of order;
+    // only the newest request's response is applied.
+    private requestSeq = 0;
 
     constructor() {
         // Initialize callback
@@ -167,9 +205,12 @@ export class BAMCPClient {
         if (this.app) {
             try {
                 // Make the request explicit with file path for more reliable tool invocation
+                // The path and region may come from the server payload: quote and
+                // bound them so they read as data, not as part of the instruction.
+                const safeRegion = promptText(region, 120);
                 const message = filePath
-                    ? `Call visualize_region for file ${filePath} region ${region}`
-                    : `Please browse the genomic region ${region} and show the alignment visualization.`;
+                    ? `Call visualize_region for file ${promptPath(filePath)} region ${safeRegion}`
+                    : `Please browse the genomic region ${safeRegion} and show the alignment visualization.`;
 
                 await this.app.sendMessage({
                     role: 'user',
@@ -191,7 +232,7 @@ export class BAMCPClient {
                     role: 'user',
                     content: [{
                         type: 'text',
-                        text: `Search for gene ${symbol} and show the alignment at that location.`
+                        text: `Search for gene ${promptText(symbol, 40)} and show the alignment at that location.`
                     }]
                 });
             } catch (e) {
@@ -205,13 +246,13 @@ export class BAMCPClient {
         try {
             // YAML frontmatter format recommended by MCP Apps patterns docs
             const contextText = `---
-region: ${context.region}
+region: ${promptText(context.region, 120)}
 reads: ${context.reads}
 coverage: ${context.meanCoverage}x
 variants: ${context.variantCount}
 ---
 
-User is viewing ${context.region} with ${context.reads} reads at ${context.meanCoverage}x coverage and ${context.variantCount} variants visible.`;
+User is viewing ${promptText(context.region, 120)} with ${context.reads} reads at ${context.meanCoverage}x coverage and ${context.variantCount} variants visible.`;
             await this.app.updateModelContext({
                 content: [{ type: 'text', text: contextText }]
             });
@@ -224,10 +265,12 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
 
     /**
      * Directly invoke visualize_region tool using callServerTool.
-     * Returns the parsed RegionData or null on error/stale.
      *
-     * Callers decide how to load the data (loadTile vs loadData),
-     * keeping this path separate from host-initiated ontoolresult.
+     * Responses are sequenced: if host data arrived (ontoolresult) or a newer
+     * fetchRegionDirect was issued while this one was in flight, the result is
+     * `stale` and must be dropped, so an older tile can never replace a newer one.
+     * Callers decide how to load the data (loadTile vs loadData), keeping this
+     * path separate from host-initiated ontoolresult.
      */
     public async fetchRegionDirect(
         filePath: string,
@@ -235,8 +278,8 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         reference?: string,
         vcfPath?: string,
         variantSource?: string,
-    ): Promise<RegionData | null> {
-        if (!this.app) return null;
+    ): Promise<FetchResult> {
+        if (!this.app) return { status: 'error', message: 'not connected to an MCP host' };
         const args: Record<string, string> = { file_path: filePath, region: region };
         if (reference) {
             args.reference = reference;
@@ -251,9 +294,10 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         const toolCallInfo = `visualize_region(${JSON.stringify(args)})`;
         this.updateDebug('lastToolCall', toolCallInfo);
 
-        // Capture version before await — if ontoolresult fires while we wait,
-        // dataVersion increments and we discard this stale response.
+        // Capture version + sequence before await; either moving on means stale.
         const version = this.dataVersion;
+        const seq = ++this.requestSeq;
+        const isStale = () => this.dataVersion !== version || this.requestSeq !== seq;
 
         try {
             const result = await this.app.callServerTool({
@@ -261,16 +305,15 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
                 arguments: args
             });
 
-            // Discard if newer data arrived while we were waiting
-            if (this.dataVersion !== version) {
+            if (isStale()) {
                 this.updateDebug('lastToolCall', `${toolCallInfo} → STALE (discarded)`);
-                return null;
+                return { status: 'stale' };
             }
 
             if (result.isError) {
                 this.updateDebug('lastToolCall', `${toolCallInfo} → ERROR`);
                 console.warn('callServerTool returned error:', result.content);
-                return null;
+                return { status: 'error', message: errorText(result.content) };
             }
 
             // Extract data from structuredContent or content
@@ -287,12 +330,18 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
                     }
                 }
             }
+            if (!data) {
+                this.updateDebug('lastToolCall', `${toolCallInfo} → ERROR: unparseable`);
+                return { status: 'error', message: 'unreadable response from the server' };
+            }
             this.updateDebug('lastToolCall', `${toolCallInfo} → OK`);
-            return data;
+            return { status: 'ok', data };
         } catch (e) {
+            if (isStale()) return { status: 'stale' };
             this.updateDebug('lastToolCall', `${toolCallInfo} → ERROR: ${e}`);
             console.warn('callServerTool failed:', e);
-            return null;
+            const message = e instanceof Error ? e.message : String(e);
+            return { status: 'error', message: message.slice(0, 300) || 'request failed' };
         }
     }
 
@@ -300,10 +349,9 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         if (!this.app) return;
 
         const message =
-            'Explain the variant at ' + variant.contig + ':' + displayPos(variant.position) +
-            ': ' + variant.ref + '>' + variant.alt +
-            ', VAF=' + (variant.vaf * 100).toFixed(1) + '%' +
-            ', depth=' + variant.depth;
+            `Explain the variant at ${promptVariant(variant)}` +
+            `, VAF=${(Number(variant.vaf) * 100).toFixed(1)}%` +
+            `, depth=${Number(variant.depth)}`;
 
         try {
             await this.app.sendMessage({
@@ -319,8 +367,8 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         if (!this.app) return;
 
         const message =
-            `Look up the clinical significance of ${variant.contig}:${displayPos(variant.position)} ` +
-            `${variant.ref}>${variant.alt} in ClinVar using the lookup_clinvar tool.`;
+            `Look up the clinical significance of ${promptVariant(variant)} ` +
+            `in ClinVar using the lookup_clinvar tool.`;
 
         try {
             await this.app.sendMessage({
@@ -336,8 +384,8 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         if (!this.app) return;
 
         const message =
-            `Look up the population allele frequency of ${variant.contig}:${displayPos(variant.position)} ` +
-            `${variant.ref}>${variant.alt} in gnomAD using the lookup_gnomad tool.`;
+            `Look up the population allele frequency of ${promptVariant(variant)} ` +
+            `in gnomAD using the lookup_gnomad tool.`;
 
         try {
             await this.app.sendMessage({
@@ -353,7 +401,7 @@ User is viewing ${context.region} with ${context.reads} reads at ${context.meanC
         if (!this.app) return;
 
         const message =
-            `Get a summary of the current view at region ${region} ` +
+            `Get a summary of the current view at region ${promptText(region, 120)} ` +
             `using get_region_summary with the same BAM file.`;
 
         try {

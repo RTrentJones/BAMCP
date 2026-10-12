@@ -3179,3 +3179,231 @@ class TestDeepVariantModes:
         assert px["g"] > 100 and px["b"] > 100 and px["r"] < 80, (
             f"Expected cyan-ish pixel at mismatch position, got {px}"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Review fixes: XSS, large regions, stale responses, navigation limits
+# ══════════════════════════════════════════════════════════════════════
+
+XSS_PAYLOAD = '<img src=x onerror="window.__xss=1">'
+
+
+class TestHtmlEscaping:
+    """BAM/server-derived strings must never be parsed as markup."""
+
+    @pytest.mark.e2e
+    def test_tooltip_escapes_read_name_and_cigar(self, viewer_page: Page):
+        """A SAM QNAME may legally contain < > \" ' — the tooltip must show it as text."""
+        read = {**SAMPLE_DATA["reads"][0], "name": XSS_PAYLOAD, "cigar": "<b>50M</b>"}
+        send_init_data(viewer_page, {**SAMPLE_DATA, "reads": [read]})
+        result = viewer_page.evaluate(
+            """() => {
+                const read = viewer.state.data.reads[0];
+                viewer.showTooltipForRead(read, 50, 50);
+                const tip = document.getElementById('tooltip');
+                return {
+                    imgs: tip.querySelectorAll('img').length,
+                    bolds: tip.querySelectorAll('b').length,
+                    text: tip.textContent,
+                };
+            }"""
+        )
+        assert result["imgs"] == 0 and result["bolds"] == 0, result
+        assert XSS_PAYLOAD in result["text"]
+        assert "<b>50M</b>" in result["text"]
+
+    @pytest.mark.e2e
+    def test_artifact_risk_text_is_escaped(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        result = viewer_page.evaluate(
+            """(payload) => {
+                viewer.renderArtifactRisk({
+                    risk_score: 0.5,
+                    artifact_likelihood: payload,
+                    risks: [{type: 'strand_bias', severity: 'high',
+                             description: payload, value: 1}],
+                });
+                const meter = document.getElementById('artifact-risk-meter');
+                const list = document.getElementById('artifact-risk-list');
+                return {
+                    imgs: meter.querySelectorAll('img').length
+                        + list.querySelectorAll('img').length,
+                    listText: list.textContent,
+                };
+            }""",
+            XSS_PAYLOAD,
+        )
+        assert result["imgs"] == 0, result
+        assert XSS_PAYLOAD in result["listText"]
+
+
+class TestLargeRegion:
+    """Regions past ~125 kb used to render blank: Math.max(...coverage) threw RangeError."""
+
+    @pytest.mark.e2e
+    def test_coverage_renders_for_one_megabase_region(self, viewer_page: Page):
+        errors: list[str] = []
+        viewer_page.on("pageerror", lambda e: errors.append(str(e)))
+        result = viewer_page.evaluate(
+            """() => {
+                const n = 1_000_000;
+                const coverage = new Array(n).fill(30);
+                for (let i = 0; i < 1000; i++) coverage[500_000 + i] = 0;
+                viewer.state.loadData({
+                    contig: 'chr1', start: 0, end: n, reads: [], variants: [], coverage,
+                });
+                viewer.renderer.resize();
+                const c = document.getElementById('coverage-canvas');
+                const px = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+                let opaque = 0;
+                for (let i = 3; i < px.length; i += 4) if (px[i] > 0) opaque++;
+                return opaque;
+            }"""
+        )
+        assert not errors, errors
+        assert result > 1000, f"coverage track should be drawn, got {result} opaque px"
+
+
+def _install_fake_host(page: Page) -> None:
+    """Stub client.app so callServerTool resolves only when the test says so."""
+    page.evaluate(
+        """() => {
+            window.__pending = [];
+            window.__messages = [];
+            viewer.client.app = {
+                callServerTool: (req) => new Promise((resolve, reject) => {
+                    window.__pending.push({ req, resolve, reject });
+                }),
+                sendMessage: (m) => { window.__messages.push(m); return Promise.resolve({}); },
+                updateModelContext: () => Promise.resolve({}),
+            };
+        }"""
+    )
+
+
+class TestFetchSequencing:
+    """Overlapping app-initiated fetches must not land out of order."""
+
+    @pytest.mark.e2e
+    def test_older_response_is_dropped(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        _install_fake_host(viewer_page)
+        result = viewer_page.evaluate(
+            """async () => {
+                const tile = (start, end, tag) => ({
+                    contig: 'chr1', start, end, coverage: new Array(end - start).fill(1),
+                    variants: [], reads: [{name: tag, cigar: '10M', position: start + 5,
+                        end_position: start + 15, mapping_quality: 60,
+                        is_reverse: false, mismatches: []}],
+                });
+                const c = viewer.client;
+                const older = c.fetchRegionDirect('/x.bam', 'chr1:101-600');
+                const newer = c.fetchRegionDirect('/x.bam', 'chr1:151-650');
+                // Resolve the NEWER request first, then the older one.
+                window.__pending[1].resolve({ structuredContent: tile(150, 650, 'new') });
+                window.__pending[0].resolve({ structuredContent: tile(100, 600, 'old') });
+                const [o, n] = await Promise.all([older, newer]);
+                viewer.applyFetchResult(n);
+                viewer.applyFetchResult(o);
+                return { o: o.status, n: n.status, name: viewer.state.data.reads[0].name };
+            }"""
+        )
+        assert result == {"o": "stale", "n": "ok", "name": "new"}, result
+
+    @pytest.mark.e2e
+    def test_fetch_error_is_shown_not_swallowed(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        _install_fake_host(viewer_page)
+        viewer_page.evaluate(
+            """async () => {
+                const p = viewer.client.fetchRegionDirect('/x.bam', 'chr1:1-2000000');
+                window.__pending[0].resolve({
+                    isError: true,
+                    content: [{type: 'text', text: 'Region size exceeds maximum allowed'}],
+                });
+                viewer.applyFetchResult(await p);
+            }"""
+        )
+        banner = viewer_page.locator("#fetch-error")
+        expect(banner).to_be_visible()
+        assert "exceeds maximum" in banner.inner_text()
+        viewer_page.locator("#fetch-error-close").click()
+        expect(banner).to_be_hidden()
+
+
+class TestNavigationLimits:
+    @pytest.mark.e2e
+    def test_zoom_in_is_bounded(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        for _ in range(30):
+            viewer_page.locator("#zoom-in").click()
+        span = viewer_page.evaluate("() => viewer.state.viewport.end - viewer.state.viewport.start")
+        assert span >= 20 - 1e-6, f"zoom-in should stop at 20bp, got {span}"
+
+    @pytest.mark.e2e
+    def test_zoom_out_is_bounded_and_start_non_negative(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        for _ in range(40):
+            viewer_page.locator("#zoom-out").click()
+        vp = viewer_page.evaluate("() => viewer.state.viewport")
+        assert vp["end"] - vp["start"] <= 500_000, vp
+        assert vp["start"] >= 0, vp
+
+    @pytest.mark.e2e
+    def test_pan_stops_at_contig_start(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        # ArrowRight pans toward lower coordinates (pan(-50), like dragging right).
+        for _ in range(40):
+            viewer_page.keyboard.press("ArrowRight")
+        vp = viewer_page.evaluate("() => viewer.state.viewport")
+        assert vp["start"] == 0, vp
+        assert vp["end"] == 500, vp
+
+
+class TestVariantRowNavigation:
+    @pytest.mark.e2e
+    def test_row_click_outside_loaded_range_fetches_tile(self, viewer_page: Page):
+        """Jumping to a variant outside the loaded tile must fetch it (not show an empty pileup)."""
+        send_init_data(viewer_page, {**SAMPLE_DATA, "file_path": "/data/x.bam"})
+        _install_fake_host(viewer_page)
+        viewer_page.evaluate(
+            """() => {
+                const v = {contig: 'chr1', position: 5200, ref: 'C', alt: 'G',
+                           vaf: 0.5, depth: 40, alt_count: 20};
+                viewer.state.store.variants.set('chr1:5200:C>G', v);
+                viewer.renderVariantTable();
+            }"""
+        )
+        viewer_page.locator('#variant-table tr[data-key="chr1:5200:C>G"] td').first.click()
+        viewer_page.wait_for_timeout(500)  # past the 300 ms refetch debounce
+        reqs = viewer_page.evaluate("() => window.__pending.map(p => p.req)")
+        regions = [r["arguments"]["region"] for r in reqs if r["name"] == "visualize_region"]
+        assert regions, "row click should trigger a visualize_region fetch"
+        start, end = (int(x) for x in regions[-1].split(":")[1].split("-"))
+        # 1-based inclusive request must cover the variant's 1-based position 5201.
+        assert start <= 5201 <= end, regions
+
+    @pytest.mark.e2e
+    def test_selection_follows_variant_across_resort(self, viewer_page: Page):
+        send_init_data(viewer_page)
+        viewer_page.locator('#variant-table tr[data-key="chr1:250:G>C"] td').first.click()
+        viewer_page.locator('#variant-panel th[data-sort="position"]').click()  # → desc
+        selected = viewer_page.locator("#variant-table tr.selected")
+        assert selected.count() == 1
+        assert selected.get_attribute("data-key") == "chr1:250:G>C"
+
+
+class TestDragDoesNotLockTooltip:
+    @pytest.mark.e2e
+    def test_drag_pan_does_not_lock_tooltip(self, viewer_page: Page):
+        send_init_data(viewer_page, NARROW_DATA)
+        box = viewer_page.locator("#reads-canvas").bounding_box()
+        assert box is not None
+        x, y = box["x"] + box["width"] / 2, box["y"] + 6
+        viewer_page.mouse.move(x, y)
+        viewer_page.mouse.down()
+        viewer_page.mouse.move(x + 60, y, steps=6)
+        viewer_page.mouse.up()
+        viewer_page.wait_for_timeout(100)
+        locked = viewer_page.evaluate("() => viewer.state.lockedTooltip !== null")
+        assert not locked, "a drag-pan must not end by locking a tooltip"

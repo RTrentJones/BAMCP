@@ -170,3 +170,61 @@ async def test_judge_with_llm_parses_fail_verdict():
     case = EvalCase(name="x", input="q", expected="e")
     v = await judge_with_llm(case, "response text", judge)
     assert v.passed is False
+
+
+@pytest.mark.unit
+def test_grade_tools_false_ignores_tool_selection():
+    # The tools-off ablation arm cannot call tools; it must be graded on the answer only.
+    case = EvalCase(
+        name="t",
+        input="q",
+        expected="e",
+        tools_expected=["get_variants"],
+        expected_claims=["chr1"],
+    )
+    on = grade_case(case, "variant on chr1", [])
+    assert on is not None and not on.passed  # tool selection fails it
+    off = grade_case(case, "variant on chr1", [], grade_tools=False)
+    assert off is not None and off.passed and off.tool_score is None
+    assert off.answer_score == 1.0
+
+
+@pytest.mark.unit
+def test_grade_tools_false_tools_only_case_defers_to_judge():
+    case = EvalCase(name="t", input="q", expected="e", tools_expected=["get_variants"])
+    assert grade_case(case, "anything", [], grade_tools=False) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "reply,passed",
+    [
+        ("VERDICT: PASS — fine", True),
+        ("**VERDICT: PASS** — fine", True),
+        ("## Verdict - pass\nall criteria met", True),
+        ("The answer names chr1.\n\nVERDICT: FAIL — misses the VAF", False),
+        ("VERDICT: PASS (draft)\nOn reflection: VERDICT: FAIL — wrong gene", False),
+        ("Looks good to me", False),
+        ("", False),
+    ],
+)
+def test_parse_verdict_is_tolerant(reply, passed):
+    from bamcp.eval.grader import parse_verdict
+
+    assert parse_verdict(reply)[0] is passed
+
+
+@pytest.mark.unit
+def test_parse_verdict_reports_unparseable():
+    from bamcp.eval.grader import parse_verdict
+
+    assert parse_verdict("Looks good") == (False, "unparseable judge output: Looks good")
+    assert parse_verdict("") == (False, "(no judge output)")
+
+
+@pytest.mark.unit
+async def test_judge_with_llm_accepts_markdown_verdict():
+    judge = MockProvider(lambda m, t: ProviderResponse(text="**VERDICT: PASS** — correct"))
+    case = EvalCase(name="x", input="q", expected="e")
+    verdict = await judge_with_llm(case, "answer", judge)
+    assert verdict.passed and "VERDICT" in verdict.rationale

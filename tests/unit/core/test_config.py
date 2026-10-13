@@ -392,3 +392,147 @@ class TestConfigValidation:
 
         monkeypatch.setenv("BAMCP_REFERENCE", "/data/hg38.fa")
         assert BAMCPConfig.from_env().reference == "/data/hg38.fa"
+
+
+def _clear_bamcp_env(monkeypatch):
+    for key in list(os.environ.keys()):
+        if key.startswith("BAMCP_"):
+            monkeypatch.delenv(key, raising=False)
+
+
+class TestEnvParsing:
+    """Strict env parsing: typos fail loudly and name the variable."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("raw", ["1", "true", "TRUE", "yes", "Yes", "on", " ON "])
+    def test_truthy_values_enable_auth(self, monkeypatch, raw):
+        _clear_bamcp_env(monkeypatch)
+        monkeypatch.setenv("BAMCP_AUTH_ENABLED", raw)
+        assert BAMCPConfig.from_env().auth_enabled is True
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("raw", ["0", "false", "False", "no", "off", ""])
+    def test_falsy_values_disable(self, monkeypatch, raw):
+        _clear_bamcp_env(monkeypatch)
+        monkeypatch.setenv("BAMCP_AUTH_ENABLED", raw)
+        assert BAMCPConfig.from_env().auth_enabled is False
+
+    @pytest.mark.unit
+    def test_empty_bool_uses_default(self, monkeypatch):
+        _clear_bamcp_env(monkeypatch)
+        monkeypatch.setenv("BAMCP_GNOMAD_ENABLED", "")
+        assert BAMCPConfig.from_env().gnomad_enabled is True
+
+    @pytest.mark.unit
+    def test_default_true_bool_can_be_disabled(self, monkeypatch):
+        _clear_bamcp_env(monkeypatch)
+        monkeypatch.setenv("BAMCP_CLINVAR_ENABLED", "off")
+        assert BAMCPConfig.from_env().clinvar_enabled is False
+
+    @pytest.mark.unit
+    def test_invalid_bool_names_variable(self, monkeypatch):
+        _clear_bamcp_env(monkeypatch)
+        monkeypatch.setenv("BAMCP_AUTH_ENABLED", "ture")
+        with pytest.raises(ValueError, match="BAMCP_AUTH_ENABLED"):
+            BAMCPConfig.from_env()
+
+    @pytest.mark.unit
+    def test_invalid_int_names_variable(self, monkeypatch):
+        _clear_bamcp_env(monkeypatch)
+        monkeypatch.setenv("BAMCP_PORT", "abc")
+        with pytest.raises(ValueError, match="BAMCP_PORT='abc' is not an integer"):
+            BAMCPConfig.from_env()
+
+    @pytest.mark.unit
+    def test_invalid_float_names_variable(self, monkeypatch):
+        _clear_bamcp_env(monkeypatch)
+        monkeypatch.setenv("BAMCP_MIN_VAF", "lots")
+        with pytest.raises(ValueError, match="BAMCP_MIN_VAF"):
+            BAMCPConfig.from_env()
+
+    @pytest.mark.unit
+    def test_empty_int_uses_default(self, monkeypatch):
+        _clear_bamcp_env(monkeypatch)
+        monkeypatch.setenv("BAMCP_PORT", "")
+        assert BAMCPConfig.from_env().port == DEFAULT_PORT
+
+    @pytest.mark.unit
+    def test_rate_limit_default(self, monkeypatch):
+        _clear_bamcp_env(monkeypatch)
+        assert BAMCPConfig.from_env().rate_limit == 120
+
+
+class TestCacheDirFallback:
+    """A read-only home (read_only container) must not crash start-up."""
+
+    @pytest.mark.unit
+    def test_default_unwritable_falls_back_to_tempdir(self, monkeypatch, tmp_path, caplog):
+        import bamcp.config as config_mod
+
+        _clear_bamcp_env(monkeypatch)
+        blocker = tmp_path / "file"
+        blocker.write_text("x")  # a file where a directory is needed → mkdir fails, even as root
+        monkeypatch.setattr(config_mod, "DEFAULT_CACHE_DIR", blocker / "bamcp")
+        monkeypatch.setattr(config_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+        with caplog.at_level("WARNING"):
+            config = BAMCPConfig.from_env()
+        assert config.cache_dir == str(tmp_path / "bamcp-cache")
+        assert (tmp_path / "bamcp-cache").is_dir()
+        assert "not writable" in caplog.text
+
+    @pytest.mark.unit
+    def test_no_writable_dir_at_all_raises_clearly(self, monkeypatch, tmp_path):
+        import bamcp.config as config_mod
+
+        _clear_bamcp_env(monkeypatch)
+        blocker = tmp_path / "file"
+        blocker.write_text("x")
+        monkeypatch.setattr(config_mod, "DEFAULT_CACHE_DIR", blocker / "bamcp")
+        monkeypatch.setattr(config_mod.tempfile, "gettempdir", lambda: str(blocker))
+        with pytest.raises(ValueError, match="set BAMCP_CACHE_DIR"):
+            BAMCPConfig.from_env()
+
+    @pytest.mark.unit
+    def test_explicit_unwritable_cache_dir_raises_naming_variable(self, monkeypatch, tmp_path):
+        _clear_bamcp_env(monkeypatch)
+        blocker = tmp_path / "file"
+        blocker.write_text("x")
+        monkeypatch.setenv("BAMCP_CACHE_DIR", str(blocker / "cache"))
+        with pytest.raises(ValueError, match="BAMCP_CACHE_DIR="):
+            BAMCPConfig.from_env()
+
+
+class TestGenomeBuildNormalization:
+    """genome_build is canonicalized so GRCh37 aliases never route to GRCh38 sources."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("raw", "canonical"),
+        [
+            ("hg19", "GRCh37"),
+            ("GRCh37", "GRCh37"),
+            ("grch37", "GRCh37"),
+            ("b37", "GRCh37"),
+            ("hs37d5", "GRCh37"),
+            ("hg38", "GRCh38"),
+            ("GRCh38", "GRCh38"),
+            (" HG38 ", "GRCh38"),
+        ],
+    )
+    def test_aliases_normalized(self, raw, canonical):
+        assert BAMCPConfig(genome_build=raw).genome_build == canonical
+
+    @pytest.mark.unit
+    def test_unknown_build_rejected(self):
+        with pytest.raises(ValueError, match="genome_build"):
+            BAMCPConfig(genome_build="hg99")
+
+    @pytest.mark.unit
+    def test_env_alias_normalized(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BAMCP_GENOME_BUILD", "hg19")
+        monkeypatch.setenv("BAMCP_CACHE_DIR", str(tmp_path))
+        assert BAMCPConfig.from_env().genome_build == "GRCh37"
+
+    @pytest.mark.unit
+    def test_gnomad_dataset_defaults_to_per_build(self):
+        assert BAMCPConfig().gnomad_dataset == "auto"

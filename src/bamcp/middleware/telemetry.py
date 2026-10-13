@@ -39,8 +39,23 @@ _jsonl_path: str = ""
 _otel_tracer: Any = None
 _session_id: str = ""
 
-# Argument keys that always contain sensitive paths and must be hashed.
-_HASH_ARG_KEYS = frozenset({"file_path", "reference", "index_filename", "bam_path"})
+# Argument keys that carry file paths or URLs and must be hashed. URLs may be pre-signed
+# (S3/GCS query-string credentials), so they are never logged in clear. ``vcf_path`` is the
+# get_variants VCF overlay; the rest cover path/URL-ish keys a tool or caller may pass.
+_HASH_ARG_KEYS = frozenset(
+    {
+        "file_path",
+        "bam_path",
+        "vcf_path",
+        "vcf_url",
+        "reference",
+        "reference_url",
+        "index_filename",
+        "index_path",
+        "path",
+        "url",
+    }
+)
 
 # Argument keys that should be dropped entirely (auth/credentials).
 _DROP_ARG_KEYS = frozenset({"token", "access_token", "auth", "authorization", "api_key"})
@@ -143,9 +158,14 @@ def sanitize_args(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _hash_path(path: str) -> str:
-    """Hash a file path / URL to ``sha256[:12]:filename``."""
+    """Hash a file path / URL to ``sha256[:12]:filename``.
+
+    The query string and fragment are stripped before taking the basename, so a signed
+    URL's credentials (``?X-Amz-Signature=...``) never reach the readable suffix.
+    """
     digest = hashlib.sha256(path.encode()).hexdigest()[:12]
-    name = Path(path).name or path
+    bare = path.split("?", 1)[0].split("#", 1)[0]
+    name = Path(bare).name or "-"
     return f"{digest}:{name}"
 
 

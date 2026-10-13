@@ -7,6 +7,8 @@ from typing import Any
 import numpy as np
 import pysam
 
+from .validation import is_cram
+
 
 @dataclass
 class SoftClip:
@@ -53,6 +55,10 @@ class RegionData:
     coverage: list[int]
     variants: list[dict]
     reference_sequence: str | None = None
+    # True when the max_reads cap stopped read extraction early: ``reads`` is then a
+    # prefix of the region's reads, so read-derived evidence is incomplete (coverage
+    # and candidate VAF/depth come from uncapped passes and are unaffected).
+    reads_truncated: bool = False
 
 
 # Maximum region size to prevent DoS via unbounded memory allocation
@@ -73,6 +79,19 @@ SNV_PILEUP_MERGE_GAP = 1000
 # CIGAR operation codes
 CIGAR_SOFT_CLIP = 4  # S operation
 
+# Reads BAMCP never counts — for coverage, candidates, VCF support, or display. Echoed
+# in every variant response's applied_filters so the exclusions are never silent.
+EXCLUDED_READ_FLAGS = ("unmapped", "secondary", "supplementary", "duplicate", "qcfail")
+
+# Overlapping mates policy: when both mates of a fragment cover a base, BAMCP counts
+# BOTH (like ``samtools depth`` without ``-s``). count_coverage cannot de-duplicate
+# overlaps, so every pileup pass sets ``ignore_overlaps=False`` explicitly to agree with
+# it — pysam's default (True) silently zeroes one mate's base quality, which made depth
+# and VAF differ between the coverage, indel and VCF-support passes.
+OVERLAPPING_MATES_POLICY = "both_counted"
+
+_ACGT = frozenset("ACGT")
+
 
 def read_passes_filters(read: pysam.AlignedSegment, min_mapq: int = 0) -> bool:
     """Return whether a read should contribute to BAMCP coverage/read evidence."""
@@ -84,6 +103,51 @@ def read_passes_filters(read: pysam.AlignedSegment, min_mapq: int = 0) -> bool:
         and not read.is_duplicate
         and not read.is_qcfail
     )
+
+
+def _pileup(samfile: pysam.AlignmentFile, contig: str, start: int, stop: int) -> Any:
+    """The one pileup configuration every BAMCP pass uses.
+
+    ``stepper="nofilter"`` + explicit :func:`read_passes_filters` mirrors count_coverage's
+    read set; ``min_base_quality=0`` because pileup's own base-quality filter also drops
+    deletion/ref-skip entries (which have no base) — callers threshold real bases
+    themselves via :func:`_counted_base`; ``ignore_overlaps=False`` per
+    :data:`OVERLAPPING_MATES_POLICY`; no BAQ; ``max_depth`` lifted off pysam's 8000.
+    """
+    return samfile.pileup(
+        contig,
+        start,
+        stop,
+        truncate=True,
+        min_base_quality=0,
+        stepper="nofilter",
+        ignore_overlaps=False,
+        compute_baq=False,
+        max_depth=PILEUP_MAX_DEPTH,
+    )
+
+
+def _counted_base(pread: Any, min_baseq: int) -> str | None:
+    """The upper-case base a pileup read contributes, or None if count_coverage wouldn't.
+
+    count_coverage tallies only A/C/G/T whose stored quality meets the threshold, so
+    under a positive ``min_baseq`` a no-QUAL ("*") read — or one whose quality array
+    is too short — does NOT count either. Deletion/ref-skip entries carry no base.
+    """
+    if pread.is_del or pread.is_refskip:
+        return None
+    qpos = pread.query_position
+    seq = pread.alignment.query_sequence
+    if qpos is None or seq is None or qpos >= len(seq):
+        return None
+    base = seq[qpos].upper()
+    if base not in _ACGT:
+        return None
+    if min_baseq:
+        quals = pread.alignment.query_qualities
+        if quals is None or qpos >= len(quals) or quals[qpos] < min_baseq:
+            return None
+    return str(base)
 
 
 def extract_soft_clips(read: pysam.AlignedSegment) -> list[SoftClip]:
@@ -138,35 +202,52 @@ def extract_soft_clips(read: pysam.AlignedSegment) -> list[SoftClip]:
 
 def parse_region(region: str) -> tuple[str, int, int]:
     """
-    Parse a genomic region string into contig, start, end.
+    Parse a 1-based, inclusive (samtools-style) region string into internal coordinates.
+
+    The tool-boundary contract: ``chr1:1051-1051`` is the single base at 1-based
+    position 1051, and ``chr1:1000-2000`` spans 1000..2000 inclusive (1001 bases) —
+    exactly what ``samtools view``/IGV mean by the same string. Internally BAMCP works
+    in pysam's 0-based half-open frame, so this is the ONE place the conversion
+    happens: the returned ``start`` is ``int(start) - 1`` and ``end`` is unchanged
+    (1-based inclusive end == 0-based exclusive end).
 
     Supports formats:
         - chr1:1000-2000
         - chr1:1,000-2,000
         - 1:1000-2000
+        - HLA-A*01:01:01:01:100-200 (contig names containing ':' split on the last ':')
+
+    The end is NOT clamped here (no header is available); the fetchers clamp it to
+    the contig length once the file is open (see :func:`_clamp_end`).
 
     Returns:
-        Tuple of (contig, start, end)
+        Tuple of (contig, start0, end) — 0-based half-open.
 
     Raises:
         ValueError: If region format is invalid or exceeds MAX_REGION_SIZE.
     """
     region = region.replace(",", "")
     try:
-        contig, coords = region.split(":")
+        contig, coords = region.rsplit(":", 1)
         start_str, end_str = coords.split("-")
-        start = int(start_str)
+        start1 = int(start_str)
         end = int(end_str)
     except (ValueError, AttributeError) as e:
         raise ValueError(
-            f"Invalid region format: '{region}'. Expected format: 'chr1:1000-2000'"
+            f"Invalid region format: '{region}'. Expected 1-based inclusive "
+            f"'chr1:1000-2000' (samtools-style)"
         ) from e
+    if not contig:
+        raise ValueError(f"Invalid region format: '{region}'. Missing contig name")
 
-    if start < 0:
-        raise ValueError(f"Start position must be non-negative, got {start}")
-    if end <= start:
-        raise ValueError(f"End position ({end}) must be greater than start ({start})")
+    if start1 < 1:
+        raise ValueError(
+            f"Start position must be >= 1 (regions are 1-based, inclusive), got {start1}"
+        )
+    if end < start1:
+        raise ValueError(f"End position ({end}) must be >= start ({start1})")
 
+    start = start1 - 1
     region_size = end - start
     if region_size > MAX_REGION_SIZE:
         raise ValueError(
@@ -177,13 +258,39 @@ def parse_region(region: str) -> tuple[str, int, int]:
     return contig, start, end
 
 
+def format_region(contig: str, start0: int, end: int) -> str:
+    """Render internal 0-based half-open ``[start0, end)`` as a 1-based inclusive region.
+
+    The inverse of :func:`parse_region`: every internal caller that builds a region
+    string from 0-based numbers must go through here so the string it emits means
+    the same bases at the tool boundary.
+    """
+    return f"{contig}:{start0 + 1}-{end}"
+
+
+def _clamp_end(lengths: dict[str, int], contig: str, start: int, end: int) -> int:
+    """Clamp ``end`` to the contig length; raise a clear error for unknown contigs/starts."""
+    length = lengths.get(contig)
+    if length is None:
+        raise ValueError(f"Contig '{contig}' not found in the alignment header")
+    if start >= length:
+        raise ValueError(
+            f"Region start {start + 1} is past the end of {contig} (length {length:,})"
+        )
+    return min(end, length)
+
+
+def _header_lengths(samfile: pysam.AlignmentFile) -> dict[str, int]:
+    return dict(zip(samfile.references, samfile.lengths, strict=False))
+
+
 def _open_alignment(
     bam_path: str,
     reference_path: str | None = None,
     index_filename: str | None = None,
 ) -> pysam.AlignmentFile:
     """Open a BAM/CRAM with the correct mode and shared options."""
-    mode = "rc" if bam_path.endswith(".cram") else "rb"
+    mode = "rc" if is_cram(bam_path) else "rb"
     return pysam.AlignmentFile(
         bam_path,
         mode,  # type: ignore[arg-type]
@@ -193,7 +300,11 @@ def _open_alignment(
 
 
 def fetch_reference_sequence(reference_path: str, region: str) -> str:
-    """Fetch the reference sequence for a region (0-based half-open)."""
+    """Fetch the reference sequence for a 1-based inclusive region string.
+
+    Returns the bases at internal 0-based half-open ``[start, end)``; pysam truncates
+    a slice that runs past the contig end, matching the alignment-side clamp.
+    """
     contig, start, end = parse_region(region)
     with pysam.FastaFile(reference_path) as fasta:
         return fasta.fetch(contig, start, end)
@@ -210,6 +321,7 @@ def count_coverage_arrays(
     """Return base-count coverage arrays for a region without extracting reads."""
     contig, start, end = parse_region(region)
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
+        end = _clamp_end(_header_lengths(samfile), contig, start, end)
         counts = samfile.count_coverage(
             contig,
             start,
@@ -292,24 +404,107 @@ def _per_alt_value(value: Any, idx: int) -> Any:
     return value
 
 
+def _info_value(record: Any, key: str, default: Any = None) -> Any:
+    """Read an INFO field without tripping pysam's undeclared-key error.
+
+    ``record.info.get(key)`` raises ``ValueError("Invalid header")`` when the VCF
+    header does not declare ``key`` — the norm for bcftools/GATK/DeepVariant small-
+    variant VCFs, which never declare SVTYPE/END/SVLEN (and often not AF/DP).
+    """
+    if key not in record.header.info:
+        return default
+    return record.info.get(key, default)
+
+
+_NUCLEOTIDES = frozenset("ACGTNacgtn")
+
+
+def _trim_allele(pos0: int, ref: str, alt: str) -> tuple[int, str, str]:
+    """Minimally represent one ALT against REF (multi-allelic records are padded).
+
+    A multi-allelic record shares one REF across ALTs (``REF=ACG ALT=ATG,A``), so
+    each allele is trimmed on its own: shared suffix first, then shared prefix,
+    always leaving at least one base on each side (VCF anchor convention). The
+    result matches BAMCP's own candidate representation, so the ``auto`` overlay
+    de-duplicates a VCF call against the same local candidate.
+    """
+    while len(ref) > 1 and len(alt) > 1 and ref[-1].upper() == alt[-1].upper():
+        ref, alt = ref[:-1], alt[:-1]
+    while len(ref) > 1 and len(alt) > 1 and ref[0].upper() == alt[0].upper():
+        ref, alt, pos0 = ref[1:], alt[1:], pos0 + 1
+    return pos0, ref, alt
+
+
+def _classify_allele(ref: str, alt: str, structural: bool) -> str:
+    """Variant kind of a (trimmed) ref/alt pair: snv, mnp, indel, or sv."""
+    if structural:
+        return "sv"
+    if len(ref) == len(alt):
+        return "snv" if len(ref) == 1 else "mnp"
+    return "indel"
+
+
+def _sample_support(record: Any, idx: int) -> tuple[int, int] | None:
+    """``(depth, alt_count)`` for ALT ``idx`` from a single-sample FORMAT AD/DP.
+
+    The sample's own allele depths are what VAF means for the BAM being viewed;
+    INFO AF/DP are cohort/site-level and only a fallback. Used only when the VCF has
+    exactly one sample (with several, which one matches the BAM is unknowable) and
+    AD carries a value for this ALT.
+    """
+    if len(record.samples) != 1 or "AD" not in record.format:
+        return None
+    sample = record.samples[0]
+    ad = sample.get("AD")
+    if not isinstance(ad, (list, tuple)) or idx + 1 >= len(ad) or ad[idx + 1] is None:
+        return None
+    alt_count = int(ad[idx + 1])
+    dp = sample.get("DP") if "DP" in record.format else None
+    depth = int(dp) if dp is not None else sum(int(x) for x in ad if x is not None)
+    return depth, alt_count
+
+
 def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
-    """Load VCF/BCF records for a region as internal 0-based candidate variants."""
+    """Load VCF/BCF records for a region as internal 0-based candidate variants.
+
+    One variant per ALT allele, each trimmed to its minimal representation and
+    classified as snv / mnp / indel / sv. Spanning-deletion ``*`` alleles are not
+    variants at this site (the upstream deletion record carries them) and are
+    skipped. Depth/VAF come from the single sample's FORMAT AD/DP when present,
+    else from INFO AF/DP; a missing (``.``) value leaves VAF 0 for the read-support
+    annotation to fill.
+
+    Raises:
+        ValueError: For a VCF that cannot be region-queried (plain/unindexed .vcf).
+    """
     contig, start, end = parse_region(region)
     variants: list[dict] = []
     with pysam.VariantFile(vcf_path) as vcf:
-        for record in vcf.fetch(contig, start, end):
+        try:
+            records = vcf.fetch(contig, start, end)
+        except ValueError as e:
+            raise ValueError(
+                "vcf_path must be bgzip-compressed and indexed (.tbi/.csi) or an indexed "
+                "BCF to be queried by region; run `bgzip calls.vcf && tabix -p vcf "
+                f"calls.vcf.gz` ({e})"
+            ) from e
+        for record in records:
             pos0 = int(record.pos) - 1
             if pos0 < start or pos0 >= end:
                 continue
-            depth = int(record.info.get("DP", 0) or 0)
-            af_value = record.info.get("AF", 0.0)
+            info_dp = _info_value(record, "DP", 0) or 0
+            af_value = _info_value(record, "AF", 0.0)
             af_values = af_value if isinstance(af_value, tuple) else (af_value,)
-            sv_type = record.info.get("SVTYPE")
-            sv_end = record.info.get("END")
-            sv_len = record.info.get("SVLEN")
-            is_structural = bool(sv_type) or any(
-                str(alt).startswith("<") for alt in record.alts or []
+            sv_type = _info_value(record, "SVTYPE")
+            # pysam reserves INFO/END: ``record.info.get("END")`` is always None for a
+            # real file, and the value surfaces as ``record.stop`` instead. Only report
+            # it when the record actually carries an END (span differs from REF's).
+            sv_end = (
+                int(record.stop)
+                if "END" in record.header.info and record.rlen != len(record.ref or "")
+                else None
             )
+            sv_len = _info_value(record, "SVLEN")
             samples = {
                 sample_name: {
                     key: list(value) if isinstance(value, tuple) else value
@@ -318,22 +513,38 @@ def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
                 for sample_name, sample_data in record.samples.items()
             }
             for idx, alt in enumerate(record.alts or []):
-                af = float(af_values[idx]) if idx < len(af_values) else 0.0
-                alt_len = len(str(alt))
-                ref_len = len(str(record.ref))
-                variant_kind = (
-                    "sv" if is_structural else ("snv" if ref_len == 1 and alt_len == 1 else "indel")
+                alt = str(alt)
+                if alt == "*":
+                    continue
+                ref = str(record.ref)
+                is_structural = bool(sv_type) or not (
+                    set(alt) <= _NUCLEOTIDES and set(ref) <= _NUCLEOTIDES
                 )
+                var_pos0, var_ref, var_alt = (
+                    (pos0, ref, alt) if is_structural else _trim_allele(pos0, ref, alt)
+                )
+
+                support = _sample_support(record, idx)
+                if support is not None:
+                    depth, alt_count = support
+                    vaf = alt_count / depth if depth else 0.0
+                else:
+                    depth = int(info_dp)
+                    raw_af = af_values[idx] if idx < len(af_values) else None
+                    # AF=.,0.3 arrives as (None, 0.3): a missing value is "unknown",
+                    # not a crash.
+                    vaf = float(raw_af) if raw_af is not None else 0.0
+                    alt_count = round(vaf * depth) if depth else 0
                 variants.append(
                     {
                         "contig": record.contig,
-                        "position": pos0,
-                        "ref": record.ref,
-                        "alt": alt,
-                        "variant_kind": variant_kind,
-                        "vaf": round(af, 3),
+                        "position": var_pos0,
+                        "ref": var_ref,
+                        "alt": var_alt,
+                        "variant_kind": _classify_allele(var_ref, var_alt, is_structural),
+                        "vaf": round(vaf, 3),
                         "depth": depth,
-                        "alt_count": round(af * depth) if depth else 0,
+                        "alt_count": alt_count,
                         "source": "vcf",
                         "samples": samples,
                         "sample_names": list(samples.keys()),
@@ -370,8 +581,13 @@ def annotate_vcf_snv_support(
     min_mapq: int = 0,
     min_baseq: int = 0,
     index_filename: str | None = None,
+    sources: tuple[str, ...] = ("vcf",),
 ) -> list[dict]:
     """Attach truncation-free read-level support + per-read metrics to VCF SNVs (in place).
+
+    ``sources`` selects which variants are annotated; :func:`fetch_region` also passes
+    ``("bamcp",)`` to score its own SNV candidates from the pileup when the
+    ``max_reads`` cap truncated the read list their evidence would otherwise use.
 
     Pileups each VCF SNV site — htslib sees every read there, so this is immune to
     the ``max_reads`` cap that limits the serialized read list — and, for reads
@@ -382,7 +598,9 @@ def annotate_vcf_snv_support(
     quality/position/MAPQ histograms and mean quality. Indels/SVs are untouched
     (single-base support can't corroborate them).
     """
-    snvs = [v for v in variants if v.get("source") == "vcf" and len(v["ref"]) == 1 == len(v["alt"])]
+    snvs = [
+        v for v in variants if v.get("source") in sources and len(v["ref"]) == 1 == len(v["alt"])
+    ]
     if not snvs:
         return variants
 
@@ -408,21 +626,12 @@ def annotate_vcf_snv_support(
     intervals = _merge_snv_intervals(list(by_pos), SNV_PILEUP_MERGE_GAP)
 
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        # stepper="nofilter" leaves us to apply the base-quality threshold ourselves
-        # (below), so pileup's own min_base_quality is a no-op here; max_depth is lifted
-        # off pysam's 8000 default so high-depth sites aren't silently truncated.
+        # See _pileup: no pileup-side base filtering, both overlapping mates counted,
+        # and max_depth lifted so high-depth sites aren't silently truncated.
         columns = (
             column
             for iv_start, iv_stop in intervals
-            for column in samfile.pileup(
-                contig,
-                iv_start,
-                iv_stop,
-                truncate=True,
-                min_base_quality=0,
-                stepper="nofilter",
-                max_depth=PILEUP_MAX_DEPTH,
-            )
+            for column in _pileup(samfile, contig, iv_start, iv_stop)
         )
         for column in columns:
             targets = by_pos.get(column.reference_pos)
@@ -437,27 +646,15 @@ def annotate_vcf_snv_support(
             }
             for pread in column.pileups:
                 aln = pread.alignment
-                if not read_passes_filters(aln, min_mapq) or pread.is_del or pread.is_refskip:
+                if not read_passes_filters(aln, min_mapq):
+                    continue
+                # Honor min_baseq (and A/C/G/T-only) for both depth and support so
+                # VCF-primary VAF/confidence agrees with count_coverage used elsewhere.
+                base = _counted_base(pread, min_baseq)
+                if base is None:
                     continue
                 qpos = pread.query_position
-                seq = aln.query_sequence
-                if qpos is None or seq is None:
-                    continue
-                base = seq[qpos].upper()
-                # count_coverage's denominator sums only A/C/G/T, so N/no-call bases
-                # must not inflate the depth denominator here either.
-                if base not in "ACGT":
-                    continue
                 quals = aln.query_qualities
-                # Honor min_baseq for both depth and support so VCF-primary VAF/confidence
-                # agrees with count_coverage(quality_threshold=min_baseq) used elsewhere.
-                # count_coverage only counts a base when a stored quality meets the
-                # threshold, so under a positive min_baseq a no-QUAL ("*") read — or one
-                # whose quality array is too short — does NOT count.
-                if min_baseq and not (
-                    quals is not None and qpos < len(quals) and quals[qpos] >= min_baseq
-                ):
-                    continue
                 depth += 1
                 support = acc.get(base)
                 if support is None:
@@ -528,6 +725,7 @@ def fetch_region(
 
     # Use context manager to ensure file handles are properly closed on exception
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
+        end = _clamp_end(_header_lengths(samfile), contig, start, end)
         # 1. Calculate coverage and base counts using pysam's optimized C engine
         # Returns tuple of arrays (A, C, G, T)
         # Use read_callback to respect min_mapq filter for consistency with read filtering
@@ -551,12 +749,14 @@ def fetch_region(
                 ref_seq = fasta.fetch(contig, start, end)
 
         read_count = 0
+        reads_truncated = False
         for read in samfile.fetch(contig, start, end):
             if not read_passes_filters(read, min_mapq):
                 continue
 
             read_count += 1
             if read_count > max_reads:
+                reads_truncated = True
                 break
 
             mismatches: list[dict] = []
@@ -653,6 +853,21 @@ def fetch_region(
             (cov_A, cov_C, cov_G, cov_T), ref_seq, contig, start, min_vaf, min_depth, gap_depth
         )
         variants.extend(indels)
+        if reads_truncated:
+            # The candidates' VAF/depth come from uncapped count_coverage, but their
+            # strand/quality evidence would come from the capped read list — silently
+            # zero for any site past the cap. Pileup the SNV sites instead (htslib sees
+            # every read); serialization scores them from this support.
+            annotate_vcf_snv_support(
+                bam_path,
+                region,
+                reference_path,
+                variants,
+                min_mapq,
+                min_baseq,
+                index_filename,
+                sources=("bamcp",),
+            )
 
     return RegionData(
         contig=contig,
@@ -662,6 +877,7 @@ def fetch_region(
         coverage=coverage,
         variants=variants,
         reference_sequence=ref_seq,
+        reads_truncated=reads_truncated,
     )
 
 
@@ -684,11 +900,11 @@ def detect_variants(
         start: Start position of the region.
         min_vaf: Minimum variant allele frequency threshold.
         min_depth: Minimum read depth to consider.
-        gap_depth: Optional per-position count of reads carrying a deletion or
-            reference-skip at each column (from :func:`detect_indels`). count_coverage
-            only tallies A/C/G/T, so at deletion-heavy loci the naive ``sum(A,C,G,T)``
-            denominator understates depth and inflates VAF. Adding gap_depth restores
-            the true spanning depth.
+        gap_depth: Optional per-position count of reads carrying a deletion at each
+            column (from :func:`detect_indels`; spliced ref-skips are excluded).
+            count_coverage only tallies A/C/G/T, so at deletion-heavy loci the naive
+            ``sum(A,C,G,T)`` denominator understates depth and inflates VAF. Adding
+            gap_depth restores the true spanning depth.
 
     Returns:
         List of candidate variant dicts (contig, position, ref, alt, vaf, depth,
@@ -703,7 +919,7 @@ def detect_variants(
 
     # Iterate over positions
     for i in range(len(cov_A)):
-        # True spanning depth: matched bases (A/C/G/T) plus reads deleted/skipped here.
+        # True spanning depth: matched bases (A/C/G/T) plus reads deleted here.
         counts = {"A": cov_A[i], "C": cov_C[i], "G": cov_G[i], "T": cov_T[i]}
         gap = gap_depth[i] if gap_depth is not None and i < len(gap_depth) else 0
         total = sum(counts.values()) + gap
@@ -715,6 +931,10 @@ def detect_variants(
             break
 
         ref_base = ref_seq[i].upper()
+        # An N/IUPAC reference base has no "reference allele" to differ from: every
+        # covered read would otherwise read as a 100%-VAF "variant".
+        if ref_base not in _ACGT:
+            continue
 
         # Check for alternatives
         for base, count in counts.items():
@@ -764,34 +984,31 @@ def detect_indels(
       - ``indels`` are candidate records (``variant_kind="indel"``, ``indel_type``
         of ``"ins"``/``"del"``) in VCF-style anchored representation (ref/alt share a
         leading anchor base), 0-based ``position`` like :func:`detect_variants`.
-      - ``gap_depth`` is a per-position count of reads carrying a deletion or
-        reference-skip at each column, fed back into :func:`detect_variants` to
-        correct the SNV depth denominator.
+      - ``gap_depth`` is a per-position count of reads carrying a deletion at each
+        column (a spliced ``N`` skip does not span the base and is not counted),
+        fed back into :func:`detect_variants` to correct the SNV depth denominator.
 
-    ``gap_depth`` always has length ``end - start``. Without ``ref_seq`` no alleles can
+    ``gap_depth`` always has length ``end - start`` (``end`` clamped to the contig
+    length, as for the coverage arrays). Without ``ref_seq`` no alleles can
     be built, so ``indels`` is empty (SNV detection also no-ops without a reference).
     """
     contig, start, end = parse_region(region)
-    length = max(end - start, 0)
-    gap_depth = [0] * length
     indels: list[dict] = []
 
-    if not ref_seq or length == 0:
-        return indels, gap_depth
+    if not ref_seq:
+        return indels, [0] * max(end - start, 0)
 
     ref_len = len(ref_seq)
 
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        # nofilter + explicit read_passes_filters mirrors count_coverage's read set
-        # (no BAQ, no mate-overlap dedup) so indel depth stays consistent with SNV depth.
-        for column in samfile.pileup(
-            contig,
-            start,
-            end,
-            truncate=True,
-            min_base_quality=min_baseq,
-            stepper="nofilter",
-        ):
+        # Same clamp as count_coverage_arrays/fetch_region so gap_depth stays aligned
+        # with the coverage arrays it corrects.
+        end = _clamp_end(_header_lengths(samfile), contig, start, end)
+        length = max(end - start, 0)
+        gap_depth = [0] * length
+        # _pileup mirrors count_coverage's read set (no BAQ, both overlapping mates
+        # counted) so indel depth stays consistent with SNV depth.
+        for column in _pileup(samfile, contig, start, end):
             idx = column.reference_pos - start
             if not (0 <= idx < length):
                 continue
@@ -806,10 +1023,16 @@ def detect_indels(
                 if not read_passes_filters(aln, min_mapq):
                     continue
                 if pread.is_refskip:
-                    del_here += 1
+                    # A spliced (N) read skips this base entirely — it neither covers it
+                    # nor carries a deletion, so it must not enter any depth denominator.
                     continue
                 if pread.is_del:
+                    # A deletion has no base quality; count it regardless of min_baseq
+                    # (pileup's own min_base_quality used to drop it here).
                     del_here += 1
+                    continue
+                # Matched bases follow count_coverage's rule (A/C/G/T, qual >= min_baseq).
+                if _counted_base(pread, min_baseq) is None:
                     continue
                 matched += 1
                 # pread.indel is the indel BETWEEN this column and the next.
@@ -835,6 +1058,9 @@ def detect_indels(
                 continue
 
             anchor = ref_seq[idx].upper()
+            # As for SNVs: an N/IUPAC anchor can't form a real VCF-style allele.
+            if anchor not in _ACGT:
+                continue
 
             for del_len, support in del_events.items():
                 vaf = support / depth
@@ -848,6 +1074,8 @@ def detect_indels(
                 if del_end > ref_len:
                     continue
                 ref_allele = ref_seq[idx:del_end].upper()
+                if not set(ref_allele) <= _ACGT:
+                    continue  # deleted bases include N/IUPAC — no real ref allele
                 indels.append(
                     {
                         "contig": contig,
@@ -920,7 +1148,51 @@ def _detect_indels_if_small(
     )
 
 
-def scan_variants_chunked(
+@dataclass
+class ScanResult:
+    """A contig scan's candidates plus what was (and wasn't) scanned.
+
+    ``scanned_start``/``scanned_end`` are internal 0-based half-open; the tool layer
+    renders them 1-based. ``total_candidates`` counts candidates before the
+    ``SCAN_VARIANTS_MAX_RESULTS`` cap, so ``results_capped`` is self-describing.
+    """
+
+    contig: str
+    contig_length: int
+    scanned_start: int
+    scanned_end: int
+    variants: list[dict]
+    total_candidates: int
+    results_capped: bool
+    truncated_by_max_region: bool
+
+
+def _deletion_depth_at(
+    samfile: pysam.AlignmentFile, contig: str, positions: list[int], min_mapq: int
+) -> dict[int, int]:
+    """Count reads carrying a deletion at each of ``positions`` (spliced skips excluded).
+
+    The scan's SNV candidates come from count_coverage, whose A/C/G/T-only denominator
+    understates depth inside deletions. Rather than pileup a whole chromosome, pileup
+    only short intervals around the candidates and add the deletion depth back — the
+    same gap_depth correction get_variants applies via detect_indels.
+    """
+    wanted = set(positions)
+    counts: dict[int, int] = {}
+    for iv_start, iv_stop in _merge_snv_intervals(positions, SNV_PILEUP_MERGE_GAP):
+        for column in _pileup(samfile, contig, iv_start, iv_stop):
+            pos = column.reference_pos
+            if pos not in wanted:
+                continue
+            counts[pos] = sum(
+                1
+                for pread in column.pileups
+                if pread.is_del and read_passes_filters(pread.alignment, min_mapq)
+            )
+    return counts
+
+
+def scan_contig(
     bam_path: str,
     contig: str,
     reference_path: str,
@@ -931,37 +1203,26 @@ def scan_variants_chunked(
     min_baseq: int = 0,
     max_region: int = 250_000_000,
     index_filename: str | None = None,
-) -> list[dict]:
-    """Scan an entire contig for variants using fast coverage-based detection.
+) -> ScanResult:
+    """Scan a contig for SNV candidates using fast coverage-based detection.
 
     Uses pysam's count_coverage (C implementation) in chunks — no read
-    extraction — so scanning a full human chromosome is feasible.
+    extraction — so scanning a full human chromosome is feasible. SNV-only: indels
+    need a per-read pileup that is too slow at chromosome scale. Candidate VAF/depth
+    include reads deleted at the site (as get_variants does), and N/IUPAC reference
+    bases are skipped.
 
-    Args:
-        bam_path: Path to BAM/CRAM file.
-        contig: Contig to scan (e.g. "chr13").
-        reference_path: Path to reference FASTA (required).
-        chunk_size: Window size per iteration.
-        min_vaf: Minimum variant allele frequency.
-        min_depth: Minimum read depth.
-        min_mapq: Minimum mapping quality filter.
-        min_baseq: Minimum base quality for coverage/candidate variant counts.
-        max_region: Maximum bases to scan (safety limit).
-        index_filename: Path to cached index file for remote BAMs.
-
-    Returns:
-        List of variant dicts sorted by VAF descending, capped at 500.
+    Raises:
+        ValueError: If ``contig`` is not in the alignment header.
     """
     from ..constants import SCAN_VARIANTS_MAX_RESULTS
 
     all_variants: list[dict] = []
 
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        # Get contig length from header
-        contig_lengths = dict(zip(samfile.references, samfile.lengths, strict=False))
-        contig_length = contig_lengths.get(contig)
+        contig_length = _header_lengths(samfile).get(contig)
         if contig_length is None:
-            return []
+            raise ValueError(f"Contig '{contig}' not found in the alignment header")
 
         scan_end = min(contig_length, max_region)
 
@@ -987,8 +1248,55 @@ def scan_variants_chunked(
                     min_vaf,
                     min_depth,
                 )
+                if chunk_variants:
+                    gaps = _deletion_depth_at(
+                        samfile, contig, sorted({v["position"] for v in chunk_variants}), min_mapq
+                    )
+                    for v in chunk_variants:
+                        gap = gaps.get(v["position"], 0)
+                        if gap:
+                            v["depth"] += gap
+                            v["vaf"] = round(v["alt_count"] / v["depth"], 3)
+                    # Adding deletion depth only lowers VAF: re-apply the threshold.
+                    chunk_variants = [v for v in chunk_variants if v["vaf"] >= min_vaf]
                 all_variants.extend(chunk_variants)
 
     # Sort by VAF descending and cap results
     all_variants.sort(key=lambda v: v["vaf"], reverse=True)
-    return all_variants[:SCAN_VARIANTS_MAX_RESULTS]
+    return ScanResult(
+        contig=contig,
+        contig_length=contig_length,
+        scanned_start=0,
+        scanned_end=scan_end,
+        variants=all_variants[:SCAN_VARIANTS_MAX_RESULTS],
+        total_candidates=len(all_variants),
+        results_capped=len(all_variants) > SCAN_VARIANTS_MAX_RESULTS,
+        truncated_by_max_region=scan_end < contig_length,
+    )
+
+
+def scan_variants_chunked(
+    bam_path: str,
+    contig: str,
+    reference_path: str,
+    chunk_size: int = 50_000,
+    min_vaf: float = 0.1,
+    min_depth: int = 3,
+    min_mapq: int = 0,
+    min_baseq: int = 0,
+    max_region: int = 250_000_000,
+    index_filename: str | None = None,
+) -> list[dict]:
+    """Candidates from :func:`scan_contig`, sorted by VAF descending, capped at 500."""
+    return scan_contig(
+        bam_path,
+        contig,
+        reference_path,
+        chunk_size,
+        min_vaf,
+        min_depth,
+        min_mapq,
+        min_baseq,
+        max_region,
+        index_filename,
+    ).variants

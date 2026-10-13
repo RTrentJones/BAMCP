@@ -9,3 +9,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
+  # Base images (Dockerfile, Dockerfile.dev) are pinned by digest — this keeps the digests and
+  # tags moving so the pin never turns into a stale, unpatched base.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"

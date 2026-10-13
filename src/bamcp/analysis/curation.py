@@ -12,13 +12,23 @@ import logging
 from typing import Any
 
 from ..config import BAMCPConfig
+from ..constants import (
+    ARTIFACT_LOW_MAPQ_FRACTION_THRESHOLD,
+    HIGH_CONFIDENCE_MAX_STRAND_BIAS,
+    HIGH_CONFIDENCE_MIN_DEPTH,
+    LOW_CONFIDENCE_MAX_STRAND_BIAS,
+)
 from ..core.validation import validate_path, validate_reference_path, validate_variant_input
 from ..middleware.telemetry import telemetry_wrapper
 from .evidence import (
+    build_indel_index,
     build_mismatch_index,
     compute_artifact_risk,
     compute_confidence,
+    compute_indel_evidence,
     compute_variant_evidence,
+    is_indel,
+    is_read_position_biased,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,16 +47,20 @@ INTENDED_USE = (
 )
 
 
-def compute_near_end_fraction(position_histogram: list[int] | None) -> float:
-    """Compute fraction of variant bases near read ends."""
-    if not position_histogram:
+def compute_near_end_fraction(evidence: dict | None) -> float:
+    """Fraction of supporting bases within the near-end cutoff of an aligned read end.
+
+    Read from the evidence record's ``near_end_fraction`` (see
+    :func:`bamcp.analysis.evidence.summarize_read_positions`). The display histogram's
+    0-50bp bins are NOT used: they cover most of a short read and flag clean data.
+    """
+    if not evidence:
         return 0.0
-    total = sum(position_histogram)
-    if total == 0:
-        return 0.0
-    # First two bins represent near-end positions
-    near_end = sum(position_histogram[:2])
-    return round(near_end / total, 3)
+    return round(float(evidence.get("near_end_fraction") or 0.0), 3)
+
+
+def _read_evidence_computed(evidence: dict) -> bool:
+    return bool(evidence.get("read_evidence_computed", True))
 
 
 def generate_curator_recommendations(
@@ -56,6 +70,14 @@ def generate_curator_recommendations(
 ) -> list[str]:
     """Generate actionable recommendations for variant curators."""
     recommendations = []
+    computed = _read_evidence_computed(evidence)
+
+    if not computed:
+        recommendations.append(
+            "READ EVIDENCE NOT COMPUTED: strand, base-quality and read-position support "
+            "for this variant could not be measured. Inspect the alignments directly; "
+            "the absence of other flags here says nothing about call quality."
+        )
 
     if artifact_risk["artifact_likelihood"] == "high":
         recommendations.append(
@@ -63,33 +85,30 @@ def generate_curator_recommendations(
             "Consider orthogonal validation (e.g., Sanger sequencing)."
         )
 
-    if evidence.get("strand_bias", 0) > 0.9:
+    if computed and evidence.get("strand_bias", 0) > LOW_CONFIDENCE_MAX_STRAND_BIAS:
         recommendations.append(
             "STRAND BIAS: Nearly all supporting reads on one strand. "
             "This pattern is consistent with PCR amplification artifacts."
         )
 
-    position_hist = evidence.get("position_histogram", [])
-    if position_hist:
-        near_end_frac = compute_near_end_fraction(position_hist)
-        if near_end_frac > 0.6:
-            recommendations.append(
-                "READ POSITION BIAS: Majority of variant bases are near read ends. "
-                "Consider reviewing read alignments for potential mapping errors."
-            )
+    if computed and is_read_position_biased(evidence):
+        recommendations.append(
+            "READ POSITION BIAS: Majority of variant bases are near read ends. "
+            "Consider reviewing read alignments for potential mapping errors."
+        )
 
     mapq_hist = evidence.get("mapq_histogram", [])
     if mapq_hist and sum(mapq_hist) > 0:
         low_mapq_frac = sum(mapq_hist[:3]) / sum(mapq_hist)
-        if low_mapq_frac > 0.3:
+        if low_mapq_frac > ARTIFACT_LOW_MAPQ_FRACTION_THRESHOLD:
             recommendations.append(
                 "LOW MAPPING QUALITY: Significant fraction of reads have MAPQ < 30. "
                 "The genomic region may be repetitive or have multiple mappings."
             )
 
-    if variant.get("depth", 0) < 20:
+    if variant.get("depth", 0) < HIGH_CONFIDENCE_MIN_DEPTH:
         recommendations.append(
-            "LOW COVERAGE: Depth below 20x limits confidence. "
+            f"LOW COVERAGE: Depth below {HIGH_CONFIDENCE_MIN_DEPTH}x limits confidence. "
             "Consider whether this meets clinical calling thresholds."
         )
 
@@ -102,11 +121,15 @@ def generate_curator_recommendations(
     return recommendations
 
 
-def compute_rubric_scores(variant: dict, evidence: dict, artifact_risk: dict) -> dict[str, float]:
+def compute_rubric_scores(
+    variant: dict, evidence: dict, artifact_risk: dict
+) -> dict[str, float | None]:
     """Normalized 0-1 quality scores derived from existing evidence.
 
     Each score is computed from quantities already present in the evidence
     pipeline; no new BAM passes are required. Higher is better in all cases.
+    When read-level evidence was not computed (``read_evidence_computed`` False),
+    the read-derived scores are ``None`` — unknown, not perfect.
     """
     vaf = float(variant.get("vaf", 0.0))
     depth = int(variant.get("depth", 0))
@@ -117,8 +140,7 @@ def compute_rubric_scores(variant: dict, evidence: dict, artifact_risk: dict) ->
     high_mapq = sum(mapq_hist[3:]) if len(mapq_hist) >= 4 else 0
     mapq_quality = (high_mapq / mapq_total) if mapq_total > 0 else 0.0
 
-    pos_hist = evidence.get("position_histogram") or []
-    near_end = compute_near_end_fraction(pos_hist)
+    near_end = compute_near_end_fraction(evidence)
 
     risk_score = float(artifact_risk.get("risk_score", 0.0))
 
@@ -130,7 +152,11 @@ def compute_rubric_scores(variant: dict, evidence: dict, artifact_risk: dict) ->
         "position_quality": _clamp01(1.0 - near_end),
         "artifact_risk_inverse": _clamp01(1.0 - risk_score),
     }
-    return {k: round(v, 4) for k, v in scores.items()}
+    rounded: dict[str, float | None] = {k: round(v, 4) for k, v in scores.items()}
+    if not _read_evidence_computed(evidence):
+        for k in ("strand_balance", "mapq_quality", "position_quality"):
+            rounded[k] = None
+    return rounded
 
 
 def _clamp01(x: float) -> float:
@@ -158,25 +184,44 @@ def format_curation_summary(summary: dict) -> str:
         f"  VAF: {v['vaf']:.1%} ({v.get('alt_count', 'N/A')} alt reads / {v['depth']} total depth)",
         "",
         "QUALITY METRICS",
-        f"  Base Quality: mean={q['mean_quality']:.1f}",
     ]
 
-    if q.get("quality_distribution"):
-        bins = ["0-10", "10-20", "20-30", "30-40", "40+"]
-        dist_items = zip(bins, q["quality_distribution"], strict=False)
-        dist = " | ".join(f"{b}:{c}" for b, c in dist_items)
-        lines.append(f"  Distribution: {dist}")
+    if q.get("mean_quality") is None:
+        # Read evidence not computed: say so instead of rendering placeholder zeros as
+        # "balanced"/clean.
+        lines.extend(
+            [
+                "  Base Quality: NOT COMPUTED",
+                "",
+                "STRAND ANALYSIS",
+                "  NOT COMPUTED (supporting reads not measured — not evidence of balance)",
+                "",
+                "POSITION IN READ",
+                "  NOT COMPUTED",
+            ]
+        )
+    else:
+        lines.append(f"  Base Quality: mean={q['mean_quality']:.1f}")
+        if q.get("quality_distribution"):
+            bins = ["0-10", "10-20", "20-30", "30-40", "40+"]
+            dist_items = zip(bins, q["quality_distribution"], strict=False)
+            dist = " | ".join(f"{b}:{c}" for b, c in dist_items)
+            lines.append(f"  Distribution: {dist}")
+        lines.extend(
+            [
+                "",
+                "STRAND ANALYSIS",
+                f"  Forward: {s['forward']} | Reverse: {s['reverse']}",
+                f"  Strand Bias: {s['strand_bias']:.2f} "
+                f"({'balanced' if s['is_balanced'] else 'IMBALANCED'})",
+                "",
+                "POSITION IN READ",
+                f"  Near-end fraction: {p['near_end_fraction']:.1%}",
+            ]
+        )
 
     lines.extend(
         [
-            "",
-            "STRAND ANALYSIS",
-            f"  Forward: {s['forward']} | Reverse: {s['reverse']}",
-            f"  Strand Bias: {s['strand_bias']:.2f} "
-            f"({'balanced' if s['is_balanced'] else 'IMBALANCED'})",
-            "",
-            "POSITION IN READ",
-            f"  Near-end fraction: {p['near_end_fraction']:.1%}",
             "",
             f"ARTIFACT RISK: {a['artifact_likelihood'].upper()}",
             f"  Risk Score: {a['risk_score']:.2f}",
@@ -204,12 +249,24 @@ def format_curation_summary(summary: dict) -> str:
     return "\n".join(lines)
 
 
+def _external_status_line(name: str, block: dict | None) -> str | None:
+    """Status line for an unavailable/disabled external block, else None."""
+    status = block.get("status") if block else None
+    if status == "unavailable":
+        return f"  {name}: unavailable (lookup failed — not a confirmed absence)"
+    if status == "disabled":
+        return f"  {name}: disabled on this server (not queried — not a confirmed absence)"
+    return None
+
+
 def _format_clinical_context(context: dict) -> str:
     """Render the optional ClinVar/gnomAD context block as text."""
     lines = ["CLINICAL CONTEXT (external, research-grade)"]
     clinvar = context.get("clinvar")
-    if clinvar and clinvar.get("status") == "unavailable":
-        lines.append("  ClinVar: unavailable (lookup failed — not a confirmed absence)")
+    pop = context.get("population_frequency")
+    status_line = _external_status_line("ClinVar", clinvar)
+    if status_line:
+        lines.append(status_line)
     elif clinvar:
         lines.append(
             f"  ClinVar: {clinvar.get('clinical_significance')} "
@@ -217,9 +274,9 @@ def _format_clinical_context(context: dict) -> str:
         )
     else:
         lines.append("  ClinVar: no record found")
-    pop = context.get("population_frequency")
-    if pop and pop.get("status") == "unavailable":
-        lines.append("  gnomAD: unavailable (lookup failed — not a confirmed absence)")
+    status_line = _external_status_line("gnomAD", pop)
+    if status_line:
+        lines.append(status_line)
     elif pop:
         lines.append(
             f"  gnomAD: global_af={pop.get('global_af')} max_pop_af={pop.get('max_pop_af')}"
@@ -229,11 +286,22 @@ def _format_clinical_context(context: dict) -> str:
     return "\n".join(lines)
 
 
-def _error_response(message: str, output_format: str) -> dict:
-    """Wrap an error message in the same envelope shape both formats produce."""
+def _error_response(
+    message: str, output_format: str, applied_filters: dict[str, Any] | None = None
+) -> dict:
+    """Wrap an error message in the same envelope shape both formats produce.
+
+    ``applied_filters`` is echoed when the error is a not-found, so a variant dropped
+    by min_vaf/min_depth stays distinguishable from a true absence.
+    """
     if output_format == "rubric":
-        payload = json.dumps({"error": message, "rubric_version": RUBRIC_VERSION})
-        return {"content": [{"type": "text", "text": payload}]}
+        body: dict[str, Any] = {"error": message, "rubric_version": RUBRIC_VERSION}
+        if applied_filters is not None:
+            body["applied_filters"] = applied_filters
+        return {"content": [{"type": "text", "text": json.dumps(body)}]}
+    if applied_filters is not None:
+        filters = ", ".join(f"{k}={v}" for k, v in applied_filters.items())
+        message = f"{message}\nApplied filters: {filters}"
     return {"content": [{"type": "text", "text": message}]}
 
 
@@ -252,10 +320,10 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
       deterministic grading.
     """
     # Import here to avoid circular dependency (tools imports from this module's siblings)
-    from ..core.tools import _fetch_region_with_timeout
+    from ..core.tools import _applied_filters, _fetch_region_with_timeout
 
     file_path = args["file_path"]
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     chrom = args["chrom"]
     pos = args["pos"]
     ref = args["ref"]
@@ -265,7 +333,7 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     # is used as-is. See the same pattern in core/tools.py handlers.
     explicit_reference = args.get("reference")
     if explicit_reference:
-        validate_reference_path(explicit_reference, config)
+        await asyncio.to_thread(validate_reference_path, explicit_reference, config)
     reference = explicit_reference or config.reference
     output_format = args.get("format", "text")
     if output_format not in _VALID_FORMATS:
@@ -276,33 +344,58 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     validation_error = validate_variant_input(chrom, pos, ref, alt)
     if validation_error:
         return _error_response(validation_error, output_format)
+    # Validation accepts lowercase alleles; detected variants carry uppercase.
+    ref = ref.upper()
+    alt = alt.upper()
 
-    region = f"{chrom}:{pos - window}-{pos + window}"
+    # 1-based inclusive window around the 1-based pos; clamp the start at base 1 so a
+    # variant near the contig start never builds a negative/zero (invalid) region.
+    region = f"{chrom}:{max(1, pos - window)}-{pos + window}"
 
     try:
         data = await _fetch_region_with_timeout(file_path, region, reference, config)
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, TimeoutError):
+        # _fetch_region_with_timeout re-raises the builtin TimeoutError, which is NOT
+        # asyncio.TimeoutError on Python 3.10 — catch both.
         return _error_response("Timeout fetching region data", output_format)
+    except (KeyError, ValueError) as e:
+        # pysam raises KeyError/ValueError for a contig absent from the BAM or a bad
+        # region; report it as a tool error rather than crashing the call.
+        logger.warning("Curation region fetch failed: %s", e)
+        return _error_response(
+            f"Could not read {chrom}:{pos} from the alignment file (contig not present "
+            "in the BAM, or invalid region).",
+            output_format,
+        )
+    except OSError as e:
+        logger.warning("Curation region fetch failed: %s", e)
+        return _error_response("Could not read the alignment file.", output_format)
 
     # `pos` arrives 1-based (VCF/dbSNP convention — the same coordinate
     # get_variants / lookup_clinvar / lookup_gnomad speak), but data.variants
     # carry pysam's 0-based position, so match against pos - 1.
     target_variant = None
     for v in data.variants:
-        if v["position"] == pos - 1 and v["ref"] == ref and v["alt"] == alt:
+        if v["position"] == pos - 1 and v["ref"].upper() == ref and v["alt"].upper() == alt:
             target_variant = v
             break
 
     if not target_variant:
         return _error_response(
             f"Variant {chrom}:{pos} {ref}>{alt} not found in region. "
-            f"Variants found: {len(data.variants)}",
+            f"Variants found: {len(data.variants)}. Absence may reflect the applied "
+            "filters rather than a true reference call.",
             output_format,
+            applied_filters=_applied_filters(config, {}, include_max_reads=True),
         )
 
-    # Build mismatch index and compute evidence
-    mismatch_index = build_mismatch_index(data.reads)
-    evidence = compute_variant_evidence(mismatch_index, target_variant)
+    # Build the support index (mismatches for SNVs, CIGAR events for indels) and
+    # compute evidence.
+    if is_indel(target_variant):
+        evidence = compute_indel_evidence(build_indel_index(data.reads), target_variant)
+    else:
+        evidence = compute_variant_evidence(build_mismatch_index(data.reads), target_variant)
+    computed = bool(evidence.get("read_evidence_computed", True))
     artifact_risk = compute_artifact_risk(
         target_variant, evidence, data.reference_sequence, data.start
     )
@@ -318,20 +411,25 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
             "depth": target_variant["depth"],
             "alt_count": target_variant.get("alt_count", 0),
         },
+        "read_evidence_computed": computed,
         "quality_metrics": {
-            "mean_quality": evidence["mean_quality"],
-            "median_quality": evidence["median_quality"],
-            "quality_distribution": evidence.get("quality_histogram", []),
+            "mean_quality": evidence["mean_quality"] if computed else None,
+            "median_quality": evidence["median_quality"] if computed else None,
+            "quality_distribution": evidence.get("quality_histogram", []) if computed else [],
         },
         "strand_analysis": {
-            "forward": evidence["forward_count"],
-            "reverse": evidence["reverse_count"],
-            "strand_bias": evidence["strand_bias"],
-            "is_balanced": evidence["strand_bias"] <= 0.7,
+            "forward": evidence["forward_count"] if computed else None,
+            "reverse": evidence["reverse_count"] if computed else None,
+            "strand_bias": evidence["strand_bias"] if computed else None,
+            "is_balanced": (
+                evidence["strand_bias"] <= HIGH_CONFIDENCE_MAX_STRAND_BIAS if computed else None
+            ),
         },
         "position_in_read": {
-            "distribution": evidence.get("position_histogram", []),
-            "near_end_fraction": compute_near_end_fraction(evidence.get("position_histogram")),
+            "distribution": evidence.get("position_histogram", []) if computed else [],
+            "near_end_fraction": compute_near_end_fraction(evidence) if computed else None,
+            "near_end_cutoff_bp": evidence.get("near_end_cutoff_bp"),
+            "near_end_expected_fraction": evidence.get("near_end_expected_fraction"),
         },
         "artifact_assessment": artifact_risk,
         "confidence": confidence,
@@ -346,9 +444,10 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     # gracefully when a source has no record.
     clinical_ctx: dict[str, Any] | None = None
     if include_clinical:
-        from .fusion import clinical_context
+        from .fusion import bam_build, clinical_context
 
-        clinical_ctx = await clinical_context(config, chrom, pos, ref, alt)
+        build, _ = await bam_build(file_path, config)
+        clinical_ctx = await clinical_context(config, chrom, pos, ref, alt, build)
         curation_summary["clinical_context"] = clinical_ctx
 
     if output_format == "rubric":

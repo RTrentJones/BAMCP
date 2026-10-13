@@ -69,9 +69,19 @@ def test_artifact_types_surfaced(report):
     found = {c.site: c.expected_type for c in report.artifact_checks if c.found}
     assert found == {
         "chr1:1051": "strand_bias",
+        "chr1:1101": "read_position_bias",
         "chr1:1201": "low_mapq",
         "chr1:1803": "homopolymer",
+        "chr1:2076": "low_depth",
     }
+
+
+@pytest.mark.integration
+def test_labels_and_tool_calls_hold(report):
+    # Every curation/detection call succeeded and every likelihood / VAF label holds.
+    assert report.tool_failures == []
+    assert report.likelihood_mismatches == []
+    assert report.vaf_mismatches == []
 
 
 @pytest.mark.integration

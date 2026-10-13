@@ -1,7 +1,10 @@
 """UI resource provider for the MCP Apps extension."""
 
 import importlib.resources
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Path to the static directory when running from source
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -26,7 +29,13 @@ def get_viewer_html() -> str:
     except (TypeError, FileNotFoundError):
         pass
 
-    # Final fallback: source viewer.html (won't work in sandboxed iframe)
+    # Final fallback: source viewer.html. It loads the SDK as a separate module, which the
+    # host's sandboxed iframe blocks — the viewer renders blank. Keep serving it (better than
+    # nothing for local debugging) but say so loudly: this means `make build-viewer` never ran.
+    logger.warning(
+        "Bundled viewer (static/dist/viewer.html) not found; serving the unbundled source "
+        "viewer.html, which does not work in a sandboxed MCP Apps iframe. Run `make build-viewer`."
+    )
     return (
         importlib.resources.files("bamcp")
         .joinpath("static/viewer.html")

@@ -10,6 +10,7 @@ import {
     SOFT_CLIP_STYLE,
     displayPos,
     formatRulerLabel,
+    maxOf,
     svColor,
     svTypeLabel,
 } from "./constants";
@@ -43,6 +44,7 @@ export class Renderer {
     private logicalReadsHeight = 0;
     // Rows dropped when the pileup is taller than the canvas cap (see resize()).
     private rowsHidden = 0;
+    private coverageStatsCache = new WeakMap<number[], { max: number; mean: string }>();
 
     private state: StateManager;
 
@@ -404,6 +406,63 @@ export class Renderer {
 
     // ==================== COVERAGE TRACK ====================
 
+    /** Tile-wide max/mean, cached per coverage array (render runs on every mousemove). */
+    private coverageStats(coverage: number[]): { max: number; mean: string } {
+        let stats = this.coverageStatsCache.get(coverage);
+        if (!stats) {
+            let sum = 0;
+            for (let i = 0; i < coverage.length; i++) sum += coverage[i];
+            stats = {
+                max: maxOf(coverage, 1),
+                mean: coverage.length > 0 ? (sum / coverage.length).toFixed(1) : '0',
+            };
+            this.coverageStatsCache.set(coverage, stats);
+        }
+        return stats;
+    }
+
+    /**
+     * Visible coverage as drawable columns. At >=1 px/base each base is a column;
+     * when zoomed out, bases are binned to one column per pixel (min for the
+     * low-coverage warning, max for the area) so the work and draw calls scale
+     * with the canvas width, not the region length.
+     */
+    private coverageColumns(
+        coverage: number[], dataStart: number, scale: number, width: number,
+    ): Array<{ x: number; w: number; min: number; max: number }> {
+        const vpStart = this.state.viewport.start;
+        const n = coverage.length;
+        const cols: Array<{ x: number; w: number; min: number; max: number }> = [];
+        if (n === 0 || !(scale > 0)) return cols;
+
+        if (scale >= 1) {
+            const i0 = Math.max(0, Math.floor(vpStart - dataStart));
+            const i1 = Math.min(n, Math.ceil(this.state.viewport.end - dataStart) + 1);
+            for (let i = i0; i < i1; i++) {
+                const c = coverage[i];
+                cols.push({ x: (dataStart + i - vpStart) * scale, w: scale, min: c, max: c });
+            }
+            return cols;
+        }
+
+        const basesPerPx = 1 / scale;
+        for (let px = 0; px < width; px++) {
+            const b0 = Math.max(0, Math.floor(vpStart + px * basesPerPx - dataStart));
+            const b1 = Math.min(n, Math.floor(vpStart + (px + 1) * basesPerPx - dataStart) + 1);
+            if (b0 >= n) break;
+            if (b1 <= b0) continue;
+            let min = Infinity;
+            let max = -Infinity;
+            for (let i = b0; i < b1; i++) {
+                const c = coverage[i];
+                if (c < min) min = c;
+                if (c > max) max = c;
+            }
+            cols.push({ x: px, w: 1, min, max });
+        }
+        return cols;
+    }
+
     private renderCoverage(): void {
         const ctx = this.coverageCtx;
         const width = this.logicalWidth;
@@ -415,65 +474,69 @@ export class Renderer {
         if (!data) return;
 
         const coverage = data.coverage;
-        const maxCov = Math.max(...coverage, 1);
+        const { max: maxCov, mean: meanCov } = this.coverageStats(coverage);
         const scale = this.getScale();
         const lowCoverageThreshold = 10;
+        const cols = this.coverageColumns(coverage, data.start, scale, width);
 
-        // Draw low coverage warning regions
-        for (let i = 0; i < coverage.length; i++) {
-            if (coverage[i] < lowCoverageThreshold) {
-                const x = (data.start + i - this.state.viewport.start) * scale;
-                if (coverage[i] === 0) {
-                    ctx.fillStyle = 'rgba(239, 68, 68, 0.4)';
-                    ctx.fillRect(x, 0, Math.max(scale, 1), height);
-                    ctx.strokeStyle = 'rgba(239, 68, 68, 0.6)';
-                    ctx.lineWidth = 1;
-                    for (let ly = 0; ly < height; ly += 4) {
-                        ctx.beginPath();
-                        ctx.moveTo(x, ly);
-                        ctx.lineTo(x + Math.max(scale, 2), ly + 4);
-                        ctx.stroke();
-                    }
-                } else {
-                    ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
-                    ctx.fillRect(x, 0, Math.max(scale, 1), height);
-                }
+        // Low-coverage warning: light red under the threshold, hatched red at zero.
+        // Contiguous zero columns merge into one run so the hatching is a single
+        // clipped path instead of ~15 strokes per base.
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
+        for (const c of cols) {
+            if (c.min > 0 && c.min < lowCoverageThreshold) {
+                ctx.fillRect(c.x, 0, Math.max(c.w, 1), height);
             }
         }
-
-        // Fill area
-        ctx.fillStyle = '#93c5fd';
-        ctx.strokeStyle = '#3b82f6';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-
-        for (let i = 0; i < coverage.length; i++) {
-            const x = (data.start + i - this.state.viewport.start) * scale;
-            const h = (coverage[i] / maxCov) * (height - 20);
-            const y = height - h;
-
-            if (scale >= 1) {
-                // Step function: horizontal bar per base, vertical transitions
-                if (i === 0) {
-                    ctx.moveTo(x, y);
-                } else {
-                    ctx.lineTo(x, y);
-                }
-                ctx.lineTo(x + scale, y);
-            } else {
-                // Smooth polygon for sub-pixel zoom (many bases per pixel)
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
+        const zeroRuns: Array<{ x0: number; x1: number }> = [];
+        for (const c of cols) {
+            if (c.min !== 0) continue;
+            const x1 = c.x + Math.max(c.w, 1);
+            const last = zeroRuns[zeroRuns.length - 1];
+            if (last && c.x <= last.x1 + 0.5) last.x1 = Math.max(last.x1, x1);
+            else zeroRuns.push({ x0: c.x, x1 });
+        }
+        if (zeroRuns.length) {
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.4)';
+            ctx.save();
+            ctx.beginPath();
+            for (const r of zeroRuns) {
+                ctx.rect(r.x0, 0, r.x1 - r.x0, height);
             }
+            ctx.fill();
+            ctx.clip();
+            ctx.strokeStyle = 'rgba(239, 68, 68, 0.6)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            const runStart = zeroRuns[0].x0;
+            const runEnd = zeroRuns[zeroRuns.length - 1].x1;
+            for (let hx = runStart - height; hx < runEnd; hx += 4) {
+                ctx.moveTo(hx, 0);
+                ctx.lineTo(hx + height, height);
+            }
+            ctx.stroke();
+            ctx.restore();
         }
 
-        const xEnd = (data.end - this.state.viewport.start) * scale;
-        const xStart = (data.start - this.state.viewport.start) * scale;
-        ctx.lineTo(xEnd, height);
-        ctx.lineTo(xStart, height);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
+        // Area: a step function over the visible columns.
+        if (cols.length) {
+            ctx.fillStyle = '#93c5fd';
+            ctx.strokeStyle = '#3b82f6';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            const first = cols[0];
+            const lastCol = cols[cols.length - 1];
+            ctx.moveTo(first.x, height);
+            for (const c of cols) {
+                const y = height - (c.max / maxCov) * (height - 20);
+                ctx.lineTo(c.x, y);
+                ctx.lineTo(c.x + c.w, y);
+            }
+            ctx.lineTo(lastCol.x + lastCol.w, height);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+        }
 
         // Warning line
         const thresholdY = height - (lowCoverageThreshold / maxCov) * (height - 20);
@@ -495,9 +558,6 @@ export class Renderer {
         ctx.font = 'bold 10px sans-serif';
         ctx.fillText('Max: ' + maxCov + 'x', 5, 12);
 
-        const meanCov = coverage.length > 0
-            ? (coverage.reduce((a, b) => a + b, 0) / coverage.length).toFixed(1)
-            : '0';
         ctx.font = '10px sans-serif';
         ctx.fillStyle = '#6b7280';
         ctx.fillText('Mean: ' + meanCov + 'x', 80, 12);

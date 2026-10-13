@@ -14,10 +14,10 @@
 dataset: synthetic_v1
 version: 1
 description: >-
-  Deterministic synthetic ground truth: 8 planted variant alleles across 7
+  Deterministic synthetic ground truth: 9 planted variant alleles across 8
   sites (SNVs, a multi-allelic site, a low-depth site) plus three reference-only
-  regions used as negatives, and four artifact-context sites for the curation
-  rubric.
+  regions used as negatives, and five artifact sites (strand bias, read-position
+  bias, low MAPQ, homopolymer, low depth) for the curation rubric.
 
 provenance:
   generator: tests/create_fixtures.py::create_comprehensive_bam
@@ -35,7 +35,14 @@ detection_region: chr1:1000-2900
 # Positive truth: (chrom, pos, ref, alt) the detector must recover. Positions are
 # 1-based (VCF/dbSNP convention — the coordinate get_variants and the lookup tools
 # report). Optional expected_artifact names a risk `type` the curation tool must
-# surface at that site; null means the site is the clean control.
+# surface at that site; null means no artifact is asserted there.
+#
+# expected_vaf is checked against get_variants within vaf_tolerance (below).
+# expected_likelihood is ONE-SIDED: at an artifact site it is the minimum
+# artifact_likelihood the curation tool must reach; at a non-artifact site it is
+# the maximum it may report. (One artifact type alone scores "medium" in the
+# rubric; only stacked artifacts reach "high".)
+vaf_tolerance: 0.02
 variant_sites:
   - chrom: chr1
     pos: 1051
@@ -44,7 +51,9 @@ variant_sites:
     category: strand_bias
     expected_vaf: 0.40
     expected_artifact: strand_bias
-    expected_likelihood: high
+    # medium: strand bias alone. (It read "high" only because the old 0-50bp near-end
+    # bins also flagged its mid-read support as read-position bias.)
+    expected_likelihood: medium
 
   - chrom: chr1
     pos: 1101
@@ -52,8 +61,8 @@ variant_sites:
     alt: C
     category: position_bias
     expected_vaf: 0.35
-    expected_artifact: null
-    expected_likelihood: high
+    expected_artifact: read_position_bias
+    expected_likelihood: medium
 
   - chrom: chr1
     pos: 1151
@@ -62,7 +71,8 @@ variant_sites:
     category: clean
     expected_vaf: 0.44
     expected_artifact: null
-    expected_likelihood: medium
+    # low: support sits ~20bp from either aligned end, not near-end under the 10bp cutoff.
+    expected_likelihood: low
     is_clean_control: true
 
   - chrom: chr1
@@ -81,7 +91,8 @@ variant_sites:
     category: homopolymer
     expected_vaf: 0.27
     expected_artifact: homopolymer
-    expected_likelihood: high
+    # medium: 6bp homopolymer alone (previously compounded by spurious position bias).
+    expected_likelihood: medium
 
   - chrom: chr1
     pos: 2076
@@ -89,9 +100,10 @@ variant_sites:
     alt: G
     category: low_depth
     expected_vaf: 1.0
-    expected_artifact: null
-    expected_likelihood: low
+    expected_artifact: low_depth
+    expected_likelihood: medium
 
+  # Multi-allelic, no artifact planted: nothing should lift it above low.
   - chrom: chr1
     pos: 2501
     ref: A

@@ -95,6 +95,14 @@ export interface VariantEvidence {
     mapq_histogram?: number[];
     // Artifact risk assessment
     artifact_risk?: ArtifactAssessment;
+    // Server-computed near-end summary (newer servers): fraction of supporting
+    // bases within `near_end_cutoff_bp` of the nearest aligned read end, and the
+    // fraction expected under uniform placement (null when read lengths unknown).
+    near_end_cutoff_bp?: number;
+    near_end_count?: number;
+    position_count?: number;
+    near_end_fraction?: number;
+    near_end_expected_fraction?: number | null;
 }
 
 /**

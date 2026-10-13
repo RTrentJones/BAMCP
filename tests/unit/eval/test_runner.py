@@ -182,3 +182,94 @@ async def test_run_case_handler_error_is_surfaced(tmp_path: Path, cfg):
     # Tool not found is surfaced as an error result; deterministic grader still
     # fails because get_coverage was never called.
     assert result.verdict.passed is False
+
+
+@pytest.mark.unit
+async def test_run_case_turn_limit_is_a_failure(tmp_path: Path, small_bam_path, cfg):
+    """A model still calling tools at MAX_TURNS gave no final answer: fail, even if the
+    partial transcript would satisfy the deterministic checks."""
+
+    def script(messages, tools):
+        return ProviderResponse(
+            text="coverage looks fine",
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="get_coverage",
+                    arguments={"file_path": small_bam_path, "region": "chr1:90-200"},
+                )
+            ],
+        )
+
+    case = EvalCase(
+        name="loop",
+        input="x",
+        expected="y",
+        tools_expected=["get_coverage"],
+        expected_claims=["coverage"],
+    )
+    result = await run_case(
+        case, MockProvider(script), InProcessRouter(config=cfg), judge=None, output_dir=tmp_path
+    )
+    assert result.verdict.passed is False
+    assert "turn limit" in result.verdict.rationale
+    assert result.error and "turn limit" in result.error
+
+
+@pytest.mark.unit
+async def test_run_case_provider_exception_is_a_failure(tmp_path: Path, cfg):
+    def script(messages, tools):
+        raise RuntimeError("provider down")
+
+    # No checks declared: a judge would otherwise be consulted on an empty answer.
+    case = EvalCase(name="boom", input="x", expected="y", expected_claims=[])
+    judge = MockProvider(lambda m, t: ProviderResponse(text="VERDICT: PASS — fine"))
+    result = await run_case(
+        case, MockProvider(script), InProcessRouter(config=cfg), judge=judge, output_dir=tmp_path
+    )
+    assert result.verdict.passed is False
+    assert "provider down" in result.verdict.rationale
+
+
+@pytest.mark.unit
+async def test_failed_tool_call_earns_no_tool_selection_credit(tmp_path: Path, cfg):
+    """get_coverage on a missing file raises: it was attempted, not successfully used."""
+    state = {"turns": 0}
+
+    def script(messages, tools):
+        state["turns"] += 1
+        if state["turns"] == 1:
+            return ProviderResponse(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name="get_coverage",
+                        arguments={"file_path": "/nonexistent.bam", "region": "chr1:1-10"},
+                    )
+                ],
+            )
+        return ProviderResponse(text="coverage reported")
+
+    case = EvalCase(
+        name="bad-call",
+        input="x",
+        expected="y",
+        tools_expected=["get_coverage"],
+        expected_claims=["coverage"],
+    )
+    result = await run_case(
+        case, MockProvider(script), InProcessRouter(config=cfg), judge=None, output_dir=tmp_path
+    )
+    assert "get_coverage" in result.tool_calls  # attempted, still shown in the report
+    assert result.verdict.passed is False
+    assert result.verdict.tool_score == 0.0
+
+
+@pytest.mark.unit
+def test_call_ok_reads_error_payloads():
+    from bamcp.eval.runner import _call_ok
+
+    assert _call_ok({"ok": True, "result_summary": {"count": 1}})
+    assert not _call_ok({"ok": False})
+    assert not _call_ok({"ok": True, "result_summary": {"error": "not found"}})

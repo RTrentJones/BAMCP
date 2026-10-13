@@ -24,7 +24,6 @@ DEFAULT_MIN_VAF = 0.02
 DEFAULT_MIN_DEPTH = 2
 DEFAULT_MIN_MAPQ = 0
 DEFAULT_MIN_BASEQ = 0
-DEFAULT_CONTIG = "chr1"
 
 # Candidate indel detection runs a pysam pileup pass (costlier than count_coverage).
 # Skip it above this region size so large visualize_region requests stay responsive;
@@ -43,6 +42,10 @@ PAYLOAD_SCHEMA_VERSION = 1
 # Cap on distinct regions held in a server's in-memory region cache (LRU-evicted).
 # Bounds memory: each entry can hold a full RegionData payload.
 REGION_CACHE_MAX_ENTRIES = 128
+# ...and by approximate in-memory bytes (see tools._approx_region_bytes): a full-mode 1 Mb entry
+# can weigh tens of MB, so the count cap alone could exceed a 2 GB container. An entry larger
+# than a quarter of this budget is served uncached.
+REGION_CACHE_MAX_BYTES = 512 * 1024 * 1024
 
 # Max concurrent pysam parses. All blocking BAM/CRAM/VCF work runs in a dedicated thread pool
 # of this size, so a burst of requests (or parses that hang past their timeout) is confined to
@@ -54,14 +57,43 @@ DEFAULT_TOKEN_EXPIRY_SECONDS = 3_600
 # When auth is enabled with no explicit BAMCP_REQUIRED_SCOPES, require this scope so tokens
 # are never scope-less. BAMCP is a read-only evidence viewer, hence a single read scope.
 DEFAULT_REQUIRED_SCOPES = ("bamcp:read",)
-DEFAULT_GNOMAD_DATASET = "gnomad_r4"
+# gnomAD dataset. "auto" selects the release matching each lookup's genome build
+# (GNOMAD_DATASET_BY_BUILD) — gnomad_r4 is GRCh38-only, so querying it with GRCh37
+# coordinates returns a different (or no) variant and reads as false rarity. An explicit
+# dataset (BAMCP_GNOMAD_DATASET) is honored only for lookups in its own build.
+DEFAULT_GNOMAD_DATASET = "auto"
+GNOMAD_DATASET_BY_BUILD = {"GRCh37": "gnomad_r2_1", "GRCh38": "gnomad_r4"}
+GNOMAD_DATASET_BUILD = {"gnomad_r2_1": "GRCh37", "gnomad_r3": "GRCh38", "gnomad_r4": "GRCh38"}
 DEFAULT_GENOME_BUILD = "GRCh38"
+# Accepted spellings of the two supported human builds (case-insensitive).
+GENOME_BUILD_ALIASES = {
+    "grch37": "GRCh37",
+    "hg19": "GRCh37",
+    "b37": "GRCh37",
+    "hs37d5": "GRCh37",
+    "grch38": "GRCh38",
+    "hg38": "GRCh38",
+    "grch38.p13": "GRCh38",
+    "grch38.p14": "GRCh38",
+}
+
+
+def normalize_genome_build(name: object) -> str | None:
+    """Return the canonical build (``GRCh37`` / ``GRCh38``) for an alias, else ``None``."""
+    if not isinstance(name, str):
+        return None
+    return GENOME_BUILD_ALIASES.get(name.strip().lower())
+
 
 # Cache behavior
 DEFAULT_CACHE_TTL_SECONDS = 86_400  # 24 hours
 CACHE_SESSION_ID_LENGTH = 8
 REMOTE_FILE_SCHEMES = ("http://", "https://")
 DEFAULT_MAX_REMOTE_INDEX_BYTES = 64 * 1024 * 1024
+# Total on-disk budget for one session's cached remote indexes. Each distinct URL (and a new
+# query string is a new URL) can add up to DEFAULT_MAX_REMOTE_INDEX_BYTES, so without a cap an
+# open server's cache could be grown without bound; oldest files are evicted past this.
+DEFAULT_MAX_INDEX_CACHE_BYTES = 512 * 1024 * 1024
 
 # Timeout for BAM/CRAM parsing operations (seconds)
 BAM_PARSE_TIMEOUT_SECONDS = 30.0
@@ -82,8 +114,11 @@ LOW_CONFIDENCE_MIN_MEAN_QUALITY = 20
 LOW_CONFIDENCE_MAX_STRAND_BIAS = 0.9
 
 # Thresholds for a confident call, used by the ACMG quality assessment (classify_variant).
+# Also the "high" tier of compute_confidence and the curation recommendation/balance cutoffs.
 HIGH_CONFIDENCE_MIN_DEPTH = 20
 HIGH_CONFIDENCE_MIN_MEAN_QUALITY = 25
+HIGH_CONFIDENCE_MIN_VAF = 0.2
+HIGH_CONFIDENCE_MAX_STRAND_BIAS = 0.7
 
 QUALITY_HISTOGRAM_BINS = [0, 10, 20, 30, 40]
 POSITION_HISTOGRAM_BINS = [0, 25, 50, 75, 100, 150]
@@ -91,6 +126,14 @@ MAPQ_HISTOGRAM_BINS = [0, 10, 20, 30, 40, 50, 60]
 
 # Artifact detection thresholds
 ARTIFACT_STRAND_BIAS_THRESHOLD = 0.8
+# Read-position bias: a supporting base is "near an end" when it lies within this many
+# ALIGNED (non-soft-clipped) bases of the nearest aligned read end. An absolute ~10bp
+# cutoff (not the display histogram's 0-50bp bins, which cover 2/3 of a 150bp read and
+# all of a 100bp read) keeps uniformly positioned support on clean 2x150 data unflagged.
+ARTIFACT_NEAR_END_DISTANCE_BP = 10
 ARTIFACT_NEAR_END_FRACTION_THRESHOLD = 0.5
+# Short reads put most positions near an end even under uniform placement, so the
+# observed near-end fraction must also exceed the uniform expectation by this margin.
+ARTIFACT_NEAR_END_EXCESS_OVER_EXPECTED = 0.25
 ARTIFACT_LOW_MAPQ_FRACTION_THRESHOLD = 0.3
 ARTIFACT_HOMOPOLYMER_LENGTH_THRESHOLD = 4

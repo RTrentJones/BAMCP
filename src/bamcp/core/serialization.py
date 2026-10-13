@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..analysis.evidence import enhance_variants_with_evidence
+from ..analysis.evidence import _vcf_evidence, enhance_variants_with_evidence
 from ..constants import PAYLOAD_SCHEMA_VERSION
 from .parsers import AlignedRead, RegionData
 
@@ -72,11 +72,37 @@ def build_enhanced_variants(data: RegionData) -> tuple[list[dict], dict]:
     (``classify_variant``), so the strand/quality/artifact/confidence signals reach both the
     viewer and the ACMG reasoning scaffold. Positions stay 0-based here (the internal frame).
 
+    When the ``max_reads`` cap truncated ``data.reads`` (``data.reads_truncated``), the
+    read-index evidence would silently zero strand/quality for sites past the cap. BAMCP
+    SNV candidates were then pileup-annotated by :func:`fetch_region` and are scored from
+    that truncation-free support instead (``evidence_source="pileup"``); BAMCP indels,
+    which have no pileup scoring, are flagged ``evidence_incomplete=True``.
+
     Returns ``(enhanced_variants, variant_evidence)``.
     """
-    return enhance_variants_with_evidence(
+    enhanced, evidence = enhance_variants_with_evidence(
         data.variants, data.reads, data.reference_sequence, data.start
     )
+    if not data.reads_truncated:
+        return enhanced, evidence
+
+    out: list[dict] = []
+    # enhance_variants_with_evidence emits exactly one record per input, in order.
+    for original, enh in zip(data.variants, enhanced, strict=True):
+        if original.get("source") != "bamcp":
+            out.append(enh)
+            continue
+        key = f"{original['position']}:{original['ref']}>{original['alt']}"
+        if "read_depth" in original:
+            rescored, ev = _vcf_evidence(original, data.reference_sequence, data.start)
+            rescored["evidence_source"] = "pileup"
+            evidence[key] = ev
+            out.append(rescored)
+        else:
+            out.append({**enh, "evidence_incomplete": True})
+            if key in evidence:
+                evidence[key]["incomplete"] = True
+    return out, evidence
 
 
 def serialize_region_data(data: RegionData, compact: bool | None = None) -> dict:

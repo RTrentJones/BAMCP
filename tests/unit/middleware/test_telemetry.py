@@ -60,6 +60,27 @@ class TestSanitization:
         assert out["file_path"].endswith(":x.bam")
 
     @pytest.mark.unit
+    def test_vcf_path_is_hashed(self):
+        url = "https://bucket.example.com/calls.vcf.gz?X-Amz-Signature=deadbeef"
+        out = telemetry.sanitize_args({"vcf_path": url})
+        assert out["vcf_path"] != url
+        assert "deadbeef" not in out["vcf_path"]
+        assert out["vcf_path"].endswith(":calls.vcf.gz")
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("key", ["reference", "reference_url", "index_path", "url", "path"])
+    def test_other_path_like_keys_are_hashed(self, key):
+        out = telemetry.sanitize_args({key: "/secret/dir/ref.fa"})
+        assert "/secret/dir" not in out[key]
+        assert out[key].endswith(":ref.fa")
+
+    @pytest.mark.unit
+    def test_signed_url_query_never_in_suffix(self):
+        out = telemetry.sanitize_args({"file_path": "https://h/x.bam?sig=s3cr3t#frag"})
+        assert out["file_path"].endswith(":x.bam")
+        assert "s3cr3t" not in out["file_path"]
+
+    @pytest.mark.unit
     def test_non_dict_returns_empty(self):
         assert telemetry.sanitize_args("not a dict") == {}  # type: ignore[arg-type]
         assert telemetry.sanitize_args(None) == {}  # type: ignore[arg-type]

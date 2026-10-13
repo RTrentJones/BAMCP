@@ -6,52 +6,62 @@ import asyncio
 import functools
 import json
 import logging
+import os
 import tempfile
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.parse import urljoin
 
 import httpx
 import pysam
 
 from ..analysis.evidence import enhance_vcf_variants
 from ..clients.clinvar import ClinVarClient
-from ..clients.genes import GeneClient
+from ..clients.genes import GeneClient, GeneLookupError
 from ..clients.gnomad import GnomadClient, GnomadQueryError
+from ..clients.ncbi import NCBIUnavailableError, TokenBucketRateLimiter, ncbi_rate_limiter
 from ..config import BAMCPConfig
 from ..constants import (
     BAM_PARSE_TIMEOUT_SECONDS,
     DEFAULT_CACHE_TTL_SECONDS,
-    DEFAULT_CONTIG,
     INDEL_DETECTION_MAX_REGION,
     PARSE_MAX_CONCURRENCY,
+    REGION_CACHE_MAX_BYTES,
     REGION_CACHE_MAX_ENTRIES,
     REGION_TILE_SIZE,
     SCAN_VARIANTS_CHUNK_SIZE,
     SCAN_VARIANTS_MAX_REGION,
+    SCAN_VARIANTS_MAX_RESULTS,
     SCAN_VARIANTS_TIMEOUT_SECONDS,
     VIEWER_RESOURCE_URI,
 )
 from ..middleware.telemetry import telemetry_wrapper
 from .cache import BAMIndexCache
+from .errors import ToolInputError
 from .parsers import (
+    EXCLUDED_READ_FLAGS,
     MAX_REGION_SIZE,
+    OVERLAPPING_MATES_POLICY,
     RegionData,
     annotate_vcf_snv_support,
     fetch_candidate_variants_only,
     fetch_coverage_only,
     fetch_reference_sequence,
     fetch_region,
+    format_region,
     load_vcf_variants,
     parse_region,
-    scan_variants_chunked,
+    scan_contig,
 )
 from .serialization import serialize_region_data
 from .validation import (
+    is_cram,
     validate_path,
     validate_reference_path,
     validate_region,
@@ -78,7 +88,23 @@ _PARSE_EXECUTOR = ThreadPoolExecutor(
 # request count) instead. A permit is held until the underlying thread truly finishes (released
 # via a done-callback, and the future is shielded from await-cancellation), so a hung parse keeps
 # occupying its slot rather than freeing it for a submission that would then queue behind it.
-_parse_gate = asyncio.Semaphore(PARSE_MAX_CONCURRENCY)
+#
+# asyncio primitives bind to the first loop that contends on them, so a single module-level
+# Semaphore breaks ("bound to a different event loop") once a second loop uses it — repeated
+# asyncio.run() in embedded/sync callers, or test suites. Keep one gate per running loop. In a
+# server there is exactly one loop, so the bound is unchanged.
+_parse_gates: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _get_parse_gate() -> asyncio.Semaphore:
+    """The submission gate for the running event loop (created on first use)."""
+    loop = asyncio.get_running_loop()
+    gate = _parse_gates.get(loop)
+    if gate is None:
+        gate = _parse_gates[loop] = asyncio.Semaphore(PARSE_MAX_CONCURRENCY)
+    return gate
 
 
 async def _run_in_parse_pool(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
@@ -88,12 +114,16 @@ async def _run_in_parse_pool(fn: Callable[..., _T], /, *args: Any, **kwargs: Any
     run_in_executor takes no kwargs, so bind them with partial to keep the call sites unchanged.
     """
     call = functools.partial(fn, **kwargs) if kwargs else fn
-    await _parse_gate.acquire()
+    gate = _get_parse_gate()
+    await gate.acquire()
     fut = asyncio.get_running_loop().run_in_executor(_PARSE_EXECUTOR, call, *args)
     # Release only when the thread actually completes — not when an outer wait_for cancels the
     # await — so hung parses keep holding their slot (real backpressure, bounded executor queue).
-    fut.add_done_callback(lambda _f: _parse_gate.release())
+    fut.add_done_callback(lambda _f: gate.release())
     return await asyncio.shield(fut)
+
+
+_RegionCacheEntry = tuple[float, RegionData, int]
 
 
 @dataclass
@@ -111,25 +141,46 @@ class BAMCPServices:
 
     config: BAMCPConfig
     cache: BAMIndexCache
-    # LRU-ordered (newest at the end); bounded to REGION_CACHE_MAX_ENTRIES in _set_cached_region.
-    region_cache: OrderedDict[tuple, tuple[float, RegionData]] = field(default_factory=OrderedDict)
+    # LRU-ordered (newest at the end); bounded by entry count AND approximate bytes in
+    # _set_cached_region. Values are (created_monotonic, data, approx_bytes).
+    region_cache: OrderedDict[tuple, _RegionCacheEntry] = field(default_factory=OrderedDict)
     index_download_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     _clinvar: ClinVarClient | None = field(default=None, repr=False)
     _gnomad: GnomadClient | None = field(default=None, repr=False)
     _genes: GeneClient | None = field(default=None, repr=False)
+    # ONE token bucket for every NCBI E-utilities caller (ClinVar + Gene): NCBI's
+    # 3 req/s (10 with a key) limit is per caller, not per database.
+    _ncbi_limiter: TokenBucketRateLimiter | None = field(default=None, repr=False)
 
     @classmethod
     def from_config(cls, config: BAMCPConfig) -> BAMCPServices:
-        return cls(config=config, cache=BAMIndexCache(config.cache_dir, config.cache_ttl))
+        cache = BAMIndexCache(
+            config.cache_dir, config.cache_ttl, max_total_bytes=config.max_index_cache_bytes
+        )
+        # Sweep index dirs left behind by expired sessions (e.g. a crashed process whose
+        # atexit cleanup never ran) so the shared cache dir can't accumulate forever.
+        cache.cleanup_expired_sessions()
+        return cls(config=config, cache=cache)
+
+    def ncbi_rate_limiter(self) -> TokenBucketRateLimiter:
+        if self._ncbi_limiter is None:
+            self._ncbi_limiter = ncbi_rate_limiter(self.config.ncbi_api_key)
+        return self._ncbi_limiter
 
     def clinvar(self) -> ClinVarClient:
         if self._clinvar is None:
-            self._clinvar = ClinVarClient(api_key=self.config.ncbi_api_key)
+            self._clinvar = ClinVarClient(
+                api_key=self.config.ncbi_api_key,
+                genome_build=self.config.genome_build,
+                rate_limiter=self.ncbi_rate_limiter(),
+            )
         return self._clinvar
 
     def gnomad(self) -> GnomadClient:
         if self._gnomad is None:
-            self._gnomad = GnomadClient(dataset=self.config.gnomad_dataset)
+            self._gnomad = GnomadClient(
+                dataset=self.config.gnomad_dataset, genome_build=self.config.genome_build
+            )
         return self._gnomad
 
     def genes(self) -> GeneClient:
@@ -137,6 +188,7 @@ class BAMCPServices:
             self._genes = GeneClient(
                 api_key=self.config.ncbi_api_key,
                 genome_build=self.config.genome_build,
+                rate_limiter=self.ncbi_rate_limiter(),
             )
         return self._genes
 
@@ -154,8 +206,19 @@ class BAMCPServices:
         self._clinvar = None
         self._gnomad = None
         self._genes = None
+        self._ncbi_limiter = None
         self.region_cache.clear()
         self.index_download_locks.clear()
+
+    def clear_caches(self) -> int:
+        """Drop downloaded index files and the region cache; return index files removed.
+
+        Deliberately leaves the shared HTTP clients open: closing them here would make any
+        in-flight ClinVar/gnomAD/gene lookup fail with ``RuntimeError`` (closed client).
+        """
+        removed = self.cache.cleanup_session()
+        self.region_cache.clear()
+        return removed
 
 
 # Services keyed by config identity so distinct server instances stay isolated. LRU-ordered and
@@ -278,6 +341,19 @@ def _lookup_result(payload: dict[str, Any], *, status: str, disclaimer: str) -> 
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 
 
+def _lookup_build(args: dict[str, Any], config: BAMCPConfig) -> tuple[str | None, str]:
+    """Resolve a lookup's genome build: explicit ``build`` arg, else the server default.
+
+    Returns ``(canonical_build, source)``; ``canonical_build`` is None for an unrecognized
+    explicit build (the caller reports invalid input rather than querying the wrong assembly).
+    """
+    from ..constants import normalize_genome_build
+
+    if args.get("build"):
+        return normalize_genome_build(args["build"]), "explicit"
+    return normalize_genome_build(config.genome_build), "server-default"
+
+
 _CANDIDATE_VARIANT_DISCLAIMER = (
     "Note: BAMCP reports research-grade candidate variants from read-level evidence; "
     "confirm with validated variant-calling and clinical workflows before use."
@@ -300,23 +376,71 @@ _FILTER_ABSENCE_NOTE = (
 )
 
 
+def _detection_status(
+    region: str, reference: str | None, vcf_primary: bool = False
+) -> dict[str, Any]:
+    """Which candidate detectors actually ran for this request — so an empty result
+    with detection OFF is never mistaken for a confident "no variants here".
+
+    SNV/indel candidates need a reference to define the reference allele; with
+    ``variant_source="vcf"`` the VCF is authoritative and BAMCP adds none; indels need
+    a pileup pass that is skipped above ``INDEL_DETECTION_MAX_REGION``.
+    """
+    _, start, end = parse_region(region)
+    if vcf_primary:
+        reason: str | None = "variant_source=vcf (the VCF is authoritative)"
+    elif not reference:
+        reason = "no reference"
+    else:
+        reason = None
+    status: dict[str, Any] = {
+        "snv_detection": "enabled" if reason is None else f"disabled: {reason}"
+    }
+    if reason is not None:
+        status["indel_detection"] = False
+        status["indel_detection_note"] = f"disabled: {reason}"
+    elif end - start > INDEL_DETECTION_MAX_REGION:
+        status["indel_detection"] = False
+        status["indel_detection_note"] = (
+            f"skipped: region {end - start:,}bp exceeds {INDEL_DETECTION_MAX_REGION:,}bp; "
+            "request a smaller region to detect indels"
+        )
+    else:
+        status["indel_detection"] = True
+    return status
+
+
 def _applied_filters(
-    config: BAMCPConfig, args: dict[str, Any], *, include_max_reads: bool
+    config: BAMCPConfig,
+    args: dict[str, Any],
+    *,
+    include_max_reads: bool,
+    detection: dict[str, Any] | None = None,
+    reads_truncated: bool | None = None,
 ) -> dict[str, Any]:
     """The read/variant thresholds actually applied to this response.
 
     ``min_vaf``/``min_depth`` honor per-call overrides; ``min_mapq``/``min_baseq`` are
     operator config. ``max_reads`` gates how many reads are *displayed* (viewer tools),
     so it's included only where reads are returned — not for readless variant calls.
+    The fixed read exclusions and overlapping-mates policy are always echoed;
+    ``detection`` (see :func:`_detection_status`) and ``reads_truncated`` are merged in
+    when the caller knows them.
     """
     filters: dict[str, Any] = {
         "min_vaf": args.get("min_vaf", config.min_vaf),
         "min_depth": args.get("min_depth", config.min_depth),
         "min_mapq": config.min_mapq,
         "min_baseq": config.min_baseq,
+        "excluded_reads": list(EXCLUDED_READ_FLAGS),
+        "overlapping_mates": OVERLAPPING_MATES_POLICY,
     }
     if include_max_reads:
         filters["max_reads"] = config.max_reads
+    if reads_truncated is not None:
+        filters["reads_truncated"] = reads_truncated
+    if detection:
+        filters.update(detection)
     return filters
 
 
@@ -330,7 +454,33 @@ def _format_filters_line(filters: dict[str, Any]) -> str:
     ]
     if "max_reads" in filters:
         parts.append(f"≤{filters['max_reads']} reads shown")
+    if filters.get("reads_truncated"):
+        parts.append(
+            "read list TRUNCATED at max_reads (SNV evidence from pileup; indel evidence incomplete)"
+        )
+    if "excluded_reads" in filters:
+        parts.append(f"excluded reads: {'/'.join(filters['excluded_reads'])}")
+    snv = filters.get("snv_detection")
+    if snv and snv != "enabled":
+        parts.append(f"SNV detection {snv}")
+    if filters.get("indel_detection") is False:
+        parts.append(f"indel detection {filters.get('indel_detection_note', 'off')}")
     return ", ".join(parts)
+
+
+def _local_fingerprint(path: str | None) -> tuple[int, int] | None:
+    """``(mtime_ns, size)`` of a local file, so a replaced file never serves stale cache hits.
+
+    Remote URLs (and unreadable paths) return None — remote objects carry no cheap identity
+    here, and an unreadable path fails in the parser anyway.
+    """
+    if not path or "://" in path:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
 
 
 def _cache_key(
@@ -347,9 +497,12 @@ def _cache_key(
     return (
         mode,
         file_path,
+        _local_fingerprint(file_path),
         region,
         reference,
+        _local_fingerprint(reference),
         vcf_path,
+        _local_fingerprint(vcf_path),
         vcf_primary,
         config.max_reads,
         config.min_mapq,
@@ -359,15 +512,33 @@ def _cache_key(
     )
 
 
+def _approx_region_bytes(data: Any) -> int:
+    """Rough in-memory size of a cached RegionData (CPython object overheads included).
+
+    Entry *count* alone does not bound memory: a full-mode 1 Mb region with max_reads reads can
+    weigh tens of MB, so 128 of them would blow far past a 2 GB container. Estimates per read
+    ~600 B of fixed overhead plus ~9 B/base (sequence char + quality-list slot), ~16 B per
+    coverage position, ~1 KB per variant dict, plus the reference string.
+    """
+    total = 1024
+    for read in getattr(data, "reads", None) or ():
+        total += 600 + 9 * len(getattr(read, "sequence", "") or "")
+        total += 200 * len(getattr(read, "mismatches", ()) or ())
+    total += 16 * len(getattr(data, "coverage", None) or ())
+    total += 1024 * len(getattr(data, "variants", None) or ())
+    total += len(getattr(data, "reference_sequence", None) or "")
+    return total
+
+
 def _get_cached_region(
-    region_cache: OrderedDict[tuple, tuple[float, RegionData]], key: tuple, ttl: int
+    region_cache: OrderedDict[tuple, _RegionCacheEntry], key: tuple, ttl: int
 ) -> RegionData | None:
     if ttl <= 0:
         return None
     cached = region_cache.get(key)
     if cached is None:
         return None
-    created, data = cached
+    created, data, _ = cached
     if (time.monotonic() - created) > ttl:
         region_cache.pop(key, None)
         return None
@@ -376,18 +547,35 @@ def _get_cached_region(
 
 
 def _set_cached_region(
-    region_cache: OrderedDict[tuple, tuple[float, RegionData]],
+    region_cache: OrderedDict[tuple, _RegionCacheEntry],
     key: tuple,
     data: RegionData,
     ttl: int,
 ) -> RegionData:
-    if ttl > 0:
-        region_cache[key] = (time.monotonic(), data)
-        region_cache.move_to_end(key)
-        # Bound memory: evict least-recently-used entries beyond the cap.
-        while len(region_cache) > REGION_CACHE_MAX_ENTRIES:
-            region_cache.popitem(last=False)
+    if ttl <= 0:
+        return data
+    size = _approx_region_bytes(data)
+    # One entry may take at most a quarter of the budget; bigger ones are served uncached
+    # rather than evicting most of the cache for a single payload.
+    if size > REGION_CACHE_MAX_BYTES // 4:
+        region_cache.pop(key, None)
+        return data
+    region_cache[key] = (time.monotonic(), data, size)
+    region_cache.move_to_end(key)
+    # Bound memory: evict least-recently-used entries beyond the count cap or byte budget.
+    total = sum(entry[2] for entry in region_cache.values())
+    while region_cache and (
+        len(region_cache) > REGION_CACHE_MAX_ENTRIES or total > REGION_CACHE_MAX_BYTES
+    ):
+        _, evicted = region_cache.popitem(last=False)
+        total -= evicted[2]
     return data
+
+
+# Redirects for index downloads are followed by hand so every hop is re-validated
+# (httpx's follow_redirects would only validate the first URL).
+_INDEX_MAX_REDIRECTS = 5
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
 async def _download_index_streaming(
@@ -396,22 +584,44 @@ async def _download_index_streaming(
     index_path: str,
     config: BAMCPConfig,
 ) -> str | None:
-    """Download an index with SSRF revalidation, streaming, and a size cap."""
-    validate_remote_url(index_url, config)
+    """Download an index with SSRF revalidation, streaming, and a size cap.
+
+    Redirects are followed manually (at most ``_INDEX_MAX_REDIRECTS`` hops) and
+    every ``Location`` is re-run through :func:`validate_remote_url`, so an allowed
+    host cannot bounce the download to an internal address. The DNS-resolving
+    validation runs in a worker thread to keep the event loop responsive. A
+    partially written temp file is always removed on failure.
+    """
+    url = index_url
+    for _hop in range(_INDEX_MAX_REDIRECTS + 1):
+        await asyncio.to_thread(validate_remote_url, url, config)
+        async with client.stream("GET", url) as resp:
+            if resp.status_code in _REDIRECT_STATUSES:
+                location = resp.headers.get("location")
+                if not location:
+                    logger.warning("Index redirect without Location: %s", url)
+                    return None
+                url = urljoin(url, location)
+                continue
+            if resp.status_code == 404:
+                return None
+            if resp.status_code != 200:
+                logger.warning("Index download failed (%d): %s", resp.status_code, url)
+                return None
+            return await _stream_index_to_file(resp, index_path, config)
+    raise ValueError(f"Index download exceeded {_INDEX_MAX_REDIRECTS} redirects")
+
+
+async def _stream_index_to_file(resp: httpx.Response, index_path: str, config: BAMCPConfig) -> str:
+    """Stream ``resp`` into ``index_path`` atomically, enforcing the size cap."""
+    content_length = resp.headers.get("content-length")
+    if content_length and int(content_length) > config.max_remote_index_bytes:
+        raise ValueError("Remote index exceeds configured maximum size")
+
+    Path(index_path).parent.mkdir(parents=True, exist_ok=True)
     total = 0
     tmp_path = ""
-    async with client.stream("GET", index_url) as resp:
-        if resp.status_code == 404:
-            return None
-        if resp.status_code != 200:
-            logger.warning("Index download failed (%d): %s", resp.status_code, index_url)
-            return None
-
-        content_length = resp.headers.get("content-length")
-        if content_length and int(content_length) > config.max_remote_index_bytes:
-            raise ValueError("Remote index exceeds configured maximum size")
-
-        Path(index_path).parent.mkdir(parents=True, exist_ok=True)
+    try:
         with tempfile.NamedTemporaryFile(
             dir=str(Path(index_path).parent),
             prefix=".index-",
@@ -424,8 +634,14 @@ async def _download_index_streaming(
                 if total > config.max_remote_index_bytes:
                     raise ValueError("Remote index exceeds configured maximum size")
                 tmp.write(chunk)
+        Path(tmp_path).replace(index_path)
+    except BaseException:
+        # Oversized body, network error mid-stream, cancellation, failed rename:
+        # never leave a ``.index-XXXX.tmp`` behind in the cache directory.
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
+        raise
 
-    Path(tmp_path).replace(index_path)
     logger.info("Cached index (%d bytes): %s", total, index_path)
     return index_path
 
@@ -460,32 +676,40 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
         return index_path
 
     # Determine index URL - try common extensions
-    is_cram = file_path.endswith(".cram")
-    if is_cram:
+    if is_cram(file_path):
         index_urls = [file_path + ".crai"]
     else:
         # BAM files: try .bam.bai first, then .bai
         index_urls = [file_path + ".bai", file_path.rsplit(".", 1)[0] + ".bai"]
 
-    lock = services.index_download_locks.setdefault(index_path, asyncio.Lock())
-    async with lock:
-        if cache.is_valid(index_path):
-            logger.debug("Using cached index after waiting for download lock: %s", index_path)
-            return index_path
+    locks = services.index_download_locks
+    lock = locks.setdefault(index_path, asyncio.Lock())
+    try:
+        async with lock:
+            if cache.is_valid(index_path):
+                logger.debug("Using cached index after waiting for download lock: %s", index_path)
+                return index_path
 
-        logger.info("Downloading index for remote BAM: %s", file_path)
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-            for index_url in index_urls:
-                try:
-                    downloaded = await _download_index_streaming(
-                        client, index_url, index_path, config
-                    )
-                    if downloaded:
-                        return downloaded
-                    logger.debug("Index not found at %s, trying next", index_url)
-                except (httpx.RequestError, OSError, ValueError) as e:
-                    logger.warning("Index download error for %s: %s", index_url, e)
-                    continue
+            logger.info("Downloading index for remote BAM: %s", file_path)
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+                for index_url in index_urls:
+                    try:
+                        downloaded = await _download_index_streaming(
+                            client, index_url, index_path, config
+                        )
+                        if downloaded:
+                            cache.enforce_budget(keep=downloaded)
+                            return downloaded
+                        logger.debug("Index not found at %s, trying next", index_url)
+                    except (httpx.RequestError, OSError, ValueError) as e:
+                        logger.warning("Index download error for %s: %s", index_url, e)
+                        continue
+    finally:
+        # Drop the per-URL lock once nobody holds it so the dict can't grow one entry per
+        # URL forever. A waiter already woken keeps its reference; at worst a racing new
+        # caller creates a fresh lock and repeats an (atomic, idempotent) download.
+        if not lock.locked() and locks.get(index_path) is lock:
+            del locks[index_path]
 
     # All attempts failed - let pysam try its own resolution
     logger.warning("Could not download index for %s, falling back to pysam", file_path)
@@ -506,8 +730,10 @@ def _slice_readless_region_data(data: RegionData, start: int, end: int) -> Regio
     position-anchored so they filter by position. Reads are always empty in the
     readless modes this serves.
     """
+    # The tile's end is clamped to the contig length by the parser; never slice past it.
+    end = min(end, data.end)
     offset = start - data.start
-    length = end - start
+    length = max(end - start, 0)
     coverage = data.coverage[offset : offset + length] if data.coverage else []
     reference = (
         data.reference_sequence[offset : offset + length]
@@ -599,7 +825,7 @@ async def _fetch_readless_tiled(
     mode: str,
     min_vaf: float | None,
     min_depth: int | None,
-    region_cache: OrderedDict[tuple, tuple[float, RegionData]],
+    region_cache: OrderedDict[tuple, _RegionCacheEntry],
     ttl: int,
 ) -> RegionData:
     """Serve a readless (coverage/variants) query from a per-tile cache.
@@ -620,7 +846,8 @@ async def _fetch_readless_tiled(
         mode == "variants" and tile_size > INDEL_DETECTION_MAX_REGION >= (r_end - r_start)
     ):
         t_start, t_end = r_start, r_end
-    tile_region = f"{contig}:{t_start}-{t_end}"
+    # Internal 0-based numbers → the 1-based inclusive region string parse_region reads.
+    tile_region = format_region(contig, t_start, t_end)
 
     tile_key = _cache_key(file_path, tile_region, reference, config, mode, min_vaf, min_depth, None)
     tile_data = _get_cached_region(region_cache, tile_key, ttl)
@@ -745,7 +972,7 @@ async def _fetch_region_data(
     ttl = min(config.cache_ttl, DEFAULT_CACHE_TTL_SECONDS)
 
     if vcf_path is not None:
-        validate_variant_file_path(vcf_path, config)
+        await asyncio.to_thread(validate_variant_file_path, vcf_path, config)
 
     # Readless coverage/variant queries (no reads, no VCF overlay) are tile-cached
     # so overlapping viewports reuse work. variants mode needs a reference for the
@@ -899,6 +1126,22 @@ def _format_variant_line(variant: dict[str, Any]) -> str:
     return line
 
 
+async def _resolve_reference(
+    args: dict[str, Any], config: BAMCPConfig
+) -> tuple[str | None, str | None]:
+    """Return ``(explicit_reference, effective_reference)`` for a tool call.
+
+    Validates only a caller-supplied reference — that is the untrusted SSRF vector. A
+    ``config.reference`` default is operator-set (trusted) and may legitimately be absent for BAM
+    inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
+    The explicit value is returned separately because only it may be echoed back to the caller.
+    """
+    explicit_reference = args.get("reference")
+    if explicit_reference:
+        await asyncio.to_thread(validate_reference_path, explicit_reference, config)
+    return explicit_reference, explicit_reference or config.reference
+
+
 def _resolve_variant_source(variant_source: str, vcf_path: str | None) -> tuple[str | None, bool]:
     """Validate ``variant_source`` and return the effective ``(vcf_path, vcf_primary)``.
 
@@ -930,16 +1173,10 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
       - ``"bamcp"``: BAMCP's read-level candidates only; any ``vcf_path`` is ignored.
     """
     file_path = args["file_path"]
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     region = args["region"]
     validate_region(region)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
+    _, reference = await _resolve_reference(args, config)
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
     min_vaf = args.get("min_vaf", config.min_vaf)
@@ -975,7 +1212,12 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         "variant_source": variant_source,
         "coordinate_system": _LLM_COORDINATE_SYSTEM,
         "variant_type": "candidate",
-        "applied_filters": _applied_filters(config, args, include_max_reads=False),
+        "applied_filters": _applied_filters(
+            config,
+            args,
+            include_max_reads=False,
+            detection=_detection_status(region, reference, vcf_primary),
+        ),
         "filter_note": _FILTER_ABSENCE_NOTE,
         "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
     }
@@ -987,29 +1229,24 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
 async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Return coverage statistics."""
     file_path = args["file_path"]
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     region = args["region"]
     validate_region(region)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
+    _, reference = await _resolve_reference(args, config)
 
     data = await _fetch_region_with_timeout(file_path, region, reference, config, mode="coverage")
 
     coverage = data.coverage
     stats = {
-        "region": f"{data.contig}:{data.start}-{data.end}",
+        "region": format_region(data.contig, data.start, data.end),
         "mean": round(sum(coverage) / len(coverage), 2) if coverage else 0,
         "min": min(coverage) if coverage else 0,
         "max": max(coverage) if coverage else 0,
         "median": sorted(coverage)[len(coverage) // 2] if coverage else 0,
         "bases_covered": sum(1 for c in coverage if c > 0),
         "total_bases": len(coverage),
-        "coordinate_system": _INTERNAL_COORDINATE_SYSTEM,
+        # The echoed region string is 1-based inclusive, like the region it answers.
+        "coordinate_system": _LLM_COORDINATE_SYSTEM,
     }
 
     return {"content": [{"type": "text", "text": json.dumps(stats)}]}
@@ -1017,7 +1254,7 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
 
 def _read_contigs_sync(file_path: str, reference: str | None, index_path: str | None) -> list[dict]:
     """Read (name, length) contigs from a BAM/CRAM header. Runs in the parse pool."""
-    mode = "rc" if file_path.endswith(".cram") else "rb"
+    mode = "rc" if is_cram(file_path) else "rb"
     with pysam.AlignmentFile(
         file_path,
         mode,  # type: ignore[arg-type]
@@ -1034,7 +1271,7 @@ async def _detect_bam_build(file_path: str, config: BAMCPConfig) -> dict:
     """Detect a BAM/CRAM's genome build from its header. Returns detect_genome_build()'s dict."""
     from .reference import detect_genome_build
 
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     index_path = await _ensure_cached_index(file_path, config)
     contigs = await asyncio.wait_for(
         _run_in_parse_pool(_read_contigs_sync, file_path, config.reference, index_path),
@@ -1054,14 +1291,8 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
     )
 
     file_path = args["file_path"]
-    validate_path(file_path, config)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
+    await asyncio.to_thread(validate_path, file_path, config)
+    _, reference = await _resolve_reference(args, config)
 
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
@@ -1145,11 +1376,30 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     if file_path:
         try:
             info = await _detect_bam_build(file_path, config)
-            if info.get("build") and info["build"] != "unknown":
-                detected_build = info["build"]
-        except Exception as e:  # noqa: BLE001 — detection is best-effort reconciliation context
+        except (ValueError, FileNotFoundError) as e:
+            # A bad / disallowed / missing file_path is a caller error — never silently fall
+            # back to the server default as if no BAM had been named.
+            return _err(f"Invalid file_path: {e}", status=_LOOKUP_INVALID)
+        except Exception as e:  # noqa: BLE001 — unreadable header: reconciliation impossible
+            if requested is None:
+                return _err(
+                    f"could not read the BAM header to detect its build ({type(e).__name__}); "
+                    "pass 'build' explicitly (confirm it with list_contigs)",
+                    status=_LOOKUP_UNAVAILABLE,
+                )
+            info = {}
             warnings.append(
                 f"could not detect the BAM's build ({type(e).__name__}); coordinates unreconciled"
+            )
+        if info.get("build") and info["build"] != "unknown":
+            detected_build = info["build"]
+        elif info:
+            # Detection ran but was inconclusive: whatever build we fall back to is
+            # unreconciled with this BAM, and the caller must hear it.
+            warnings.append(
+                "could not determine the BAM's build from its header; coordinates are "
+                "UNRECONCILED with the BAM — confirm its build with list_contigs"
+                + ("" if requested else " or pass 'build'")
             )
 
     # Resolution: explicit override > detected-from-BAM > server default.
@@ -1170,62 +1420,97 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
                 "(server default) — confirm your BAM's build with list_contigs"
             )
 
-    result = await get_gene_client(config).search(symbol, build=effective)
+    try:
+        result = await get_gene_client(config).search(symbol, build=effective)
+    except GeneLookupError as e:
+        # NCBI unreachable / in-band error: the gene's existence is UNKNOWN, not disproven.
+        logger.warning("Gene lookup unavailable for %s: %s", symbol, e)
+        return _err(
+            "Gene lookup unavailable (NCBI error); retry later",
+            status=_LOOKUP_UNAVAILABLE,
+            reason=str(e),
+            genome_build=effective,
+        )
     if result is None:
-        return _err(f"Gene {symbol!r} not found", genome_build=effective)
+        return _err(f"Gene {symbol!r} not found", status=_LOOKUP_NOT_FOUND, genome_build=effective)
 
     # NCBI may not carry the requested assembly → result.build is what we actually got.
-    if result.build != "unknown" and result.build != effective:
+    if result.build == "unknown":
+        warnings.append(
+            "NCBI did not identify the assembly of these coordinates — they are UNVERIFIED "
+            f"against {effective}; confirm before visualizing"
+        )
+    elif result.build != effective:
         warnings.append(f"NCBI returned {result.build} coordinates ({effective} unavailable)")
-    if detected_build and result.build != "unknown" and result.build != detected_build:
+    if detected_build and result.build != detected_build:
         warnings.append(
             f"MISMATCH: these {result.build} coordinates do NOT match the BAM's "
             f"{detected_build} build — visualizing them will show the wrong locus"
         )
+    note = getattr(result, "note", None)
+    if note:
+        warnings.append(note)
 
     payload: dict[str, Any] = {
         "symbol": result.symbol,
         "name": result.name,
+        # GeneClient already converts NCBI's 0-based chrstart/chrstop to 1-based
+        # inclusive, which is exactly the region string every region-taking tool reads.
         "region": f"{result.chrom}:{result.start}-{result.end}",
         "strand": result.strand,
         "genome_build": result.build,
         "build_source": source,
         "bam_build": detected_build,
+        "coordinate_system": _LLM_COORDINATE_SYSTEM,
     }
     if warnings:
         payload["warning"] = "; ".join(warnings)
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 
 
-@telemetry_wrapper("jump_to")
-async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
-    """Handle jump_to tool call.
+async def _first_contig(file_path: str, reference: str | None, config: BAMCPConfig) -> str:
+    """The BAM/CRAM header's first contig — the default when a caller names none.
 
-    Centers the viewer on a specific genomic position with a configurable window.
+    A hard-coded ``"chr1"`` default breaks on ``1``-style (Ensembl/GRCh37) BAMs, so resolve
+    the default from the file itself.
     """
-    file_path = args["file_path"]
-    validate_path(file_path, config)
-    position = args["position"]
-    contig = args.get("contig", DEFAULT_CONTIG)
-    window = args.get("window", config.default_window)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
+    index_path = await _ensure_cached_index(file_path, config)
+    contigs = await asyncio.wait_for(
+        _run_in_parse_pool(_read_contigs_sync, file_path, reference, index_path),
+        timeout=BAM_PARSE_TIMEOUT_SECONDS,
+    )
+    if not contigs:
+        raise ToolInputError("The alignment file's header lists no contigs.")
+    return str(contigs[0]["name"])
+
+
+async def _viewer_response(
+    args: dict[str, Any],
+    config: BAMCPConfig,
+    file_path: str,
+    region: str,
+    explicit_reference: str | None,
+    reference: str | None,
+    summary_prefix: Callable[[RegionData], str],
+) -> dict:
+    """Fetch a region and build the MCP Apps viewer response (shared by visualize/jump_to).
+
+    The summary text (for LLM context) echoes the applied filters — the LLM reasons over this
+    text, not _meta; the full payload goes only in ``_meta.ui/init``.
+    """
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
-
-    start = max(0, position - window // 2)
-    end = position + window // 2
-    region = f"{contig}:{start}-{end}"
 
     data = await _fetch_region_with_timeout(
         file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
     )
-    filters = _applied_filters(config, args, include_max_reads=True)
+    filters = _applied_filters(
+        config,
+        args,
+        include_max_reads=True,
+        detection=_detection_status(region, reference, vcf_primary),
+        reads_truncated=data.reads_truncated,
+    )
     payload = serialize_region_data(data)
     payload["coordinate_system"] = _INTERNAL_COORDINATE_SYSTEM
     payload["variant_type"] = "candidate"
@@ -1244,12 +1529,9 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     if effective_vcf is not None:
         payload["vcf_path"] = effective_vcf
 
-    # Return summary text in content (for LLM context), full data only in _meta.
-    reads_count = len(data.reads)
-    variants_count = len(data.variants)
     summary = (
-        f"Jumped to {data.contig}:{position}: {reads_count} reads, "
-        f"{variants_count} candidate variants (filters: {_format_filters_line(filters)})"
+        f"{summary_prefix(data)}: {len(data.reads)} reads, "
+        f"{len(data.variants)} candidate variants (filters: {_format_filters_line(filters)})"
     )
     return {
         "content": [{"type": "text", "text": summary}],
@@ -1258,6 +1540,39 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
             "ui/init": payload,
         },
     }
+
+
+@telemetry_wrapper("jump_to")
+async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
+    """Handle jump_to tool call.
+
+    Centers the viewer on a specific genomic position with a configurable window. With no
+    ``contig``, the BAM's first contig is used. The constructed region goes through the same
+    ``validate_region`` as visualize_region, so both tools accept exactly the same contigs.
+    """
+    file_path = args["file_path"]
+    await asyncio.to_thread(validate_path, file_path, config)
+    position = args["position"]
+    window = args.get("window", config.default_window)
+    explicit_reference, reference = await _resolve_reference(args, config)
+    contig = args.get("contig") or await _first_contig(file_path, reference, config)
+
+    # ``position`` is 1-based; build a 1-based inclusive window of ``window`` bases
+    # centred on it (start clamped at base 1).
+    start = max(1, position - window // 2)
+    end = start + max(window, 1) - 1
+    region = f"{contig}:{start}-{end}"
+    validate_region(region)
+
+    return await _viewer_response(
+        args,
+        config,
+        file_path,
+        region,
+        explicit_reference,
+        reference,
+        lambda data: f"Jumped to {data.contig}:{position}",
+    )
 
 
 @telemetry_wrapper("visualize_region")
@@ -1267,57 +1582,20 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     Primary MCP Apps tool — returns serialized region data with UI metadata.
     """
     file_path = args["file_path"]
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     region = args["region"]
     validate_region(region)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
-    variant_source = args.get("variant_source", "auto")
-    effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
+    explicit_reference, reference = await _resolve_reference(args, config)
 
-    data = await _fetch_region_with_timeout(
-        file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
+    return await _viewer_response(
+        args,
+        config,
+        file_path,
+        region,
+        explicit_reference,
+        reference,
+        lambda data: f"Region {format_region(data.contig, data.start, data.end)}",
     )
-    filters = _applied_filters(config, args, include_max_reads=True)
-    payload = serialize_region_data(data)
-    payload["coordinate_system"] = _INTERNAL_COORDINATE_SYSTEM
-    payload["variant_type"] = "candidate"
-    payload["applied_filters"] = filters
-    payload["filter_note"] = _FILTER_ABSENCE_NOTE
-    payload["disclaimer"] = _CANDIDATE_VARIANT_DISCLAIMER
-    payload["file_path"] = file_path  # For client-side re-queries
-    # Preserve the full data-source context so the viewer's pan/zoom/detail refetches carry it.
-    # Without reference, follow-up calls lose mismatch evidence and CRAM decode fails on navigation.
-    # Echo ONLY a caller-supplied reference: a config-default reference is re-applied server-side on
-    # refetch and stays trusted — echoing it would make refetches re-validate the operator default
-    # as caller input and fail when it's outside the caller allow-list.
-    payload["variant_source"] = variant_source
-    if explicit_reference is not None:
-        payload["reference"] = explicit_reference
-    if effective_vcf is not None:
-        payload["vcf_path"] = effective_vcf
-
-    # Return summary text in content (for LLM context), full data only in _meta.
-    # Echo the applied filters here too — the LLM reasons over this text, not _meta.
-    reads_count = len(data.reads)
-    variants_count = len(data.variants)
-    summary = (
-        f"Region {data.contig}:{data.start}-{data.end}: "
-        f"{reads_count} reads, {variants_count} candidate variants "
-        f"(filters: {_format_filters_line(filters)})"
-    )
-    return {
-        "content": [{"type": "text", "text": summary}],
-        "_meta": {
-            "ui/resourceUri": VIEWER_RESOURCE_URI,
-            "ui/init": payload,
-        },
-    }
 
 
 @telemetry_wrapper("get_region_summary")
@@ -1327,16 +1605,10 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     Text-only summary for LLM reasoning — no UI metadata.
     """
     file_path = args["file_path"]
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     region = args["region"]
     validate_region(region)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
+    _, reference = await _resolve_reference(args, config)
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
@@ -1348,9 +1620,15 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     mean_cov = round(sum(coverage) / len(coverage), 2) if coverage else 0
     max_cov = max(coverage) if coverage else 0
 
-    filters = _applied_filters(config, args, include_max_reads=True)
+    filters = _applied_filters(
+        config,
+        args,
+        include_max_reads=True,
+        detection=_detection_status(region, reference, vcf_primary),
+        reads_truncated=data.reads_truncated,
+    )
     summary_lines = [
-        f"Region: {data.contig}:{data.start}-{data.end}",
+        f"Region: {format_region(data.contig, data.start, data.end)}",
         f"Reads: {len(data.reads)}",
         f"Coverage: mean={mean_cov}x, max={max_cov}x",
         f"Candidate variants detected: {len(data.variants)}",
@@ -1393,15 +1671,33 @@ async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> di
             {"error": validation_error}, status=_LOOKUP_INVALID, disclaimer=_CLINVAR_DISCLAIMER
         )
 
+    build, build_source = _lookup_build(args, config)
+    if build is None:
+        return _lookup_result(
+            {"error": f"Unrecognized build {args.get('build')!r}; use GRCh37/hg19 or GRCh38/hg38"},
+            status=_LOOKUP_INVALID,
+            disclaimer=_CLINVAR_DISCLAIMER,
+        )
+    build_info = {"genome_build": build, "build_source": build_source}
+
     client = get_clinvar_client(config)
 
     try:
-        result = await client.lookup(chrom, pos, ref, alt)
-    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
-        # Network/HTTP failure — the lookup is UNAVAILABLE, not an authoritative not-found.
+        result = await client.lookup(chrom, pos, ref, alt, build=build)
+    except NCBIUnavailableError as e:
+        # In-band NCBI error, truncated search, unsupported build: absence NOT established.
+        logger.warning("ClinVar lookup unavailable for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
+        return _lookup_result(
+            {"error": "ClinVar lookup unavailable", "reason": str(e), **build_info},
+            status=_LOOKUP_UNAVAILABLE,
+            disclaimer=_CLINVAR_DISCLAIMER,
+        )
+    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError, ValueError) as e:
+        # Network/HTTP failure (or an unparseable body) — the lookup is UNAVAILABLE, not an
+        # authoritative not-found.
         logger.warning("ClinVar lookup failed for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
         return _lookup_result(
-            {"error": "ClinVar lookup failed"},
+            {"error": "ClinVar lookup failed", **build_info},
             status=_LOOKUP_UNAVAILABLE,
             disclaimer=_CLINVAR_DISCLAIMER,
         )
@@ -1417,13 +1713,16 @@ async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> di
         return _lookup_result(
             {
                 "found": False,
-                "message": f"No ClinVar entry found for {chrom}:{pos} {ref}>{alt}",
+                "message": f"No ClinVar entry found for {chrom}:{pos} {ref}>{alt} ({build})",
+                **build_info,
             },
             status=_LOOKUP_NOT_FOUND,
             disclaimer=_CLINVAR_DISCLAIMER,
         )
 
-    return _lookup_result(asdict(result), status=_LOOKUP_FOUND, disclaimer=_CLINVAR_DISCLAIMER)
+    return _lookup_result(
+        {**asdict(result), **build_info}, status=_LOOKUP_FOUND, disclaimer=_CLINVAR_DISCLAIMER
+    )
 
 
 @telemetry_wrapper("lookup_gnomad")
@@ -1451,11 +1750,20 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
             {"error": validation_error}, status=_LOOKUP_INVALID, disclaimer=_GNOMAD_DISCLAIMER
         )
 
+    build, build_source = _lookup_build(args, config)
+    if build is None:
+        return _lookup_result(
+            {"error": f"Unrecognized build {args.get('build')!r}; use GRCh37/hg19 or GRCh38/hg38"},
+            status=_LOOKUP_INVALID,
+            disclaimer=_GNOMAD_DISCLAIMER,
+        )
+    build_info = {"genome_build": build, "build_source": build_source}
+
     client = get_gnomad_client(config)
 
     try:
-        result = await client.lookup(chrom, pos, ref, alt)
-    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
+        result = await client.lookup(chrom, pos, ref, alt, build=build)
+    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError, ValueError) as e:
         # Network/HTTP failure — the lookup is UNAVAILABLE, not an authoritative not-found.
         logger.warning("gnomAD lookup failed for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
         return _lookup_result(
@@ -1466,9 +1774,10 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
     except GnomadQueryError as e:
         # Transient GraphQL error — the client propagates it (rather than returning None) so we
         # report "unavailable" here instead of a misleading "not found in gnomAD".
+        # GnomadBuildError (no dataset for this build) is a subclass: also unavailable.
         logger.warning("gnomAD query error for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
         return _lookup_result(
-            {"error": "gnomAD lookup failed"},
+            {"error": "gnomAD lookup failed", "reason": str(e), **build_info},
             status=_LOOKUP_UNAVAILABLE,
             disclaimer=_GNOMAD_DISCLAIMER,
         )
@@ -1484,52 +1793,45 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
         return _lookup_result(
             {
                 "found": False,
-                "message": f"No gnomAD entry found for {chrom}:{pos} {ref}>{alt}",
+                "message": f"No gnomAD entry found for {chrom}:{pos} {ref}>{alt} ({build})",
+                **build_info,
             },
             status=_LOOKUP_NOT_FOUND,
             disclaimer=_GNOMAD_DISCLAIMER,
         )
 
-    return _lookup_result(asdict(result), status=_LOOKUP_FOUND, disclaimer=_GNOMAD_DISCLAIMER)
+    return _lookup_result(
+        {**asdict(result), **build_info}, status=_LOOKUP_FOUND, disclaimer=_GNOMAD_DISCLAIMER
+    )
 
 
 @telemetry_wrapper("scan_variants")
 async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dict:
-    """Scan an entire contig for variants using fast coverage-based detection."""
+    """Scan an entire contig for variants using fast coverage-based detection.
+
+    Failures (no reference, timeout) raise :class:`ToolInputError` so they reach the client as
+    an MCP error result rather than a successful ``{"error": ...}`` payload. With no
+    ``contig``, the BAM's first contig is scanned.
+    """
     file_path = args["file_path"]
-    validate_path(file_path, config)
-    contig = args.get("contig", DEFAULT_CONTIG)
-    # Validate only a caller-supplied reference — that is the untrusted SSRF vector. A
-    # config.reference default is operator-set (trusted) and may legitimately be absent for BAM
-    # inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        validate_reference_path(explicit_reference, config)
-    reference = explicit_reference or config.reference
+    await asyncio.to_thread(validate_path, file_path, config)
+    _, reference = await _resolve_reference(args, config)
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
 
     if not reference:
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "error": "Reference genome required for variant scanning. "
-                            "Use list_contigs to detect genome build and get a reference URL."
-                        }
-                    ),
-                }
-            ]
-        }
+        raise ToolInputError(
+            "Reference genome required for variant scanning. "
+            "Use list_contigs to detect genome build and get a reference URL."
+        )
 
+    contig = args.get("contig") or await _first_contig(file_path, reference, config)
     index_path = await _ensure_cached_index(file_path, config)
 
     try:
-        variants = await asyncio.wait_for(
+        scan = await asyncio.wait_for(
             _run_in_parse_pool(
-                scan_variants_chunked,
+                scan_contig,
                 file_path,
                 contig,
                 reference,
@@ -1543,17 +1845,33 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
             ),
             timeout=SCAN_VARIANTS_TIMEOUT_SECONDS,
         )
-    except asyncio.TimeoutError:
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {"error": f"Scan timed out after {SCAN_VARIANTS_TIMEOUT_SECONDS}s"}
-                    ),
-                }
-            ]
+    except asyncio.TimeoutError as e:
+        raise ToolInputError(
+            f"Scan of {contig} timed out after {SCAN_VARIANTS_TIMEOUT_SECONDS:g}s; "
+            "use get_variants on a narrower region."
+        ) from e
+    except ValueError as e:
+        # Unknown contig: an error, never a silent empty "no variants" result.
+        raise ToolInputError(str(e)) from e
+
+    variants = scan.variants
+    filters = _applied_filters(config, args, include_max_reads=False)
+    # Self-describing scope: what was scanned, and what this scan cannot see.
+    filters.update(
+        {
+            "snv_detection": "enabled",
+            "indel_detection": False,
+            "indel_detection_note": "scan_variants is SNV-only; use get_variants on a "
+            "smaller region to detect indels",
+            "scanned_region": format_region(contig, scan.scanned_start, scan.scanned_end),
+            "contig_length": scan.contig_length,
+            "truncated_by_max_region": scan.truncated_by_max_region,
+            "max_region": SCAN_VARIANTS_MAX_REGION,
+            "total_candidates": scan.total_candidates,
+            "results_capped": scan.results_capped,
+            "max_results": SCAN_VARIANTS_MAX_RESULTS,
         }
+    )
 
     return {
         "content": [
@@ -1566,7 +1884,7 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
                         "count": len(variants),
                         "coordinate_system": _LLM_COORDINATE_SYSTEM,
                         "variant_type": "candidate",
-                        "applied_filters": _applied_filters(config, args, include_max_reads=False),
+                        "applied_filters": filters,
                         "filter_note": _FILTER_ABSENCE_NOTE,
                         "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
                     }
@@ -1574,3 +1892,23 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
             }
         ]
     }
+
+
+@telemetry_wrapper("cleanup_cache")
+async def handle_cleanup_cache(args: dict[str, Any], config: BAMCPConfig) -> dict:
+    """Clear downloaded index files and the region cache — single-client (stdio) servers only.
+
+    One server holds ONE cache shared by every connected client, so on an HTTP transport any
+    caller could wipe everyone's cache (and race in-flight index downloads). There, the cache is
+    managed by its TTL and this is a no-op that says so. The shared HTTP clients are never
+    closed by this tool (see :meth:`BAMCPServices.clear_caches`).
+    """
+    if config.transport != "stdio":
+        text = (
+            "Cache cleanup is disabled on shared (HTTP) servers: the cache is shared by all "
+            f"clients and expires automatically after {config.cache_ttl}s."
+        )
+    else:
+        removed = get_services(config).clear_caches()
+        text = f"Removed {removed} cached index files and cleared the region cache."
+    return {"content": [{"type": "text", "text": text}]}

@@ -8,6 +8,11 @@
 
 import { RegionData, Variant, VariantEvidence } from "./types";
 
+/** Stable identity of a variant across tiles, sorts and filters. */
+export function variantKey(v: Variant): string {
+    return `${v.contig}:${v.position}:${v.ref}>${v.alt}`;
+}
+
 interface Tile {
     data: RegionData;
     lastUsed: number;
@@ -35,9 +40,6 @@ export class DataStore {
         return `${contig}:${start}-${end}`;
     }
 
-    private static variantKey(v: Variant): string {
-        return `${v.contig}:${v.position}:${v.ref}>${v.alt}`;
-    }
 
     /**
      * Ingest a new RegionData response. Adds to tile cache, merges variants.
@@ -90,7 +92,7 @@ export class DataStore {
 
         // Merge variants (newer data wins for same key)
         for (const v of data.variants) {
-            this.variants.set(DataStore.variantKey(v), v);
+            this.variants.set(variantKey(v), v);
         }
 
         // Merge variant evidence (keyed by "position:ref>alt")

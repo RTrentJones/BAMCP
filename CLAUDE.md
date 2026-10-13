@@ -44,6 +44,7 @@ src/bamcp/
 ## Commands
 
 ```bash
+make verify           # every ci.yml gate in one command (VERIFY_E2E=1 adds playwright) — run before pushing
 make install          # build-viewer + pip install -e ".[dev]"
 make build-viewer     # cd src/bamcp/static && npm install && npm run build
 make test             # pytest (unit + integration, ignores e2e)
@@ -61,6 +62,11 @@ make docker-build / docker-test / clean
 ```
 
 `./dev_server.py` launches the server under the MCP Inspector (http://localhost:6274).
+
+`make verify` (`scripts/verify-local.sh`) is the local regression loop: it runs against *its own
+checkout's* `src/` (safe from a git worktree, unlike a bare `python -m bamcp...`, which imports
+whichever editable install is on the path), restores the tracked fixtures that
+`create_fixtures.py` rewrites, and ends with `OK — all local gates green`.
 
 ## CI gates (get these wrong and the push fails)
 
@@ -102,10 +108,18 @@ Thirteen tools, all registered in `server.py`:
 | `classify_variant` | ACMG classification via evidence fusion (`analysis/acmg.py`, `fusion.py`). |
 | `lookup_clinvar` / `lookup_gnomad` | Clinical significance / population allele frequency. |
 | `search_gene` | Gene symbol → coordinates. Build-aware: auto-detects from the BAM. |
-| `cleanup_cache` | Clean the session's BAM index cache files. |
+| `cleanup_cache` | Clear downloaded index files + region cache. stdio only (no-op on shared HTTP servers); never closes the shared HTTP clients. |
 
 **Every variant response echoes its `applied_filters`** — absence of a variant must stay
-distinguishable from "filtered out". Preserve that when touching variant output.
+distinguishable from "filtered out". Preserve that when touching variant output. That includes
+what *couldn't* be detected (`snv_detection` without a reference, `indel_detection` above the
+size cap, `reads_truncated`, scan truncation), not just the thresholds.
+
+**Coordinates.** Region strings at the tool boundary are **1-based inclusive, samtools-style**
+(`chr1:1051-1051` is one base); `parse_region` converts once to 0-based half-open internally and
+`format_region` is its inverse. Output positions are 1-based. The viewer's `ui/init` payload is
+the one exception (`coordinate_system: "0-based-half-open"`). External lookups (ClinVar, gnomAD,
+gene) must be queried in the **BAM's** assembly — pass `build`, never assume the server default.
 
 ## Configuration
 
@@ -141,14 +155,31 @@ silent and shifts coordinates by ~0.5–2 Mb, which reads as false "benign" evid
 
 HTTP middleware (SSE / streamable-http only), added in `__main__.py`:
 `TrustedHostMiddleware` (DNS rebinding, `BAMCP_TRUSTED_HOSTS`) → `SecurityHeadersMiddleware` →
-`RateLimitMiddleware` (default 60 req/min/IP).
+`RateLimitMiddleware` (default 120 req/min/IP — every MCP JSON-RPC message is a request). Behind
+the Cloudflare tunnel the client IP comes from `CF-Connecting-IP`, then right-to-left
+`X-Forwarded-For`, trusted only from `BAMCP_RATE_LIMIT_TRUSTED_PROXIES` (loopback).
 
-`validate_remote_url()` in `core/validation.py` resolves hostnames and blocks private/internal IPs:
-`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` (cloud metadata),
-and IPv6 private/loopback/link-local. Optional allowlist via `BAMCP_ALLOWED_REMOTE_HOSTS`.
+The prod server is an **open public demo**: dynamic client registration with auto-approve is
+intentional. Every in-memory store (OAuth clients/codes/tokens, index cache by bytes, region cache
+by bytes) is therefore bounded — keep any new store bounded too.
+
+`validate_remote_url()` in `core/validation.py` (http/https only, ports 80/443 only) rejects any
+`#` (htslib reads `x.bam##idx##<url>` as a second, unvalidated URL), userinfo, and backslashes;
+then checks `BAMCP_ALLOWED_REMOTE_HOSTS`; then resolves the host and blocks every non-global
+address (`not ip.is_global`: loopback, RFC1918, link-local/metadata, CGNAT, multicast, …).
+Index downloads follow redirects manually, re-validating each hop. Redirects inside
+htslib/libcurl and DNS rebinding can't be checked per-URL, so **the exact-host allow-list is the
+real SSRF control** — prod sets one, and startup warns without it. Validation resolves DNS, so
+call it off the event loop (`await asyncio.to_thread(validate_path, ...)`).
 
 Input validation: regions against `REGION_PATTERN`, paths ≤2048 chars, regions ≤100 chars,
 only `.bam`/`.cram` for local files, error messages sanitized (never leak config).
+
+**One error envelope.** Every tool runs through `_run()` in `server.py`, which maps any handler
+exception via `core/errors.py:sanitize_tool_exception` to an `isError=true` result with a
+client-safe message. Handlers raise `ToolInputError` for caller-facing failures — don't return
+`{"error": ...}` as a success. Lookup `not_found` is an answer, not an error.
+`tool_specs.py` must match the server's parameter sets (parity test in `test_tool_specs.py`).
 
 `mcp>=1.23.0` is a hard floor (CVE-2025-66416 DNS rebinding fix).
 

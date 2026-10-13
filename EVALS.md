@@ -24,7 +24,10 @@ of deterministic metrics:
 |--------|---------------------|----------------------|
 | Variant detection P / R / F1 | Does the detector recover exactly the planted variant alleles in a labeled region? | recall = 1.0, precision ≥ 0.95 |
 | False-positive control | Does it stay silent in reference-only regions? | 0 calls across negative regions |
-| Artifact-type recall | Does the curation tool surface the *expected* artifact at each known-artifact site (strand bias, low MAPQ, homopolymer)? | recall = 1.0 |
+| Artifact-type recall | Does the curation tool surface the *expected* artifact at each known-artifact site (strand bias, read-position bias, low MAPQ, homopolymer, low depth)? | recall = 1.0 |
+| Artifact likelihood | Does each labeled site land on the right side of its `expected_likelihood` (artifact sites: at least it; non-artifact sites: at most it)? | 0 mismatches |
+| VAF | Is each detected allele's VAF within `vaf_tolerance` (0.02) of `expected_vaf`? | 0 mismatches |
+| Tool failures | Did every tool call succeed? A failed or `{"error": ...}` call never counts as "0 calls" / "risk 0". | 0 failures |
 | Clean-control discrimination | Is a true clean variant scored *below* the artifact-prone sites and not labeled high-risk? | true |
 | **Safety: overconfidence guard** | Is any high-artifact site *also* reported as high confidence? | 0 sites ([SAFETY.md](SAFETY.md)) |
 | Confidence positive control | Does the one site engineered to be clean *actually* reach high confidence? | 0 mismatches |
@@ -45,7 +48,8 @@ second tool to disagree with. That makes the gate:
   variant, flag the right artifact), not just "the tool returned 200".
 
 The current synthetic_v1 numbers: **9/9 variant alleles recovered (P=R=F1=1.0),
-0 false positives across 3 negative regions, 3/3 artifact types surfaced,
+0 false positives across 3 negative regions, 5/5 artifact types surfaced,
+every likelihood and VAF label within bounds,
 clean control correctly discriminated, 0 overconfident sites, and the
 high-confidence positive control reaches high confidence.**
 
@@ -105,7 +109,15 @@ captures tool-call telemetry, and grades two ways:
 - **Deterministic** when a case declares `tools_expected` or inline rubric
   thresholds (`score_at_least: depth_quality=0.5`).
 - **LLM judge** for free-form `expected` criteria, falling back to a small
-  judge prompt.
+  judge prompt. The judge is **fixed and separate from the model under test**
+  (default `anthropic` / `claude-haiku-5-5`, override with `--judge-provider` /
+  `--judge-model`; a judge equal to the subject is refused) and runs at
+  **temperature 0**, so every configuration is graded by the same deterministic
+  judge. Verdict parsing tolerates markdown (`**VERDICT: PASS**`); no
+  recognizable verdict is a fail.
+- **Tool-use ablation** (`bamcp.eval.compare`) grades both arms on answer
+  correctness only — the tools-off arm cannot call tools, so grading it on
+  `tools_expected` would fail it by construction.
 
 Cases live in `tests/eval/test_cases.yaml` (text) and
 `tests/eval/vision_cases.yaml` (vision-required). The harness is

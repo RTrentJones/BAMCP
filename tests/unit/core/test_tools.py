@@ -7,7 +7,6 @@ import pytest
 
 from bamcp.config import BAMCPConfig
 from bamcp.constants import (
-    DEFAULT_CONTIG,
     LOW_CONFIDENCE_MAX_STRAND_BIAS,
     LOW_CONFIDENCE_MIN_DEPTH,
     LOW_CONFIDENCE_MIN_MEAN_QUALITY,
@@ -892,7 +891,7 @@ class TestVariantSource:
         )
         data = await tools_module._fetch_region_with_timeout(
             small_bam_path,
-            "chr1:90-200",
+            "chr1:91-200",
             config_with_ref.reference,
             config_with_ref,
             mode="variants",
@@ -900,7 +899,7 @@ class TestVariantSource:
             vcf_primary=True,
         )
         assert data.reference_sequence is not None
-        assert len(data.reference_sequence) == 110  # chr1:90-200
+        assert len(data.reference_sequence) == 110  # chr1:91-200 (1-based inclusive)
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -966,7 +965,7 @@ class TestHandleGetCoverage:
     @pytest.mark.asyncio
     async def test_coverage_values(self, small_bam_path, config):
         result = await handle_get_coverage(
-            {"file_path": small_bam_path, "region": "chr1:90-200"}, config
+            {"file_path": small_bam_path, "region": "chr1:91-200"}, config
         )
         payload = json.loads(result["content"][0]["text"])
         assert payload["total_bases"] == 110
@@ -1159,7 +1158,7 @@ class TestHandleJumpTo:
         )
         # Payload is in _meta.ui/init
         payload = result["_meta"]["ui/init"]
-        assert payload["contig"] == DEFAULT_CONTIG
+        assert payload["contig"] == "chr1"  # first contig in the BAM header
         # Position 150 should be within the returned start-end range
         assert payload["start"] <= 150 <= payload["end"]
 
@@ -1194,7 +1193,7 @@ class TestHandleJumpTo:
         result = await handle_jump_to({"file_path": small_bam_path, "position": 150}, config)
         # Payload is in _meta.ui/init
         payload = result["_meta"]["ui/init"]
-        assert payload["contig"] == DEFAULT_CONTIG
+        assert payload["contig"] == "chr1"  # first contig in the BAM header
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -1278,7 +1277,7 @@ class TestHandleLookupClinvar:
         """Mock ClinVarClient to return a known result."""
         from bamcp.clients.clinvar import ClinVarResult
 
-        async def mock_lookup(self, chrom, pos, ref, alt):
+        async def mock_lookup(self, chrom, pos, ref, alt, build=None):
             return ClinVarResult(
                 variation_id=12345,
                 clinical_significance="Pathogenic",
@@ -1308,7 +1307,7 @@ class TestHandleLookupClinvar:
     async def test_includes_disclaimer(self, config, monkeypatch):
         from bamcp.clients.clinvar import ClinVarResult
 
-        async def mock_lookup(self, chrom, pos, ref, alt):
+        async def mock_lookup(self, chrom, pos, ref, alt, build=None):
             return ClinVarResult(
                 variation_id=1,
                 clinical_significance="Benign",
@@ -1336,7 +1335,7 @@ class TestHandleLookupClinvar:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_not_found(self, config, monkeypatch):
-        async def mock_lookup(self, chrom, pos, ref, alt):
+        async def mock_lookup(self, chrom, pos, ref, alt, build=None):
             return None
 
         from bamcp.clients import clinvar
@@ -1353,7 +1352,7 @@ class TestHandleLookupClinvar:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_error_handling(self, config, monkeypatch):
-        async def mock_lookup(self, chrom, pos, ref, alt):
+        async def mock_lookup(self, chrom, pos, ref, alt, build=None):
             raise ConnectionError("API unavailable")
 
         from bamcp.clients import clinvar
@@ -1393,7 +1392,7 @@ class TestHandleLookupGnomad:
     async def test_returns_frequency(self, config, monkeypatch):
         from bamcp.clients.gnomad import GnomadResult, PopulationFrequency
 
-        async def mock_lookup(self, chrom, pos, ref, alt):
+        async def mock_lookup(self, chrom, pos, ref, alt, build=None):
             return GnomadResult(
                 variant_id="17-7674220-G-A",
                 global_af=3.28e-05,
@@ -1422,7 +1421,7 @@ class TestHandleLookupGnomad:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_not_found(self, config, monkeypatch):
-        async def mock_lookup(self, chrom, pos, ref, alt):
+        async def mock_lookup(self, chrom, pos, ref, alt, build=None):
             return None
 
         from bamcp.clients import gnomad
@@ -1465,7 +1464,7 @@ class TestLookupStatusField:
         from bamcp.clients import gnomad
         from bamcp.clients.gnomad import GnomadResult
 
-        async def mock_lookup(self, *_a):
+        async def mock_lookup(self, *_a, **_kw):
             return GnomadResult(
                 variant_id="17-7674220-G-A",
                 global_af=1e-05,
@@ -1488,7 +1487,7 @@ class TestLookupStatusField:
     async def test_gnomad_not_found_status(self, config, monkeypatch):
         from bamcp.clients import gnomad
 
-        async def mock_lookup(self, *_a):
+        async def mock_lookup(self, *_a, **_kw):
             return None
 
         monkeypatch.setattr(gnomad.GnomadClient, "lookup", mock_lookup)
@@ -1506,7 +1505,7 @@ class TestLookupStatusField:
         from bamcp.clients import gnomad
         from bamcp.clients.gnomad import GnomadQueryError
 
-        async def mock_lookup(self, *_a):
+        async def mock_lookup(self, *_a, **_kw):
             raise GnomadQueryError("transient")
 
         monkeypatch.setattr(gnomad.GnomadClient, "lookup", mock_lookup)
@@ -1522,7 +1521,7 @@ class TestLookupStatusField:
     async def test_gnomad_network_error_is_unavailable(self, config, monkeypatch):
         from bamcp.clients import gnomad
 
-        async def mock_lookup(self, *_a):
+        async def mock_lookup(self, *_a, **_kw):
             raise ConnectionError("boom")
 
         monkeypatch.setattr(gnomad.GnomadClient, "lookup", mock_lookup)
@@ -1537,7 +1536,7 @@ class TestLookupStatusField:
         from bamcp.clients import clinvar
         from bamcp.clients.clinvar import ClinVarResult
 
-        async def found(self, *_a):
+        async def found(self, *_a, **_kw):
             return ClinVarResult(
                 variation_id=12345,
                 clinical_significance="Pathogenic",
@@ -1555,7 +1554,7 @@ class TestLookupStatusField:
         )
         assert json.loads(r["content"][0]["text"])["status"] == "found"
 
-        async def none(self, *_a):
+        async def none(self, *_a, **_kw):
             return None
 
         monkeypatch.setattr(clinvar.ClinVarClient, "lookup", none)
@@ -1564,7 +1563,7 @@ class TestLookupStatusField:
         )
         assert json.loads(r["content"][0]["text"])["status"] == "not_found"
 
-        async def boom(self, *_a):
+        async def boom(self, *_a, **_kw):
             raise ConnectionError("down")
 
         monkeypatch.setattr(clinvar.ClinVarClient, "lookup", boom)
@@ -1776,7 +1775,12 @@ class TestComputeArtifactRisk:
         variant = {"position": 100, "depth": 50, "vaf": 0.5}
         evidence = {
             "strand_bias": 0.1,
-            "position_histogram": [10, 10, 1, 0, 0, 0],  # Mostly near ends
+            "position_histogram": [10, 10, 1, 0, 0, 0],
+            # 20/21 supporting bases within the near-end cutoff vs ~13% expected.
+            "position_count": 21,
+            "near_end_count": 20,
+            "near_end_fraction": 0.952,
+            "near_end_expected_fraction": 0.133,
             "mapq_histogram": [0, 0, 0, 0, 5, 10, 20],
         }
         result = compute_artifact_risk(variant, evidence, None, 0)
@@ -1945,10 +1949,11 @@ class TestHandleScanVariants:
     @pytest.mark.asyncio
     async def test_requires_reference(self, small_bam_path, config):
         """Should return error when no reference is configured."""
-        result = await handle_scan_variants({"file_path": small_bam_path, "contig": "chr1"}, config)
-        payload = json.loads(result["content"][0]["text"])
-        assert "error" in payload
-        assert "reference" in payload["error"].lower()
+        from bamcp.core.errors import ToolInputError
+
+        # A failure is an error result (raised), not a successful {"error": ...} payload.
+        with pytest.raises(ToolInputError, match="Reference genome required"):
+            await handle_scan_variants({"file_path": small_bam_path, "contig": "chr1"}, config)
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -1981,14 +1986,15 @@ class TestHandleScanVariants:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_nonexistent_contig_empty(self, small_bam_path, config_with_ref):
-        """Should return empty list for nonexistent contig."""
-        result = await handle_scan_variants(
-            {"file_path": small_bam_path, "contig": "chrZ"}, config_with_ref
-        )
-        payload = json.loads(result["content"][0]["text"])
-        assert payload["variants"] == []
-        assert payload["count"] == 0
+    async def test_nonexistent_contig_is_an_error(self, small_bam_path, config_with_ref):
+        """An unknown contig returns an error, not an empty result that reads as
+        "scanned, no variants"."""
+        from bamcp.core.errors import ToolInputError
+
+        with pytest.raises(ToolInputError, match="chrZ"):
+            await handle_scan_variants(
+                {"file_path": small_bam_path, "contig": "chrZ"}, config_with_ref
+            )
 
 
 class TestMediumRoadmapCoverage:
@@ -2017,7 +2023,7 @@ class TestMediumRoadmapCoverage:
         monkeypatch.setattr(tools_module, "fetch_region", fail_fetch_region)
 
         data = await tools_module._fetch_region_with_timeout(
-            "sample.bam", "chr1:10-20", None, config, mode="coverage"
+            "sample.bam", "chr1:11-20", None, config, mode="coverage"
         )
 
         assert data.coverage == [3] * 10
@@ -2150,7 +2156,7 @@ class TestMediumRoadmapCoverage:
         def mock_fetch_coverage_only(*args):
             nonlocal call_count
             call_count += 1
-            # Tile region is chr1:0-4096 -> coverage indexed by absolute position.
+            # Tile region is chr1:1-4096 (0-based [0, 4096)) -> coverage by absolute position.
             return RegionData("chr1", 0, 4096, reads=[], coverage=list(range(4096)), variants=[])
 
         monkeypatch.setattr(tools_module, "_ensure_cached_index", mock_ensure_cached_index)
@@ -2158,10 +2164,10 @@ class TestMediumRoadmapCoverage:
 
         cfg = BAMCPConfig(cache_ttl=60)
         a = await tools_module._fetch_region_with_timeout(
-            "sample.bam", "chr1:100-200", None, cfg, mode="coverage"
+            "sample.bam", "chr1:101-200", None, cfg, mode="coverage"
         )
         b = await tools_module._fetch_region_with_timeout(
-            "sample.bam", "chr1:300-400", None, cfg, mode="coverage"
+            "sample.bam", "chr1:301-400", None, cfg, mode="coverage"
         )
 
         assert call_count == 1  # one tile served both sub-regions
@@ -2176,7 +2182,7 @@ class TestMediumRoadmapCoverage:
         from bamcp.core.parsers import fetch_coverage_only
         from bamcp.core.tools import _fetch_region_with_timeout
 
-        region = "chr1:100-160"
+        region = "chr1:101-160"
         tiled = await _fetch_region_with_timeout(
             small_bam_path, region, None, config, mode="coverage"
         )
@@ -2526,7 +2532,8 @@ class TestMediumRoadmapCoverage:
         import bamcp.core.tools as tm
 
         # Cap concurrency at 2 for the test.
-        monkeypatch.setattr(tm, "_parse_gate", asyncio.Semaphore(2))
+        gate = asyncio.Semaphore(2)
+        monkeypatch.setattr(tm, "_get_parse_gate", lambda: gate)
         running = []
         release = threading.Event()
 
@@ -2751,6 +2758,9 @@ class TestAppliedFiltersHelpers:
             "min_depth": cfg.min_depth,
             "min_mapq": cfg.min_mapq,
             "min_baseq": cfg.min_baseq,
+            # Fixed read exclusions + overlap policy are always echoed.
+            "excluded_reads": ["unmapped", "secondary", "supplementary", "duplicate", "qcfail"],
+            "overlapping_mates": "both_counted",
         }
         assert "max_reads" not in f
 
@@ -2907,3 +2917,264 @@ class TestFetchRegionTimeoutMessage:
             )
 
         assert "retrying" in str(exc_info.value)
+
+
+class TestLookupBuildRouting:
+    """lookup_clinvar / lookup_gnomad route by genome build and keep unavailable != not_found."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_clinvar_build_arg_normalized_and_passed(self, config, monkeypatch):
+        from bamcp.clients import clinvar
+
+        seen = {}
+
+        async def lookup(self, chrom, pos, ref, alt, build=None):
+            seen["build"] = build
+            return None
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", lookup)
+        r = await handle_lookup_clinvar(
+            {"chrom": "17", "pos": 7579472, "ref": "G", "alt": "C", "build": "hg19"}, config
+        )
+        p = json.loads(r["content"][0]["text"])
+        assert seen["build"] == "GRCh37"
+        assert p["status"] == "not_found"
+        assert (p["genome_build"], p["build_source"]) == ("GRCh37", "explicit")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_clinvar_default_build_is_server_default(self, config, monkeypatch):
+        from bamcp.clients import clinvar
+
+        seen = {}
+
+        async def lookup(self, chrom, pos, ref, alt, build=None):
+            seen["build"] = build
+            return None
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", lookup)
+        r = await handle_lookup_clinvar({"chrom": "17", "pos": 1, "ref": "G", "alt": "C"}, config)
+        assert seen["build"] == config.genome_build
+        assert json.loads(r["content"][0]["text"])["build_source"] == "server-default"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_unrecognized_build_is_invalid_input(self, config):
+        for handler in (handle_lookup_clinvar, handle_lookup_gnomad):
+            r = await handler(
+                {"chrom": "17", "pos": 1, "ref": "G", "alt": "C", "build": "hg99"}, config
+            )
+            assert json.loads(r["content"][0]["text"])["status"] == "invalid_input"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_clinvar_ncbi_unavailable_is_unavailable_with_reason(self, config, monkeypatch):
+        from bamcp.clients import clinvar
+        from bamcp.clients.clinvar import ClinVarUnavailableError
+
+        async def lookup(self, *_a, **_kw):
+            raise ClinVarUnavailableError("result truncated, absence not established")
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", lookup)
+        r = await handle_lookup_clinvar({"chrom": "17", "pos": 1, "ref": "G", "alt": "C"}, config)
+        p = json.loads(r["content"][0]["text"])
+        assert p["status"] == "unavailable"
+        assert "truncated" in p["reason"]
+        assert p.get("found") is not False
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_unparseable_body_is_unavailable(self, config, monkeypatch):
+        from bamcp.clients import clinvar, gnomad
+
+        async def lookup(self, *_a, **_kw):
+            raise ValueError("Expecting value: line 1 column 1")
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", lookup)
+        monkeypatch.setattr(gnomad.GnomadClient, "lookup", lookup)
+        for handler in (handle_lookup_clinvar, handle_lookup_gnomad):
+            r = await handler({"chrom": "17", "pos": 1, "ref": "G", "alt": "C"}, config)
+            assert json.loads(r["content"][0]["text"])["status"] == "unavailable"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_gnomad_unknown_build_refused_as_unavailable(self, config, monkeypatch):
+        from bamcp.clients import gnomad
+        from bamcp.clients.gnomad import GnomadBuildError
+
+        async def lookup(self, *_a, **_kw):
+            raise GnomadBuildError("configured gnomAD dataset 'gnomad_r4' is GRCh38")
+
+        monkeypatch.setattr(gnomad.GnomadClient, "lookup", lookup)
+        r = await handle_lookup_gnomad(
+            {"chrom": "17", "pos": 1, "ref": "G", "alt": "C", "build": "GRCh37"}, config
+        )
+        p = json.loads(r["content"][0]["text"])
+        assert p["status"] == "unavailable"
+        assert "GRCh38" in p["reason"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_gnomad_build_routes_dataset(self, config, monkeypatch):
+        """End to end through the real client: a GRCh37 lookup queries gnomad_r2_1."""
+        from bamcp.clients import gnomad
+
+        seen = {}
+
+        async def do_lookup(self, chrom, pos, ref, alt, dataset=None):
+            seen["dataset"] = dataset
+            return None
+
+        monkeypatch.setattr(gnomad.GnomadClient, "_do_lookup", do_lookup)
+        cfg = BAMCPConfig(genome_build="hg19")
+        r = await handle_lookup_gnomad({"chrom": "17", "pos": 1, "ref": "G", "alt": "C"}, cfg)
+        assert seen["dataset"] == "gnomad_r2_1"
+        assert json.loads(r["content"][0]["text"])["genome_build"] == "GRCh37"
+        await close_external_clients(cfg)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_ncbi_clients_share_one_rate_limiter(self):
+        from bamcp.core.tools import get_services
+
+        cfg = BAMCPConfig()
+        services = get_services(cfg)
+        assert services.clinvar()._rate_limiter is services.genes()._rate_limiter
+        await close_external_clients(cfg)
+
+
+class TestSearchGeneHonesty:
+    """search_gene never silently falls back or silences an unknown build."""
+
+    def _client(self, monkeypatch, result=None, exc=None):
+        import bamcp.core.tools as tm
+
+        class _Client:
+            async def search(self, symbol, build=None):
+                if exc is not None:
+                    raise exc
+                return result
+
+        monkeypatch.setattr(tm, "get_gene_client", lambda config: _Client())
+
+    def _detect(self, monkeypatch, build=None, exc=None):
+        import bamcp.core.tools as tm
+
+        async def _fake(file_path, config):
+            if exc is not None:
+                raise exc
+            return {"build": build, "confidence": "low", "evidence": []}
+
+        monkeypatch.setattr(tm, "_detect_bam_build", _fake)
+
+    def _gene(self, build):
+        from bamcp.clients.genes import GeneInfo
+
+        return GeneInfo("TP53", "tumor protein p53", "chr17", 1, 2, "-", build=build)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_undetectable_bam_build_warns(self, monkeypatch):
+        from bamcp.core.tools import handle_search_gene
+
+        self._detect(monkeypatch, build="unknown")
+        self._client(monkeypatch, self._gene("GRCh38"))
+        r = await handle_search_gene({"symbol": "TP53", "file_path": "x.bam"}, BAMCPConfig())
+        p = json.loads(r["content"][0]["text"])
+        assert p["build_source"] == "server-default"
+        assert "UNRECONCILED" in p["warning"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_bad_file_path_is_an_error_not_a_fallback(self, monkeypatch):
+        from bamcp.core.tools import handle_search_gene
+
+        self._detect(monkeypatch, exc=ValueError("Path is not in allowed directories"))
+        self._client(monkeypatch, self._gene("GRCh38"))
+        r = await handle_search_gene({"symbol": "TP53", "file_path": "/etc/x.bam"}, BAMCPConfig())
+        p = json.loads(r["content"][0]["text"])
+        assert p["status"] == "invalid_input"
+        assert "region" not in p
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_missing_file_is_an_error(self, monkeypatch):
+        from bamcp.core.tools import handle_search_gene
+
+        self._detect(monkeypatch, exc=FileNotFoundError("File not found: x.bam"))
+        self._client(monkeypatch, self._gene("GRCh38"))
+        r = await handle_search_gene({"symbol": "TP53", "file_path": "x.bam"}, BAMCPConfig())
+        assert json.loads(r["content"][0]["text"])["status"] == "invalid_input"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_unreadable_header_without_build_errors(self, monkeypatch):
+        from bamcp.core.tools import handle_search_gene
+
+        self._detect(monkeypatch, exc=OSError("truncated file"))
+        self._client(monkeypatch, self._gene("GRCh38"))
+        r = await handle_search_gene({"symbol": "TP53", "file_path": "x.bam"}, BAMCPConfig())
+        p = json.loads(r["content"][0]["text"])
+        assert p["status"] == "unavailable" and "build" in p["error"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_unreadable_header_with_explicit_build_warns(self, monkeypatch):
+        from bamcp.core.tools import handle_search_gene
+
+        self._detect(monkeypatch, exc=OSError("truncated file"))
+        self._client(monkeypatch, self._gene("GRCh37"))
+        r = await handle_search_gene(
+            {"symbol": "TP53", "file_path": "x.bam", "build": "GRCh37"}, BAMCPConfig()
+        )
+        p = json.loads(r["content"][0]["text"])
+        assert p["genome_build"] == "GRCh37"
+        assert "unreconciled" in p["warning"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_unknown_result_build_warns_and_mismatch_not_silenced(self, monkeypatch):
+        from bamcp.core.tools import handle_search_gene
+
+        self._detect(monkeypatch, build="GRCh37")
+        self._client(monkeypatch, self._gene("unknown"))
+        r = await handle_search_gene({"symbol": "TP53", "file_path": "x.bam"}, BAMCPConfig())
+        p = json.loads(r["content"][0]["text"])
+        assert "UNVERIFIED" in p["warning"]
+        assert "MISMATCH" in p["warning"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_ncbi_failure_is_unavailable_not_gene_not_found(self, monkeypatch):
+        from bamcp.clients.genes import GeneLookupError
+        from bamcp.core.tools import handle_search_gene
+
+        self._client(monkeypatch, exc=GeneLookupError("NCBI request failed"))
+        r = await handle_search_gene({"symbol": "TP53", "build": "GRCh38"}, BAMCPConfig())
+        p = json.loads(r["content"][0]["text"])
+        assert p["status"] == "unavailable"
+        assert "not found" not in p["error"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_genuine_absence_is_not_found(self, monkeypatch):
+        from bamcp.core.tools import handle_search_gene
+
+        self._client(monkeypatch, None)
+        r = await handle_search_gene({"symbol": "NOPE1", "build": "GRCh38"}, BAMCPConfig())
+        p = json.loads(r["content"][0]["text"])
+        assert p["status"] == "not_found"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_alias_note_surfaced(self, monkeypatch):
+        from bamcp.clients.genes import GeneInfo
+        from bamcp.core.tools import handle_search_gene
+
+        info = GeneInfo("TP53", "p53", "chr17", 1, 2, "-", build="GRCh38", note="'p53' is an alias")
+        self._client(monkeypatch, info)
+        r = await handle_search_gene({"symbol": "p53", "build": "GRCh38"}, BAMCPConfig())
+        p = json.loads(r["content"][0]["text"])
+        assert "alias" in p["warning"]
+        assert p["coordinate_system"] == "1-based-inclusive"

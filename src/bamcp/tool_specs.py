@@ -4,9 +4,11 @@ Single source of truth for the LLM-facing description and parameter schema of
 each BAMCP tool. The FastMCP server (``server.py``) derives its schemas from
 function signatures; this registry mirrors those so the eval harness exposes the
 *same* descriptions and parameter schemas a real MCP client would see — instead
-of the placeholder ``{additionalProperties: true}`` it used before. Keeping the
-two in sync is a documentation/fidelity concern; a test asserts the registry
-covers every routed tool.
+of the placeholder ``{additionalProperties: true}`` it used before. Because each
+schema sets ``additionalProperties: False``, a parameter missing here is one the
+eval model can never pass — so ``tests/unit/test_tool_specs.py`` asserts, for every
+tool, that the property and required sets match the schema FastMCP derives from
+``server.py``. Add or rename a parameter in both places.
 
 Each entry is ``{"description": str, "input_schema": <JSON Schema object>}``.
 """
@@ -18,6 +20,21 @@ from typing import Any
 _STR = {"type": "string"}
 _INT = {"type": "integer"}
 _NUM = {"type": "number"}
+_VCF_PATH = {**_STR, "description": "Optional VCF/BCF of the caller's variant calls"}
+_VARIANT_SOURCE = {
+    **_STR,
+    "enum": ["auto", "vcf", "bamcp"],
+    "description": "auto: BAMCP candidates with the VCF overlaid; vcf: the VCF is "
+    "authoritative (requires vcf_path); bamcp: BAMCP candidates only",
+}
+
+
+# The region-string contract every region-taking tool shares (parse_region converts it).
+REGION_FORMAT_NOTE = (
+    "region is 1-based and inclusive, samtools-style ('chr1:1000-2000' covers bases "
+    "1000..2000; 'chr1:1051-1051' is the single base 1051)."
+)
+_REGION = {**_STR, "description": "1-based inclusive, samtools-style, e.g. chr1:1000-2000"}
 
 
 def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -32,13 +49,17 @@ def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
 TOOL_SPECS: dict[str, dict[str, Any]] = {
     "get_variants": {
         "description": "Detect and return variants in a genomic region. Positions are "
-        "1-based (VCF/dbSNP convention). Each variant carries strand counts, mean base "
+        "1-based (VCF/dbSNP convention); "
+        + REGION_FORMAT_NOTE
+        + " Each variant carries strand counts, mean base "
         "quality, artifact-risk assessment, and a confidence level.",
         "input_schema": _obj(
             {
                 "file_path": _STR,
-                "region": {**_STR, "description": "e.g. chr1:1000-2000"},
+                "region": _REGION,
                 "reference": _STR,
+                "vcf_path": _VCF_PATH,
+                "variant_source": _VARIANT_SOURCE,
                 "min_vaf": _NUM,
                 "min_depth": _INT,
             },
@@ -47,9 +68,9 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "get_coverage": {
         "description": "Calculate depth-of-coverage statistics (mean, min, max, median, "
-        "bases covered) for a genomic region.",
+        "bases covered) for a genomic region. " + REGION_FORMAT_NOTE,
         "input_schema": _obj(
-            {"file_path": _STR, "region": _STR, "reference": _STR},
+            {"file_path": _STR, "region": _REGION, "reference": _STR},
             ["file_path", "region"],
         ),
     },
@@ -61,7 +82,8 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "jump_to": {
         "description": "Jump to a specific genomic position and view the surrounding reads in "
-        "the interactive viewer.",
+        "the interactive viewer. position is 1-based (VCF/samtools convention). If "
+        "contig is omitted, the BAM's first contig is used.",
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -69,41 +91,59 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "contig": _STR,
                 "window": _INT,
                 "reference": _STR,
+                "vcf_path": _VCF_PATH,
+                "variant_source": _VARIANT_SOURCE,
             },
             ["file_path", "position"],
         ),
     },
     "visualize_region": {
         "description": "Visualize aligned reads in a genomic region with the interactive MCP "
-        "Apps viewer. Auto-detects compact mode for large regions.",
+        "Apps viewer. Auto-detects compact mode for large regions. " + REGION_FORMAT_NOTE,
         "input_schema": _obj(
-            {"file_path": _STR, "region": _STR, "reference": _STR},
+            {
+                "file_path": _STR,
+                "region": _REGION,
+                "reference": _STR,
+                "vcf_path": _VCF_PATH,
+                "variant_source": _VARIANT_SOURCE,
+            },
             ["file_path", "region"],
         ),
     },
     "get_region_summary": {
         "description": "Get a text summary of a genomic region (read count, coverage, and each "
-        "variant with confidence, artifact risk, and strand balance) for LLM reasoning. No UI.",
+        "variant with confidence, artifact risk, and strand balance) for LLM reasoning. No UI. "
+        + REGION_FORMAT_NOTE,
         "input_schema": _obj(
-            {"file_path": _STR, "region": _STR, "reference": _STR},
+            {
+                "file_path": _STR,
+                "region": _REGION,
+                "reference": _STR,
+                "vcf_path": _VCF_PATH,
+                "variant_source": _VARIANT_SOURCE,
+            },
             ["file_path", "region"],
         ),
     },
     "lookup_clinvar": {
         "description": "Look up a variant in ClinVar for clinical significance, review status "
         "(star rating), and associated conditions. Research-grade, not for clinical use. "
-        "Positions are 1-based.",
+        "Positions are 1-based, in 'build' (GRCh37/hg19 or GRCh38/hg38; default: server "
+        "build) — pass the BAM's build from list_contigs, or a GRCh37 variant is searched "
+        "at the wrong locus.",
         "input_schema": _obj(
-            {"chrom": _STR, "pos": _INT, "ref": _STR, "alt": _STR},
+            {"chrom": _STR, "pos": _INT, "ref": _STR, "alt": _STR, "build": _STR},
             ["chrom", "pos", "ref", "alt"],
         ),
     },
     "lookup_gnomad": {
         "description": "Look up a variant in gnomAD for population allele-frequency data "
         "(global and per-population AF). Research-grade, not for clinical use. Positions are "
-        "1-based.",
+        "1-based, in 'build' (GRCh37/hg19 → gnomAD v2.1, GRCh38/hg38 → gnomAD v4; default: "
+        "server build) — pass the BAM's build from list_contigs.",
         "input_schema": _obj(
-            {"chrom": _STR, "pos": _INT, "ref": _STR, "alt": _STR},
+            {"chrom": _STR, "pos": _INT, "ref": _STR, "alt": _STR, "build": _STR},
             ["chrom", "pos", "ref", "alt"],
         ),
     },
@@ -128,8 +168,9 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "scan_variants": {
         "description": "Scan an entire contig for variants using fast coverage-based detection. "
-        "Requires a reference genome. Returns up to 500 variants ranked by VAF. Use list_contigs "
-        "first to detect the genome build and get a reference URL.",
+        "Requires a reference genome. Returns up to 500 variants ranked by VAF. If contig is "
+        "omitted, the BAM's first contig is scanned. Use list_contigs first to detect the genome "
+        "build and get a reference URL.",
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -143,11 +184,22 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "search_gene": {
         "description": "Search for a gene by symbol (e.g. BRCA1, TP53) and return its genomic "
-        "coordinates. Use this to navigate to a gene's location by name.",
-        "input_schema": _obj({"symbol": _STR}, ["symbol"]),
+        "coordinates (1-based). Use this to navigate to a gene's location by name. Pass "
+        "file_path to return coordinates in that BAM's build (auto-detected), or build "
+        "(GRCh37/hg19 or GRCh38/hg38) to choose it explicitly. The returned region is "
+        "1-based inclusive, ready to pass to visualize_region.",
+        "input_schema": _obj(
+            {
+                "symbol": _STR,
+                "file_path": _STR,
+                "build": {**_STR, "description": "GRCh37/hg19 or GRCh38/hg38"},
+            },
+            ["symbol"],
+        ),
     },
     "cleanup_cache": {
-        "description": "Clean up this session's cached BAM index files.",
+        "description": "Clear the server's downloaded BAM index files and region cache "
+        "(single-client stdio servers only; shared HTTP servers expire their cache by TTL).",
         "input_schema": _obj({}, []),
     },
     "classify_variant": {

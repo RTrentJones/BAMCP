@@ -548,6 +548,33 @@
             box-shadow: 0 2px 8px rgba(0,0,0,0.3);
         }
         #sequence-notice.hidden { display: none; }
+        #fetch-error {
+            position: absolute;
+            top: 8px;
+            left: 50%;
+            transform: translateX(-50%);
+            max-width: 80%;
+            background: rgba(220, 38, 38, 0.95);
+            color: white;
+            padding: 6px 10px 6px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            z-index: 20;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+        #fetch-error.hidden { display: none; }
+        #fetch-error-text { overflow-wrap: anywhere; }
+        #fetch-error button {
+            background: transparent;
+            color: white;
+            border: none;
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+        }
         #sequence-notice button {
             background: white;
             color: #2563eb;
@@ -698,6 +725,10 @@
                 <span class="loading-text">Loading sequences...</span>
                 <span class="notice-text">Sequences not loaded.</span>
                 <button id="load-detail-btn">Load Detail</button>
+            </div>
+            <div id="fetch-error" class="hidden" role="alert">
+                <span id="fetch-error-text"></span>
+                <button id="fetch-error-close" title="Dismiss">&times;</button>
             </div>
             <div id="debug-overlay" class="hidden">
                 <div class="debug-header">

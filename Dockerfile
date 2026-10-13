@@ -6,7 +6,9 @@
 # ---------------------------------------------------------------------------
 # Stage 1a — Frontend build (Vite bundles viewer into single HTML)
 # ---------------------------------------------------------------------------
-FROM node:22-slim AS frontend
+# Base images are pinned by multi-arch index digest (amd64 + arm64) so a rebuild of the same
+# commit gets the same base; Dependabot (docker ecosystem) bumps the digests.
+FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS frontend
 
 WORKDIR /frontend
 COPY src/bamcp/static/package.json src/bamcp/static/package-lock.json* ./
@@ -17,7 +19,7 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 # Stage 1b — Python build
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
@@ -32,22 +34,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-COPY pyproject.toml README.md ./
+# uv is used only to export the lockfile; it never reaches the runtime stage. Copied straight from
+# its digest-pinned image (not a separate FROM stage, so every FROM stays a slim base). Bump the
+# tag + digest by hand alongside the uv version used to write uv.lock.
+COPY --from=ghcr.io/astral-sh/uv:0.11.32@sha256:df4cae8f3a96d175e2e5f992e597550000edbe78fdc2594d5cd8de1a217f504c /uv /usr/local/bin/uv
+
+COPY pyproject.toml uv.lock README.md ./
 COPY src/ src/
 
 # Copy bundled viewer into source tree so hatchling includes it in the wheel
 COPY --from=frontend /frontend/dist/viewer.html src/bamcp/static/dist/viewer.html
 
-# Install the package and its dependencies into a prefix we can copy later.
-# Include [telemetry] so the OTel SDK ships with the image — JSONL is built-in,
-# but the OpenTelemetry exporter requires the extras. [eval] is intentionally
-# excluded: it pulls in anthropic/openai/playwright which are dev-only.
-RUN pip install --no-cache-dir --prefix=/install ".[telemetry]"
+# Install the dependencies FROM uv.lock (exact versions + hashes) — the same set CI tests and
+# pip-audit checks — rather than letting pip resolve the newest versions within pyproject's
+# ranges. `--frozen` fails the build if the lock is stale instead of silently re-resolving.
+# Include [telemetry] so the OTel SDK ships with the image — JSONL is built-in, but the
+# OpenTelemetry exporter requires the extras. [eval] is intentionally excluded: it pulls in
+# anthropic/openai/playwright which are dev-only. The project itself is then installed with
+# --no-deps so pip cannot pull anything the lock did not pin.
+RUN uv export --frozen --no-dev --extra telemetry --no-emit-project -o /tmp/requirements.txt \
+    && pip install --no-cache-dir --prefix=/install --require-hashes -r /tmp/requirements.txt \
+    && pip install --no-cache-dir --prefix=/install --no-deps .
 
 # ---------------------------------------------------------------------------
 # Stage 2 — Runtime
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS runtime
 
 # pysam needs the htslib shared libs at runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \

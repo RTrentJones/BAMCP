@@ -2,14 +2,14 @@
 
 import atexit
 import sys
-from typing import Literal, get_args
+from typing import Literal
 
 from .config import BAMCPConfig
 from .core.tools import get_cache
+from .core.validation import warn_if_remote_unrestricted
 from .server import create_server
 
 Transport = Literal["stdio", "sse", "streamable-http"]
-VALID_TRANSPORTS: tuple[str, ...] = get_args(Transport)
 
 
 def _add_http_middleware(app, config: BAMCPConfig):  # noqa: ANN001, ANN201
@@ -19,8 +19,17 @@ def _add_http_middleware(app, config: BAMCPConfig):  # noqa: ANN001, ANN201
     from .middleware.ratelimit import RateLimitMiddleware
     from .middleware.security import SecurityHeadersMiddleware
 
-    # Order matters: outermost middleware runs first
-    # 1. Rate limiting (reject before doing work)
+    # Order matters. Starlette's add_middleware() PREPENDS, so the LAST one added is the
+    # OUTERMOST layer and sees the request first. The resulting request path is:
+    #
+    #   TrustedHost (if configured) -> SecurityHeaders -> RateLimit -> app
+    #
+    # * TrustedHost is outermost: a bad Host header (DNS rebinding) is rejected before any
+    #   other work, and never consumes a rate-limit slot.
+    # * SecurityHeaders wraps RateLimit, so 429 responses carry the security headers too.
+    # * RateLimit is innermost, directly in front of the MCP app.
+    #
+    # Added innermost-first below.
     app.add_middleware(
         RateLimitMiddleware,
         requests_per_minute=config.rate_limit,
@@ -28,24 +37,20 @@ def _add_http_middleware(app, config: BAMCPConfig):  # noqa: ANN001, ANN201
         max_tracked_ips=config.rate_limit_max_tracked_ips,
     )
 
-    # 2. Security headers (add to all responses)
     app.add_middleware(SecurityHeadersMiddleware)
 
-    # 3. Trusted host validation (DNS rebinding protection)
     if config.trusted_hosts:
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.trusted_hosts)
 
 
 def main() -> None:
     """Run the BAMCP MCP server."""
-    config = BAMCPConfig.from_env()
-
-    if config.transport not in VALID_TRANSPORTS:
-        print(
-            f"Invalid BAMCP_TRANSPORT={config.transport!r}. "
-            f"Must be one of: {', '.join(VALID_TRANSPORTS)}",
-            file=sys.stderr,
-        )
+    # BAMCPConfig validates everything (incl. the transport, in __post_init__) and names the
+    # offending variable; surface that as a one-line error, not a traceback.
+    try:
+        config = BAMCPConfig.from_env()
+    except ValueError as exc:
+        print(f"Invalid BAMCP configuration: {exc}", file=sys.stderr)
         sys.exit(1)
 
     from .middleware.telemetry import configure_telemetry
@@ -55,6 +60,8 @@ def main() -> None:
         jsonl_path=config.telemetry_path,
         otel_enabled=config.telemetry_otel_enabled,
     )
+
+    warn_if_remote_unrestricted(config)
 
     # Register cleanup on exit to remove this session's cache files
     def cleanup_on_exit() -> None:

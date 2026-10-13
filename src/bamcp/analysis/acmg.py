@@ -13,6 +13,7 @@ Research-grade only. Not a clinical determination.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -34,6 +35,22 @@ logger = logging.getLogger(__name__)
 BA1_AF_THRESHOLD = 0.05  # standalone benign
 BS1_AF_THRESHOLD = 0.01  # too common for a rare disorder
 PM2_AF_THRESHOLD = 0.0001  # absent / ultra-rare
+# Below this allele number (called alleles) a gnomAD site is too sparsely called for its
+# low AF to read as rarity: a "rare" frequency there may just be missing data.
+PM2_MIN_ALLELE_NUMBER = 20_000
+
+# ClinGen Sequence Variant Interpretation WG (Biesecker & Harrison, Genet Med 2018)
+# recommends AGAINST using PP5/BP6: the assertion's underlying evidence should be
+# evaluated directly instead of counting another lab's conclusion.
+_PP5_BP6_SVI_NOTE = (
+    "ClinGen SVI (2018) recommends NOT applying PP5/BP6; evaluate the evidence behind "
+    "any assertion directly instead of counting the assertion itself."
+)
+
+_NOT_QUERIED = {
+    "unavailable": "UNAVAILABLE (the lookup failed)",
+    "disabled": "DISABLED on this server (the lookup was never made)",
+}
 
 CLASSIFICATION_OPTIONS = [
     "Pathogenic",
@@ -44,18 +61,43 @@ CLASSIFICATION_OPTIONS = [
 ]
 
 
+def _pm2_quality_caveat(pop: dict[str, Any]) -> str | None:
+    """Why this gnomAD record can't support PM2 on low AF, or None if it can.
+
+    Tolerant of the client not surfacing ``filters``/``an``: missing fields add no caveat.
+    """
+    filters = pop.get("filters") or []
+    an = pop.get("an")
+    reasons = []
+    if filters:
+        reasons.append(f"the site FAILED gnomAD QC filters {list(filters)}")
+    if isinstance(an, int | float) and an < PM2_MIN_ALLELE_NUMBER:
+        reasons.append(f"allele number is low (AN={an} < {PM2_MIN_ALLELE_NUMBER})")
+    if pop.get("frequency_reliable") is False:
+        why = "; ".join(pop.get("warnings") or []) or "gnomAD flagged the frequency"
+        reasons.append(f"the frequency is not reliable ({why})")
+    if not reasons:
+        return None
+    return (
+        " and ".join(reasons) + ", so a low AF here is NOT evidence of rarity. Do NOT "
+        "apply PM2 from this record; check coverage/another dataset first."
+    )
+
+
 def _frequency_criteria(pop: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Population-frequency criteria (PM2/BS1/BA1), with the observed AF attached."""
-    if pop is not None and pop.get("status") == "unavailable":
-        # The gnomAD lookup ERRORED — absence is unknown. Emitting PM2 "absence supports
-        # rarity" here would turn a network blip into pathogenic-leaning evidence, the exact
-        # circular trap this guards against.
+    status = pop.get("status") if pop is not None else None
+    if status in _NOT_QUERIED:
+        # The gnomAD lookup ERRORED or was never made — absence is unknown. Emitting PM2
+        # "absence supports rarity" here would turn a network blip (or a config switch)
+        # into pathogenic-leaning evidence, the exact circular trap this guards against.
         return [
             {
                 "code": "PM2_supporting",
                 "description": "Absent from / extremely rare in population databases.",
-                "evaluate_with": "gnomAD is UNAVAILABLE (the lookup failed), NOT confirmed "
-                "absent. Do NOT apply PM2 on absence — retry the lookup before using this line.",
+                "evaluate_with": f"gnomAD is {_NOT_QUERIED[status]}, NOT confirmed "
+                "absent. Do NOT apply PM2 on absence — obtain population data before "
+                "using this line.",
             }
         ]
     if not pop:
@@ -69,6 +111,13 @@ def _frequency_criteria(pop: dict[str, Any] | None) -> list[dict[str, Any]]:
         ]
     global_af = pop.get("global_af")
     max_af = pop.get("max_pop_af")
+    pm2_text = (
+        f"global_af={global_af}. Applies only when AF is below "
+        f"~{PM2_AF_THRESHOLD}; do NOT apply if AF is common."
+    )
+    caveat = _pm2_quality_caveat(pop)
+    if caveat:
+        pm2_text = f"global_af={global_af}, but {caveat}"
     return [
         {
             "code": "BA1",
@@ -85,43 +134,51 @@ def _frequency_criteria(pop: dict[str, Any] | None) -> list[dict[str, Any]]:
         {
             "code": "PM2_supporting",
             "description": "Absent or at extremely low frequency in controls.",
-            "evaluate_with": f"global_af={global_af}. Applies only when AF is below "
-            f"~{PM2_AF_THRESHOLD}; do NOT apply if AF is common.",
+            "evaluate_with": pm2_text,
         },
     ]
 
 
 def _clinical_criteria(clinvar: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """ClinVar-derived criteria (PS1/PP5/BP6), gated on review quality."""
-    if clinvar is not None and clinvar.get("status") == "unavailable":
-        # Lookup ERRORED — not an authoritative "no assertion". Don't let a failed fetch
-        # read as benign/absent evidence.
+    """ClinVar-derived criteria (PP5/BP6), gated on review quality.
+
+    Labelled PP5/BP6 — "reputable source" assertions. (PS1 is a different criterion: the
+    same amino-acid change as an established pathogenic variant, which BAMCP does not
+    evaluate.) Every branch carries the ClinGen SVI recommendation against PP5/BP6.
+    """
+    status = clinvar.get("status") if clinvar is not None else None
+    description = "Reputable source reports the variant as pathogenic / benign."
+    if status in _NOT_QUERIED:
+        # Lookup ERRORED or was never made — not an authoritative "no assertion". Don't
+        # let a failed/skipped fetch read as benign/absent evidence.
         return [
             {
-                "code": "PS1/PP5",
-                "description": "Established pathogenic assertion for this variant.",
-                "evaluate_with": "ClinVar is UNAVAILABLE (the lookup failed) — this evidence "
-                "line could not be retrieved. Retry before use; do not infer anything from it.",
+                "code": "PP5/BP6",
+                "description": description,
+                "evaluate_with": f"ClinVar is {_NOT_QUERIED[status]} — this evidence line "
+                "could not be retrieved. Do not infer anything from it. " + _PP5_BP6_SVI_NOTE,
             }
         ]
     if not clinvar:
         return [
             {
-                "code": "PS1/PP5",
-                "description": "Established pathogenic assertion for this variant.",
+                "code": "PP5/BP6",
+                "description": description,
                 "evaluate_with": "No ClinVar record was found for this variant (genuinely not "
-                "in ClinVar). Do not invent a ClinVar classification.",
+                "in ClinVar). Do not invent a ClinVar classification. " + _PP5_BP6_SVI_NOTE,
             }
         ]
-    sig = clinvar.get("clinical_significance", "")
+    # The client returns None for a record with no germline classification; never let
+    # that render as a significance (or be read as an implied VUS).
+    sig = clinvar.get("clinical_significance") or "no germline classification"
     stars = clinvar.get("stars", 0)
     return [
         {
             "code": "PP5/BP6",
-            "description": "Reputable source reports the variant as pathogenic / benign.",
+            "description": description,
             "evaluate_with": f"ClinVar significance={sig!r}, review stars={stars}. Weight by "
             "review status: 0-1 star assertions are weak; >=2 stars are stronger. State the "
-            "star level in your reasoning.",
+            "star level in your reasoning. " + _PP5_BP6_SVI_NOTE,
         }
     ]
 
@@ -136,8 +193,12 @@ def _quality_assessment(observation: dict[str, Any]) -> dict[str, Any]:
         "checks": [
             {
                 "check": "detected",
-                "note": "Was the variant actually observed in the reads?",
+                "note": "Was the variant actually observed in the reads? null = the BAM "
+                "read FAILED (unknown, not absent); false = no call under applied_filters.",
                 "value": observation.get("detected"),
+                "status": observation.get("status"),
+                "reason": observation.get("reason"),
+                "applied_filters": observation.get("applied_filters"),
             },
             {
                 "check": "depth",
@@ -151,10 +212,12 @@ def _quality_assessment(observation: dict[str, Any]) -> dict[str, Any]:
             },
             {
                 "check": "strand_balance",
+                "note": "null counts = read-level evidence not computed (unknown, not balanced).",
                 "value": {
                     "forward": observation.get("strand_forward"),
                     "reverse": observation.get("strand_reverse"),
                 },
+                "read_evidence_computed": observation.get("read_evidence_computed"),
             },
             {
                 "check": "artifact_likelihood",
@@ -230,21 +293,42 @@ def _format_classify_text(evidence: dict[str, Any], scaffold: dict[str, Any]) ->
         "",
         "OBSERVED (from the BAM):",
     ]
-    if obs.get("detected"):
+    status = obs.get("status")
+    filters = obs.get("applied_filters")
+    filters_text = ", ".join(f"{k}={val}" for k, val in filters.items()) if filters else "unknown"
+    if status == "unavailable":
+        lines.append(
+            f"  UNAVAILABLE — the BAM read failed ({obs.get('reason')}). Nothing is known "
+            "about the reads; this is NOT evidence the variant is absent."
+        )
+    elif obs.get("detected"):
         lines.append(
             f"  depth={obs.get('depth')} vaf={obs.get('vaf')} "
             f"confidence={obs.get('confidence')} artifact={obs.get('artifact_likelihood')}"
         )
+        if obs.get("read_evidence_computed") is False:
+            lines.append(
+                "  Read-level evidence (strand/quality/position) NOT COMPUTED — treat "
+                "call quality as unknown."
+            )
     else:
-        lines.append("  Variant NOT observed in the reads at this position.")
+        lines.append(
+            f"  No variant call at this position under the applied filters ({filters_text})."
+        )
+        if obs.get("alt_reads_seen"):
+            lines.append(
+                f"  {obs['alt_reads_seen']} alt-supporting read(s) ARE present but below "
+                "the calling thresholds — this is not a reference call."
+            )
 
     lines.append("")
     lines.append("CLINVAR:")
-    if cln and cln.get("status") == "unavailable":
-        lines.append("  UNAVAILABLE — lookup failed (not a confirmed absence).")
+    if cln and cln.get("status") in _NOT_QUERIED:
+        lines.append(f"  {_NOT_QUERIED[cln['status']]} — not a confirmed absence.")
     elif cln:
         lines.append(
-            f"  {cln.get('clinical_significance')} ({cln.get('stars')}-star; "
+            f"  {cln.get('clinical_significance') or 'no germline classification'} "
+            f"({cln.get('stars')}-star; "
             f"{cln.get('review_status')})"
         )
     else:
@@ -252,10 +336,15 @@ def _format_classify_text(evidence: dict[str, Any], scaffold: dict[str, Any]) ->
 
     lines.append("")
     lines.append("GNOMAD:")
-    if pop and pop.get("status") == "unavailable":
-        lines.append("  UNAVAILABLE — lookup failed (not confirmed absent; do not infer rarity).")
+    if pop and pop.get("status") in _NOT_QUERIED:
+        lines.append(
+            f"  {_NOT_QUERIED[pop['status']]} — not confirmed absent; do not infer rarity."
+        )
     elif pop:
         lines.append(f"  global_af={pop.get('global_af')} max_pop_af={pop.get('max_pop_af')}")
+        caveat = _pm2_quality_caveat(pop)
+        if caveat:
+            lines.append(f"  CAUTION: {caveat}")
     else:
         lines.append("  No gnomAD record found.")
 
@@ -283,7 +372,7 @@ async def handle_classify_variant(args: dict[str, Any], config: BAMCPConfig) -> 
     from ..core.validation import validate_path, validate_variant_input
 
     file_path = args["file_path"]
-    validate_path(file_path, config)
+    await asyncio.to_thread(validate_path, file_path, config)
     chrom = args["chrom"]
     pos = args["pos"]
     ref = args["ref"]

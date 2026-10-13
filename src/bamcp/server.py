@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
@@ -12,9 +14,9 @@ from starlette.responses import JSONResponse
 from .analysis.acmg import handle_classify_variant
 from .analysis.curation import handle_get_variant_curation_summary
 from .config import BAMCPConfig
+from .core.errors import sanitize_tool_exception
 from .core.tools import (
-    close_external_clients,
-    get_cache,
+    handle_cleanup_cache,
     handle_get_coverage,
     handle_get_region_summary,
     handle_get_variants,
@@ -27,9 +29,30 @@ from .core.tools import (
     handle_visualize_region,
 )
 from .resources import get_viewer_html
+from .tool_specs import REGION_FORMAT_NOTE
 
 _VIEWER_URI = "ui://bamcp/viewer"
 _VIEWER_META: dict = {"ui": {"resourceUri": _VIEWER_URI}}
+
+_Handler = Callable[[dict[str, Any], BAMCPConfig], Awaitable[dict]]
+
+
+def _args(**kwargs: Any) -> dict[str, Any]:
+    """Tool arguments with unset optionals dropped, so handlers apply their own defaults."""
+    return {k: v for k, v in kwargs.items() if v is not None}
+
+
+def _text(result: dict) -> str:
+    return str(result["content"][0]["text"])
+
+
+def _viewer_result(result: dict) -> CallToolResult:
+    """Text summary for the LLM + the viewer payload as structuredContent."""
+    payload = result.get("_meta", {}).get("ui/init", {})
+    return CallToolResult(
+        content=[TextContent(type="text", text=_text(result))],
+        structuredContent=payload or None,
+    )
 
 
 def create_server(config: BAMCPConfig | None = None) -> FastMCP:
@@ -65,14 +88,25 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     mcp = FastMCP(**kwargs)
 
+    async def _run(tool: str, handler: _Handler, args: dict[str, Any]) -> dict:
+        """Run a handler under the one error envelope: any failure surfaces as an MCP error
+        result (isError=true) with a sanitized message — never raw pysam/OS text that could
+        carry operator paths (see core/errors.py)."""
+        try:
+            return await handler(args, config)
+        except Exception as e:  # noqa: BLE001 — every failure goes through the sanitizer
+            raise sanitize_tool_exception(e, tool, config) from e
+
     # -- Tools ---------------------------------------------------------------
-    # Thin wrappers delegate to the existing handlers in tools.py.
-    # FastMCP derives the JSON-Schema from the function signature.
+    # Thin wrappers delegate to the handlers in core/tools.py (and analysis/*) through _run.
+    # FastMCP derives each JSON-Schema from the function signature; tool_specs.py mirrors those
+    # for the eval harness, and a parity test keeps the two in lockstep.
 
     @mcp.tool(
         description=(
             "Detect and return candidate variants in a genomic region. "
-            "variant_source: 'auto' (BAMCP candidates, VCF overlaid if given), "
+            + REGION_FORMAT_NOTE
+            + " variant_source: 'auto' (BAMCP candidates, VCF overlaid if given), "
             "'vcf' (the VCF is authoritative — BAMCP attaches read-level evidence at "
             "each site; requires vcf_path), or 'bamcp' (BAMCP candidates only)."
         )
@@ -86,29 +120,27 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         min_vaf: float | None = None,
         min_depth: int | None = None,
     ) -> str:
-        args: dict = {"file_path": file_path, "region": region, "variant_source": variant_source}
-        if reference is not None:
-            args["reference"] = reference
-        if vcf_path is not None:
-            args["vcf_path"] = vcf_path
-        if min_vaf is not None:
-            args["min_vaf"] = min_vaf
-        if min_depth is not None:
-            args["min_depth"] = min_depth
-        result = await handle_get_variants(args, config)
-        return str(result["content"][0]["text"])
+        args = _args(
+            file_path=file_path,
+            region=region,
+            reference=reference,
+            vcf_path=vcf_path,
+            variant_source=variant_source,
+            min_vaf=min_vaf,
+            min_depth=min_depth,
+        )
+        return _text(await _run("get_variants", handle_get_variants, args))
 
-    @mcp.tool(description="Calculate depth of coverage statistics for a region")
+    @mcp.tool(
+        description="Calculate depth of coverage statistics for a region. " + REGION_FORMAT_NOTE
+    )
     async def get_coverage(
         file_path: str,
         region: str,
         reference: str | None = None,
     ) -> str:
-        args: dict = {"file_path": file_path, "region": region}
-        if reference is not None:
-            args["reference"] = reference
-        result = await handle_get_coverage(args, config)
-        return str(result["content"][0]["text"])
+        args = _args(file_path=file_path, region=region, reference=reference)
+        return _text(await _run("get_coverage", handle_get_coverage, args))
 
     @mcp.tool(
         description=(
@@ -121,14 +153,15 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         file_path: str,
         reference: str | None = None,
     ) -> str:
-        args: dict = {"file_path": file_path}
-        if reference is not None:
-            args["reference"] = reference
-        result = await handle_list_contigs(args, config)
-        return str(result["content"][0]["text"])
+        args = _args(file_path=file_path, reference=reference)
+        return _text(await _run("list_contigs", handle_list_contigs, args))
 
     @mcp.tool(
-        description="Jump to a specific genomic position and view surrounding reads",
+        description=(
+            "Jump to a specific genomic position and view surrounding reads. "
+            "position is 1-based (VCF/samtools convention). If contig is omitted, the "
+            "BAM's first contig is used."
+        ),
         meta=_VIEWER_META,
     )
     async def jump_to(
@@ -140,30 +173,24 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         vcf_path: str | None = None,
         variant_source: str = "auto",
     ) -> CallToolResult:
-        args: dict = {
-            "file_path": file_path,
-            "position": position,
-            "variant_source": variant_source,
-        }
-        if contig is not None:
-            args["contig"] = contig
-        if window is not None:
-            args["window"] = window
-        if reference is not None:
-            args["reference"] = reference
-        if vcf_path is not None:
-            args["vcf_path"] = vcf_path
-        result = await handle_jump_to(args, config)
-        payload = result.get("_meta", {}).get("ui/init", {})
-        return CallToolResult(
-            content=[TextContent(type="text", text=result["content"][0]["text"])],
-            structuredContent=payload or None,
+        args = _args(
+            file_path=file_path,
+            position=position,
+            contig=contig,
+            window=window,
+            reference=reference,
+            vcf_path=vcf_path,
+            variant_source=variant_source,
         )
+        return _viewer_result(await _run("jump_to", handle_jump_to, args))
 
     # -- Phase 1: MCP Apps Tools --------------------------------------------
 
     @mcp.tool(
-        description="Visualize aligned reads in a genomic region with interactive MCP Apps viewer",
+        description=(
+            "Visualize aligned reads in a genomic region with interactive MCP Apps viewer. "
+            + REGION_FORMAT_NOTE
+        ),
         meta=_VIEWER_META,
     )
     async def visualize_region(
@@ -173,22 +200,19 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         vcf_path: str | None = None,
         variant_source: str = "auto",
     ) -> CallToolResult:
-        args: dict = {"file_path": file_path, "region": region, "variant_source": variant_source}
-        if reference is not None:
-            args["reference"] = reference
-        if vcf_path is not None:
-            args["vcf_path"] = vcf_path
-        result = await handle_visualize_region(args, config)
-        payload = result.get("_meta", {}).get("ui/init", {})
-        return CallToolResult(
-            content=[TextContent(type="text", text=result["content"][0]["text"])],
-            structuredContent=payload or None,
+        args = _args(
+            file_path=file_path,
+            region=region,
+            reference=reference,
+            vcf_path=vcf_path,
+            variant_source=variant_source,
         )
+        return _viewer_result(await _run("visualize_region", handle_visualize_region, args))
 
     @mcp.tool(
         description=(
             "Get a text summary of a genomic region "
-            "(read count, coverage, candidate variants) for LLM reasoning"
+            "(read count, coverage, candidate variants) for LLM reasoning. " + REGION_FORMAT_NOTE
         ),
     )
     async def get_region_summary(
@@ -198,20 +222,23 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         vcf_path: str | None = None,
         variant_source: str = "auto",
     ) -> str:
-        args: dict = {"file_path": file_path, "region": region, "variant_source": variant_source}
-        if reference is not None:
-            args["reference"] = reference
-        if vcf_path is not None:
-            args["vcf_path"] = vcf_path
-        result = await handle_get_region_summary(args, config)
-        return str(result["content"][0]["text"])
+        args = _args(
+            file_path=file_path,
+            region=region,
+            reference=reference,
+            vcf_path=vcf_path,
+            variant_source=variant_source,
+        )
+        return _text(await _run("get_region_summary", handle_get_region_summary, args))
 
     # -- Phase 2: External Database Tools ------------------------------------
 
     @mcp.tool(
         description=(
             "Look up a variant in ClinVar for clinical significance, review status, "
-            "and associated conditions. Research-grade information, not for clinical use."
+            "and associated conditions. Positions are 1-based in `build` (GRCh37/hg19 or "
+            "GRCh38/hg38; default: server build) — pass the BAM's build from list_contigs. "
+            "Research-grade information, not for clinical use."
         ),
     )
     async def lookup_clinvar(
@@ -219,16 +246,16 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         pos: int,
         ref: str,
         alt: str,
+        build: str | None = None,
     ) -> str:
-        result = await handle_lookup_clinvar(
-            {"chrom": chrom, "pos": pos, "ref": ref, "alt": alt},
-            config,
-        )
-        return str(result["content"][0]["text"])
+        args = _args(chrom=chrom, pos=pos, ref=ref, alt=alt, build=build)
+        return _text(await _run("lookup_clinvar", handle_lookup_clinvar, args))
 
     @mcp.tool(
         description=(
-            "Look up a variant in gnomAD for population allele frequency data. "
+            "Look up a variant in gnomAD for population allele frequency data. Positions are "
+            "1-based in `build` (GRCh37 queries gnomAD v2.1, GRCh38 queries v4; default: server "
+            "build) — pass the BAM's build from list_contigs. "
             "Research-grade information, not for clinical use."
         ),
     )
@@ -237,12 +264,10 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         pos: int,
         ref: str,
         alt: str,
+        build: str | None = None,
     ) -> str:
-        result = await handle_lookup_gnomad(
-            {"chrom": chrom, "pos": pos, "ref": ref, "alt": alt},
-            config,
-        )
-        return str(result["content"][0]["text"])
+        args = _args(chrom=chrom, pos=pos, ref=ref, alt=alt, build=build)
+        return _text(await _run("lookup_gnomad", handle_lookup_gnomad, args))
 
     # -- Phase 3: Curation Tools ---------------------------------------------
 
@@ -250,7 +275,8 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         description=(
             "Get a detailed curation summary for a specific variant with artifact risk "
             "assessment, quality metrics, and recommendations for clinical interpretation. "
-            "Use this for in-depth variant review by genetic curators."
+            "Use this for in-depth variant review by genetic curators. Set format='rubric' "
+            "for machine-scorable JSON; include_clinical=true adds ClinVar/gnomAD context."
         ),
     )
     async def get_variant_curation_summary(
@@ -262,20 +288,22 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         window: int = 50,
         reference: str | None = None,
         format: str = "text",
+        include_clinical: bool = False,
     ) -> str:
-        args: dict = {
-            "file_path": file_path,
-            "chrom": chrom,
-            "pos": pos,
-            "ref": ref,
-            "alt": alt,
-            "window": window,
-            "format": format,
-        }
-        if reference is not None:
-            args["reference"] = reference
-        result = await handle_get_variant_curation_summary(args, config)
-        return str(result["content"][0]["text"])
+        args = _args(
+            file_path=file_path,
+            chrom=chrom,
+            pos=pos,
+            ref=ref,
+            alt=alt,
+            window=window,
+            reference=reference,
+            format=format,
+            include_clinical=include_clinical,
+        )
+        return _text(
+            await _run("get_variant_curation_summary", handle_get_variant_curation_summary, args)
+        )
 
     @mcp.tool(
         description=(
@@ -296,21 +324,19 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         window: int = 50,
         reference: str | None = None,
     ) -> CallToolResult:
-        args: dict = {
-            "file_path": file_path,
-            "chrom": chrom,
-            "pos": pos,
-            "ref": ref,
-            "alt": alt,
-            "window": window,
-        }
-        if gene is not None:
-            args["gene"] = gene
-        if reference is not None:
-            args["reference"] = reference
-        result = await handle_classify_variant(args, config)
+        args = _args(
+            file_path=file_path,
+            chrom=chrom,
+            pos=pos,
+            ref=ref,
+            alt=alt,
+            gene=gene,
+            window=window,
+            reference=reference,
+        )
+        result = await _run("classify_variant", handle_classify_variant, args)
         return CallToolResult(
-            content=[TextContent(type="text", text=result["content"][0]["text"])],
+            content=[TextContent(type="text", text=_text(result))],
             structuredContent=result.get("structuredContent"),
         )
 
@@ -320,7 +346,8 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             "Coordinates are build-specific: pass the BAM's file_path so the build is "
             "auto-detected and the coordinates line up in that BAM (a GRCh38 locus in a GRCh37 "
             "BAM is ~0.5-2 Mb off, silently). Optionally set build (GRCh37/GRCh38) to override. "
-            "The response states the coordinates' genome_build and warns on any mismatch."
+            "The response states the coordinates' genome_build and warns on any mismatch. "
+            "The returned region is 1-based inclusive, ready to pass to visualize_region."
         ),
     )
     async def search_gene(
@@ -328,13 +355,8 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         file_path: str | None = None,
         build: str | None = None,
     ) -> str:
-        args: dict = {"symbol": symbol}
-        if file_path is not None:
-            args["file_path"] = file_path
-        if build is not None:
-            args["build"] = build
-        result = await handle_search_gene(args, config)
-        return str(result["content"][0]["text"])
+        args = _args(symbol=symbol, file_path=file_path, build=build)
+        return _text(await _run("search_gene", handle_search_gene, args))
 
     # -- Scanning Tools -------------------------------------------------------
 
@@ -342,42 +364,36 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         description=(
             "Scan an entire contig for candidate variants using fast coverage-based detection. "
             "Requires a reference genome. Returns up to 500 candidate variants ranked by VAF. "
+            "If contig is omitted, the BAM's first contig is scanned. "
             "Use list_contigs first to detect genome build and get a reference URL."
         ),
     )
     async def scan_variants(
         file_path: str,
-        contig: str = "chr1",
+        contig: str | None = None,
         reference: str | None = None,
         min_vaf: float | None = None,
         min_depth: int | None = None,
     ) -> str:
-        args: dict = {"file_path": file_path, "contig": contig}
-        if reference is not None:
-            args["reference"] = reference
-        if min_vaf is not None:
-            args["min_vaf"] = min_vaf
-        if min_depth is not None:
-            args["min_depth"] = min_depth
-        result = await handle_scan_variants(args, config)
-        return str(result["content"][0]["text"])
+        args = _args(
+            file_path=file_path,
+            contig=contig,
+            reference=reference,
+            min_vaf=min_vaf,
+            min_depth=min_depth,
+        )
+        return _text(await _run("scan_variants", handle_scan_variants, args))
 
     # -- Cache Management Tool -----------------------------------------------
 
-    @mcp.tool(description="Clean up this session's BAM index cache files")
+    @mcp.tool(
+        description=(
+            "Clear the server's downloaded BAM index files and region cache (single-client "
+            "stdio servers only; shared HTTP servers expire their cache by TTL)"
+        )
+    )
     async def cleanup_cache() -> str:
-        """Remove cached index files downloaded during this session.
-
-        Each session stores its cache files in an isolated subdirectory,
-        so this only affects the current session's files.
-
-        Returns:
-            Summary of cleanup action.
-        """
-        cache = get_cache(config)
-        removed = cache.cleanup_session()
-        await close_external_clients(config)
-        return f"Removed {removed} cached index files from session {cache.session_id}"
+        return _text(await _run("cleanup_cache", handle_cleanup_cache, {}))
 
     # -- Resources -----------------------------------------------------------
 

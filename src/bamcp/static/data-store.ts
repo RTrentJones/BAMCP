@@ -91,12 +91,12 @@ export class DataStore {
         }
 
         // Merge variants (newer data wins for same key)
-        for (const v of data.variants) {
+        for (const v of Array.isArray(data.variants) ? data.variants : []) {
             this.variants.set(variantKey(v), v);
         }
 
         // Merge variant evidence (keyed by "position:ref>alt")
-        if (data.variant_evidence) {
+        if (data.variant_evidence && typeof data.variant_evidence === 'object') {
             for (const [key, ev] of Object.entries(data.variant_evidence)) {
                 this.evidence.set(key, ev);
             }

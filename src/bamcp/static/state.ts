@@ -7,19 +7,28 @@ import { ColumnarReads, Read, RegionData, Variant, ViewerSettings } from "./type
  * that pass the object form keep working.
  */
 export function decodeReads(raw: ColumnarReads | Read[] | null | undefined): Read[] {
-    if (!raw) return [];
-    if (Array.isArray(raw)) return raw;
+    if (!raw || typeof raw !== 'object') return [];
+    if (Array.isArray(raw)) {
+        // Object-form reads: tolerate a missing/odd mismatches field (renderer iterates it).
+        const ok = raw.every(r => r && Array.isArray(r.mismatches));
+        return ok ? raw : raw.filter(r => r && typeof r === 'object').map(r => (
+            Array.isArray(r.mismatches) ? r : { ...r, mismatches: [] }
+        ));
+    }
     const c = raw;
-    const reads: Read[] = new Array(c.count);
-    for (let i = 0; i < c.count; i++) {
+    const count = Number.isInteger(c.count) && c.count >= 0
+        ? c.count
+        : (Array.isArray(c.position) ? c.position.length : 0);
+    const reads: Read[] = new Array(count);
+    for (let i = 0; i < count; i++) {
         const read: Read = {
-            name: c.name[i],
-            cigar: c.cigar[i],
-            position: c.position[i],
-            end_position: c.end_position[i],
-            mapping_quality: c.mapping_quality[i],
-            is_reverse: c.is_reverse[i],
-            mismatches: c.mismatches[i] ?? [],
+            name: c.name?.[i] ?? '',
+            cigar: c.cigar?.[i] ?? '',
+            position: c.position?.[i] ?? 0,
+            end_position: c.end_position?.[i] ?? 0,
+            mapping_quality: c.mapping_quality?.[i] ?? 0,
+            is_reverse: c.is_reverse?.[i] ?? false,
+            mismatches: Array.isArray(c.mismatches?.[i]) ? c.mismatches[i] : [],
         };
         const seq = c.sequence?.[i];
         if (seq != null) read.sequence = seq;
@@ -40,11 +49,32 @@ export function decodeReads(raw: ColumnarReads | Read[] | null | undefined): Rea
     return reads;
 }
 
-/** Return a RegionData whose reads are decoded to Read[] (columnar or already-array). */
+/**
+ * Return a RegionData whose reads are decoded to Read[] (columnar or already-array)
+ * and whose array fields are guaranteed present. A payload missing `variants`,
+ * `coverage` or `reads` (an older/partial server, a hand-built hydrate) must render
+ * as empty rather than throw `t.variants is not iterable` deep in the store.
+ */
 export function decodeRegionData(data: RegionData): RegionData {
-    const raw = data.reads as unknown as ColumnarReads | Read[];
+    const src = (data && typeof data === 'object' ? data : {}) as Partial<RegionData>;
+    const raw = src.reads as unknown as ColumnarReads | Read[];
     const reads = decodeReads(raw);
-    return reads === raw ? data : { ...data, reads };
+    const coverage = Array.isArray(src.coverage) ? src.coverage : [];
+    const variants = Array.isArray(src.variants)
+        ? src.variants.filter(v => v && typeof v === 'object')
+        : [];
+    const start = Number.isFinite(src.start) ? Number(src.start) : 0;
+    const end = Number.isFinite(src.end) && Number(src.end) > start
+        ? Number(src.end)
+        : start + Math.max(1, coverage.length);
+    const contig = typeof src.contig === 'string' ? src.contig : '';
+    if (
+        reads === raw && coverage === src.coverage && variants.length === src.variants?.length &&
+        start === src.start && end === src.end && contig === src.contig
+    ) {
+        return data;
+    }
+    return { ...(src as RegionData), contig, start, end, reads, coverage, variants };
 }
 
 // Default viewer settings

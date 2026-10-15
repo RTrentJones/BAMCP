@@ -75,6 +75,13 @@ export const DV_PALETTE = {
     refDiffers: '#06b6d4',       // cyan where read mismatches reference
 };
 
+// CIGAR indel marks on reads (mirrored by the legend's --color-insertion/--color-deletion).
+export const INDEL_COLORS = {
+    insertion: '#9333ea',  // purple I-beam at the junction
+    deletion: '#1f2937',   // dark bar across the deleted span
+    skip: '#9ca3af',       // thin grey line across an N (intron) skip
+};
+
 // Insert size thresholds for color coding
 export const INSERT_SIZE_THRESHOLDS = {
     tooShort: 100,

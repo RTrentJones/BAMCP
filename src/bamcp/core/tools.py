@@ -1618,7 +1618,7 @@ def site_filter_check(
     min_vaf = config.min_vaf if min_vaf is None else min_vaf
     min_depth = config.min_depth if min_depth is None else min_depth
     min_alt_count = config.min_alt_count if min_alt_count is None else min_alt_count
-    at_filters = {
+    at_filters: dict[str, Any] = {
         "alt_count": int(variant.get("alt_count") or 0),
         "depth": int(variant.get("depth") or 0),
         "vaf": float(variant.get("vaf") or 0.0),

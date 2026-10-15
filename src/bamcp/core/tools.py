@@ -1060,16 +1060,38 @@ async def _fetch_region_with_timeout(
             vcf_primary=vcf_primary,
         )
     except asyncio.TimeoutError as e:
-        detail = (
-            "; the remote reference FASTA's index is fetched on first use and is often "
-            "the slow part — retrying usually succeeds once it is warm"
-            if reference and "://" in reference
-            else ""
-        )
         raise TimeoutError(
             f"Timed out after {BAM_PARSE_TIMEOUT_SECONDS:g}s reading {region} "
-            f"(mode={mode}){detail}."
+            f"(mode={mode}){_timeout_hint(region, reference)}."
         ) from e
+
+
+# Above this span a parse timeout is about the region's size, not a cold input.
+TIMEOUT_LARGE_REGION_BP = 2_000
+
+
+def _timeout_hint(region: str, reference: str | None) -> str:
+    """What to do about a parse timeout: shrink a large window, or retry once a cold input warms.
+
+    A gene-scale window (tens of kb of reads) is slow however warm the inputs are, so the
+    cold-reference hint would send the caller into a pointless retry; it is given only when the
+    remote reference really has not been opened yet.
+    """
+    try:
+        _, start, end = parse_region(region)
+    except ValueError:
+        start = end = 0
+    if end - start > TIMEOUT_LARGE_REGION_BP:
+        return (
+            f"; the region spans {end - start:,} bp — request a smaller window (≤200 bp for "
+            "visualize_region/get_variants), or use get_coverage for a gene-scale region"
+        )
+    if _is_remote(reference) and reference not in _warm_inputs:
+        return (
+            "; the remote reference FASTA's index is fetched on first use and is often "
+            "the slow part — retrying usually succeeds once it is warm"
+        )
+    return ""
 
 
 async def _fetch_region_data(
@@ -1542,6 +1564,196 @@ async def _score_candidates(
         "timed_out": timed_out,
     }
     return out, summary
+
+
+# -- Requested-site probe (curation / classify) ----------------------------------------------
+# get_variants answers "what passes the calling filters here?". A curator asking about ONE named
+# site needs the opposite: that site's evidence even when it fails those filters — a low-BQ,
+# one-strand artifact is exactly what min_baseq/min_alt_count hide, so "not found" would be a
+# useless (and misleading) answer for the demo artifact. The probe re-reads only the requested
+# site with min_baseq=0 and no VAF/depth/alt-read floor, and says which filters it fails.
+
+SITE_PROBE_NOTE = (
+    "Evaluated at the requested site with min_baseq=0 and no VAF/depth/alt-read floor so its "
+    "evidence can be judged; a site that fails the applied filters is NOT reported by "
+    "get_variants."
+)
+
+
+def _failed_filters(
+    at_filters: dict[str, Any],
+    *,
+    min_vaf: float,
+    min_depth: int,
+    min_alt_count: int,
+    baseq_removed: int,
+) -> list[str]:
+    """Which calling thresholds the site's filtered counts fail (min_baseq when it dropped alts)."""
+    failed = []
+    if at_filters["vaf"] < min_vaf:
+        failed.append("min_vaf")
+    if at_filters["depth"] < min_depth:
+        failed.append("min_depth")
+    if at_filters["alt_count"] < min_alt_count:
+        failed.append("min_alt_count")
+    if failed and baseq_removed > 0:
+        failed.insert(0, "min_baseq")
+    return failed
+
+
+def site_filter_check(
+    variant: dict[str, Any],
+    config: BAMCPConfig,
+    *,
+    unfiltered: dict[str, Any] | None = None,
+    min_vaf: float | None = None,
+    min_depth: int | None = None,
+    min_alt_count: int | None = None,
+) -> dict[str, Any]:
+    """``passes_filters`` + ``failed_filters`` for a site, from its counts under the filters.
+
+    ``variant`` carries the counts AT the applied filters (alt_count/depth/vaf); ``unfiltered``
+    (from :func:`probe_site`) the min_baseq=0 counts, when the site was probed.
+    """
+    min_vaf = config.min_vaf if min_vaf is None else min_vaf
+    min_depth = config.min_depth if min_depth is None else min_depth
+    min_alt_count = config.min_alt_count if min_alt_count is None else min_alt_count
+    at_filters = {
+        "alt_count": int(variant.get("alt_count") or 0),
+        "depth": int(variant.get("depth") or 0),
+        "vaf": float(variant.get("vaf") or 0.0),
+    }
+    removed = 0
+    if unfiltered is not None:
+        removed = max(0, int(unfiltered["alt_count"]) - at_filters["alt_count"])
+    failed = _failed_filters(
+        at_filters,
+        min_vaf=min_vaf,
+        min_depth=min_depth,
+        min_alt_count=min_alt_count,
+        baseq_removed=removed,
+    )
+    check: dict[str, Any] = {
+        "passes_filters": not failed,
+        "failed_filters": failed,
+        "at_filters": at_filters,
+    }
+    if unfiltered is not None:
+        check["unfiltered"] = unfiltered
+        check["low_baseq_alt_reads_removed"] = removed
+        check["note"] = SITE_PROBE_NOTE
+    return check
+
+
+async def _pileup_site(
+    file_path: str,
+    contig: str,
+    pos0: int,
+    ref: str,
+    alt: str,
+    reference: str | None,
+    config: BAMCPConfig,
+    min_baseq: int,
+) -> dict[str, Any]:
+    """Pileup-annotate one SNV site at ``min_baseq`` (config MAPQ + read exclusions apply)."""
+    site: dict[str, Any] = {
+        "contig": contig,
+        "position": pos0,
+        "ref": ref,
+        "alt": alt,
+        "variant_kind": "snv",
+        "source": "probe",
+    }
+    index_path = await _ensure_cached_index(file_path, config)
+    await asyncio.wait_for(
+        _run_in_parse_pool(
+            annotate_vcf_snv_support,
+            file_path,
+            format_region(contig, pos0, pos0 + 1),
+            reference,
+            [site],
+            config.min_mapq,
+            min_baseq,
+            index_path,
+            sources=("probe",),
+        ),
+        timeout=BAM_PARSE_TIMEOUT_SECONDS,
+    )
+    return site
+
+
+async def probe_site(
+    file_path: str,
+    data: RegionData,
+    pos0: int,
+    ref: str,
+    alt: str,
+    reference: str | None,
+    config: BAMCPConfig,
+) -> dict[str, Any] | None:
+    """Evidence for the requested site even when it fails the calling filters.
+
+    SNVs: two single-site pileups (min_baseq=0 and the configured min_baseq), scored with the
+    same per-site evidence as get_variants (strand, alt base quality, read position, MAPQ).
+    Indels: the window is re-read with no VAF/depth floor and the CIGAR evidence is used.
+    Returns ``{"variant", "evidence", "filter_check"}`` (the variant 0-based, with
+    artifact_risk/confidence), or None when no read supports the allele at all.
+    """
+    from ..analysis.evidence import build_indel_index, compute_indel_evidence
+
+    contig = data.contig
+    if len(ref) == 1 == len(alt):
+        loose = await _pileup_site(file_path, contig, pos0, ref, alt, reference, config, 0)
+        if not loose.get("alt_count"):
+            return None
+        strict = await _pileup_site(
+            file_path, contig, pos0, ref, alt, reference, config, config.min_baseq
+        )
+        enhanced, evidence = _vcf_evidence(loose, data.reference_sequence, data.start)
+        enhanced["source"] = "bamcp"
+        enhanced["evidence_source"] = "pileup"
+        enhanced["read_evidence_computed"] = True
+        evidence["read_evidence_computed"] = True
+        unfiltered = {
+            "alt_count": int(loose["alt_count"]),
+            "depth": int(loose["depth"]),
+            "vaf": float(loose["vaf"]),
+        }
+        check = site_filter_check(strict, config, unfiltered=unfiltered)
+        return {"variant": enhanced, "evidence": evidence, "filter_check": check}
+
+    # Indel: alt-read support isn't base-quality-filtered, so only the VAF/depth floors hide it.
+    loose_data = await _fetch_region_with_timeout(
+        file_path,
+        format_region(contig, data.start, data.end),
+        reference,
+        config,
+        min_vaf=0.0,
+        min_depth=1,
+    )
+    target = next(
+        (
+            v
+            for v in loose_data.variants
+            if v["position"] == pos0 and v["ref"].upper() == ref and v["alt"].upper() == alt
+        ),
+        None,
+    )
+    if target is None:
+        return None
+    evidence = compute_indel_evidence(build_indel_index(loose_data.reads), target)
+    risk = compute_artifact_risk(target, evidence, loose_data.reference_sequence, loose_data.start)
+    variant = {
+        **target,
+        "artifact_risk": risk,
+        "confidence": compute_confidence(target, evidence, risk),
+        "read_evidence_computed": bool(evidence.get("read_evidence_computed", True)),
+    }
+    return {
+        "variant": variant,
+        "evidence": evidence,
+        "filter_check": site_filter_check(target, config),
+    }
 
 
 @telemetry_wrapper("get_variants")

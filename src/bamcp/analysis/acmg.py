@@ -337,6 +337,20 @@ def _format_classify_text(evidence: dict[str, Any], scaffold: dict[str, Any]) ->
                 "  Read-level evidence (strand/quality/position) NOT COMPUTED — treat "
                 "call quality as unknown."
             )
+    elif status == "below_filters":
+        lines.append(
+            "  NOT CALLED under the applied filters (fails "
+            f"{', '.join(obs.get('failed_filters') or [])}); evaluated at the site anyway:"
+        )
+        lines.append(
+            f"  {obs.get('alt_count')}/{obs.get('depth')} alt reads (vaf={obs.get('vaf')}), "
+            f"strand {obs.get('strand_forward')}F/{obs.get('strand_reverse')}R, "
+            f"mean alt base quality {obs.get('mean_quality')}, "
+            f"artifact={obs.get('artifact_likelihood')} "
+            f"(concerns: {', '.join(obs.get('artifact_concerns') or []) or 'none'}), "
+            f"confidence={obs.get('confidence')}"
+        )
+        lines.append(f"  Applied filters: {filters_text}")
     else:
         lines.append(
             f"  No variant call at this position under the applied filters ({filters_text})."

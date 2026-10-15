@@ -350,7 +350,8 @@ async def test_assemble_evidence_failed_read_is_unavailable(offline_cfg, monkeyp
 async def test_assemble_evidence_filtered_variant_echoes_filters(
     comprehensive_ref_fasta_path, comprehensive_bam_path
 ):
-    """A real variant dropped by min_vaf must not read as a reference call."""
+    """A real variant dropped by min_vaf must not read as a reference call: the requested
+    site is evaluated anyway and reported as below_filters with the filter it fails."""
     cfg = BAMCPConfig(
         reference=comprehensive_ref_fasta_path,
         clinvar_enabled=False,
@@ -359,16 +360,19 @@ async def test_assemble_evidence_filtered_variant_echoes_filters(
     )
     ev = await assemble_evidence("chr1", 1051, "A", "T", comprehensive_bam_path, cfg)
     obs = ev["observation"]
-    assert obs["status"] == "not_called"
+    assert obs["status"] == "below_filters"
     assert obs["detected"] is False
+    assert obs["passes_filters"] is False
+    assert obs["failed_filters"] == ["min_vaf"]
     assert obs["applied_filters"]["min_vaf"] == 0.95
     assert obs["alt_reads_seen"] == 8
+    assert obs["alt_count"] == 8 and obs["artifact_likelihood"] is not None
 
     from bamcp.analysis.acmg import _format_classify_text
 
     text = _format_classify_text(ev, build_acmg_scaffold(ev))
     assert "min_vaf=0.95" in text
-    assert "ARE present" in text
+    assert "NOT CALLED under the applied filters (fails min_vaf)" in text
 
 
 @pytest.mark.unit

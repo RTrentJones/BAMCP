@@ -20,6 +20,9 @@ from .core.errors import ToolInputError
 from .core.reference import CONTIG_STYLE_CHR, CONTIG_STYLE_NOCHR, get_public_reference_url
 
 DEMO_PREFIX = "demo:"
+# A locus wider than this is a whole gene: reading every read in it is slow (~1 min on a remote
+# 60x BAM) and its pileup is unreadable, so the tour surveys it with get_coverage instead.
+GENE_SCALE_MIN_BP = 2_000
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,17 @@ class DemoLocus:
     region: str
     label: str
     note: str
+
+    @property
+    def span(self) -> int:
+        """Bases covered by ``region`` (1-based inclusive)."""
+        start, end = self.region.rsplit(":", 1)[1].replace(",", "").split("-")
+        return int(end) - int(start) + 1
+
+    @property
+    def gene_scale(self) -> bool:
+        """Too large for get_variants/visualize_region: survey with get_coverage, then zoom."""
+        return self.span > GENE_SCALE_MIN_BP
 
 
 @dataclass(frozen=True)
@@ -123,7 +137,7 @@ DEMO_DATASETS: dict[str, DemoDataset] = {
                 ),
             ),
             DemoLocus(
-                region="13:32889611-32973805",
+                region="13:32889214-32974405",
                 label="BRCA2 gene (GRCh37)",
                 note=(
                     "Gene-scale region on a nochr GRCh37 BAM: contig is '13', not 'chr13'. "
@@ -200,6 +214,7 @@ __all__ = [
     "CONTIG_STYLE_NOCHR",
     "DEMO_DATASETS",
     "DEMO_PREFIX",
+    "GENE_SCALE_MIN_BP",
     "DemoDataset",
     "DemoLocus",
     "available_aliases",

@@ -25,7 +25,8 @@ SERVER_INSTRUCTIONS = (
     "contig naming ('chr17' vs '17'); pass that build to lookup_clinvar / lookup_gnomad / "
     "search_gene.\n"
     "- Regions and positions are 1-based inclusive (samtools-style: 'chr17:43099914-43099914' "
-    "is one base). Keep visualize_region windows small (≤200 bp) for readable pileups.\n"
+    "is one base). Keep visualize_region/get_variants windows small (≤200 bp); for a whole "
+    "gene use get_coverage, then zoom in.\n"
     "- Every variant response echoes applied_filters: a missing variant may have been filtered "
     "out, not absent. Plain-language term definitions: bamcp://glossary."
 )
@@ -54,7 +55,8 @@ Call `list_contigs` first. It tells you GRCh37 vs GRCh38 and whether contigs are
 
 ## 3. Look
 - `visualize_region` — interactive pileup for a small window (≤200 bp is easiest to read).
-- `get_variants` — candidate variants with their `applied_filters`.
+- `get_variants` — candidate variants with their `applied_filters` (also a small window).
+- `get_coverage` — depth over a whole gene; use it (or `search_gene`) before zooming in.
 - `get_variant_curation_summary` — artifact risk and confidence for one variant.
 - `lookup_clinvar` / `lookup_gnomad` — what others have reported (pass the BAM's build).
 
@@ -109,26 +111,48 @@ def register_demo_surface(mcp: FastMCP) -> None:
     )
     def explore_demo(dataset: str = "demo:HG002") -> str:
         demo = get_demo(dataset) or DEMO_DATASETS["HG002"]
-        loci = "\n".join(f"   - {loc.region} — {loc.label}" for loc in demo.loci)
+        small = "\n".join(
+            f"   - {loc.region} — {loc.label}" for loc in demo.loci if not loc.gene_scale
+        )
+        genes = "\n".join(f"   - {loc.region} — {loc.label}" for loc in demo.loci if loc.gene_scale)
         ref = (
             f" If SNV detection is reported disabled, pass reference='{demo.reference_url}'."
             if demo.reference_url
             else ""
         )
-        return (
+        steps = [
             f"Give me a beginner-friendly tour of the BAMCP demo dataset {demo.alias} "
-            f"({demo.description})\n\n"
+            f"({demo.description})\n",
             f"1. Call list_contigs with file_path='{demo.alias}' and tell me the genome build "
-            "and contig naming in one sentence.\n"
-            f"2. For each curated locus below, call visualize_region (small windows) and "
-            f"get_variants with file_path='{demo.alias}'.{ref}\n{loci}\n"
-            "3. For each variant you find, look it up with lookup_clinvar and lookup_gnomad "
-            f"using build='{demo.build}', and explain in plain language whether the read "
-            "evidence looks real or like an artifact (depth, VAF, strand balance, base "
-            "quality), and what the population and ClinVar data add.\n"
-            "4. Finish with what a curious person can and cannot conclude (see "
+            "and contig naming in one sentence.",
+            "2. For each small curated locus below (each ≤ ~200 bp), call get_variants and "
+            f"visualize_region on exactly that window with file_path='{demo.alias}'.{ref}\n"
+            + small,
+            "3. For each variant you find, call get_variant_curation_summary, then "
+            f"lookup_clinvar and lookup_gnomad using build='{demo.build}', and explain in plain "
+            "language whether the read evidence looks real or like an artifact (depth, VAF, "
+            "strand balance, base quality), and what the population and ClinVar data add."
+            + (
+                " For the artifact locus, call get_variant_curation_summary on the named site "
+                "even if get_variants did not report it — it evaluates that site and says "
+                "which filters it fails."
+                if any("artifact" in loc.label for loc in demo.loci)
+                else ""
+            ),
+        ]
+        if genes:
+            steps.append(
+                "4. Gene-scale loci below are tens of kb: do NOT call get_variants, "
+                "visualize_region or get_region_summary on the whole gene (slow, and the "
+                "pileup is unreadable). Call get_coverage on the gene region (fast) for depth, "
+                "or search_gene with file_path to get its coordinates, then pick a ≤200 bp "
+                "window inside it for any closer look.\n" + genes
+            )
+        steps.append(
+            f"{len(steps)}. Finish with what a curious person can and cannot conclude (see "
             "bamcp://glossary). This is research/education only, not a medical result."
         )
+        return "\n".join(steps)
 
     @mcp.prompt(
         name="check_variant",
@@ -146,8 +170,9 @@ def register_demo_surface(mcp: FastMCP) -> None:
             f"2. Call get_variants for a ~100 bp window around {target} (1-based inclusive) "
             "and visualize_region for the same window. Report applied_filters, and say so if "
             "SNV detection was disabled.\n"
-            "3. If a variant is present, call get_variant_curation_summary for it, then "
-            "lookup_clinvar and lookup_gnomad with the BAM's build.\n"
+            "3. Call get_variant_curation_summary for the variant (it evaluates the named "
+            "site even when get_variants filtered it out, and says which filters it fails), "
+            "then lookup_clinvar and lookup_gnomad with the BAM's build.\n"
             "4. Summarize in plain language: is it likely real or an artifact (and why), "
             "likely heterozygous or homozygous, how common it is, and what ClinVar says with "
             "its star rating. State what cannot be concluded. Research use only."

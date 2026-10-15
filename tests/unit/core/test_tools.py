@@ -2928,6 +2928,38 @@ class TestFetchRegionTimeoutMessage:
 
         assert "retrying" in str(exc_info.value)
 
+    @pytest.mark.unit
+    async def test_large_region_timeout_suggests_a_smaller_window(self, monkeypatch):
+        """A gene-scale timeout is about size: suggest a smaller window, not a warm retry."""
+        import bamcp.core.tools as tools_mod
+
+        async def _boom(*args, **kwargs):
+            raise asyncio.TimeoutError()
+
+        monkeypatch.setattr(tools_mod, "_fetch_region_data", _boom)
+        ref = "https://example.com/ref.fa.gz"
+        with pytest.raises(TimeoutError) as exc_info:
+            await tools_mod._fetch_region_with_timeout(
+                "/x.bam", "chr17:43044295-43125483", ref, BAMCPConfig()
+            )
+        message = str(exc_info.value)
+        assert "smaller window" in message and "81,189 bp" in message
+        assert "retrying" not in message
+
+    @pytest.mark.unit
+    async def test_warm_reference_small_region_gets_no_cold_hint(self, monkeypatch):
+        import bamcp.core.tools as tools_mod
+
+        async def _boom(*args, **kwargs):
+            raise asyncio.TimeoutError()
+
+        ref = "https://example.com/warm.fa.gz"
+        monkeypatch.setattr(tools_mod, "_fetch_region_data", _boom)
+        monkeypatch.setitem(tools_mod._warm_inputs, ref, None)
+        with pytest.raises(TimeoutError) as exc_info:
+            await tools_mod._fetch_region_with_timeout("/x.bam", "chr1:1-100", ref, BAMCPConfig())
+        assert "retrying" not in str(exc_info.value)
+
 
 class TestLookupBuildRouting:
     """lookup_clinvar / lookup_gnomad route by genome build and keep unavailable != not_found."""

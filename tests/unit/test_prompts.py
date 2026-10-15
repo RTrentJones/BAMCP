@@ -86,7 +86,15 @@ async def test_prompts_listed_and_rendered():
         assert DEMO_DATASETS["HG00096"].reference_url in text
 
         default_tour = await client.get_prompt("explore_demo", {})
-        assert "demo:HG002" in default_tour.messages[0].content.text
+        text = default_tour.messages[0].content.text
+        assert "demo:HG002" in text
+        # Gene-scale loci are surveyed with get_coverage, never read whole by get_variants /
+        # visualize_region (81 kb: ~1 min and a timeout); small loci go to the read tools.
+        small, _, genes = text.partition("Gene-scale loci")
+        assert "chr17:43044295-43125483" in genes and "chr17:43044295-43125483" not in small
+        assert "get_coverage" in genes and "do NOT call get_variants" in genes
+        assert "chr17:43099864-43099964" in small
+        assert "even if get_variants did not report it" in text
 
         check = await client.get_prompt(
             "check_variant", {"file_path": "demo:HG002", "region": "chr17:43099914"}

@@ -4,11 +4,39 @@ A living strengths/weaknesses assessment + prioritized focus, refreshed after th
 remediation ([`engineering-review-response.md`](engineering-review-response.md)) and 17 rounds of
 adversarial review. Update the checkboxes and the "state" line as work lands.
 
-**State (`main`, refreshed 2026-07-25):** ~820 Python tests + viewer vitest / ~90% coverage ·
+**State (`main`, refreshed 2026-10-16):** ~1,470 Python tests (94% coverage) + 68 vitest + 154 e2e. Previously (2026-07-25): ~820 Python tests + viewer vitest / ~90% coverage ·
 ~9.6k lines Python · 3.6k lines viewer TS · deployed to prod, verify-gated, healthy. The external
 review scored it **7.5/10** (security + LLM-evals both **4.5**, the two weakest axes). A later
 hands-on **peer review** then caught a class the 17 review rounds missed — a silent genome-build
 mismatch — now closed (see "Biological correctness" below).
+
+## Newcomer usability + visual-eval round (2026-10) — landed
+
+A multi-agent round (PM live newcomer audit → principal-engineer eval design → TPM work packages →
+six parallel implementation packages → QA acceptance against real public BAMs → blocker fixes):
+
+- [x] **Works on a bare BAM URL.** Prod had no reference, so every newcomer saw "SNV detection
+  disabled". The reference is now auto-selected from the BAM's detected build and contig style
+  (`reference_source: auto`), for every tool including curation and classify.
+- [x] **Demo path.** `demo:HG002` / `demo:HG00096` aliases with curated loci, `bamcp://demos`,
+  `bamcp://glossary`, `bamcp://guide` resources, `explore_demo` / `check_variant` /
+  `explain_terms` prompts, README "Try this in 2 minutes".
+- [x] **Signal over noise.** Defaults min_mapq 20, min_baseq 13, min_vaf 0.10, min_alt_count 3;
+  inline per-variant `artifact_risk`, `confidence`, `concerns`, `interpretation`;
+  `low_base_quality` concern; requested-site probe (`filter_check`) so a filtered artifact is
+  still explained rather than "not found".
+- [x] **Fits an LLM context.** `list_contigs` 157 KB → <2 KB; viewer text <1.5 KB (payload stays
+  in structuredContent for the UI); contig-style mapping (chr13 ↔ 13); single-base regions.
+- [x] **Cold-start + long scans.** Separate cold budget, locally cached remote `.fai`/`.gzi`,
+  demo prewarm, deadline-bounded resumable `scan_variants` (`next_region`).
+- [x] **Viewer.** CIGAR-aware drawing (bases were shifted after soft clips/indels; indels were
+  never drawn), strand/MAPQ cues at base zoom, legend, no-reference banner, hidden-reads count.
+- [x] **Eval credibility.** Nightly LLM skip is now loud; model IDs centralized; vision ablation
+  wired (`--vision`); pre-registered visual-vs-text eval
+  ([`eval/visual-preregistration.md`](eval/visual-preregistration.md)) with leak-free
+  synthetic fixtures, leak-lint, deterministic grader, `make eval-visual-dry` CI gate.
+- [ ] **Open:** visual-vs-text pilot results (subagent-run); GRCh37 demo cold latency (~27 s);
+  dependabot python 3.14 / mcp<3 (lockfile + API work); real-data (GIAB) eval tier.
 
 ## Biological correctness (peer-review round) — closed
 

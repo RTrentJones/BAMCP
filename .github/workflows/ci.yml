@@ -100,6 +100,10 @@ jobs:
         run: python tests/create_fixtures.py
       - name: Score ground-truth truth set
         run: make eval-smoke
+      # Visual-vs-text eval dry run: fixtures + stimuli + leak-lint + grader self-tests.
+      # No Chromium in this job, so the PNG (V) conditions are skipped with a message.
+      - name: Visual eval dry run (hermetic)
+        run: make eval-visual-dry
 
   frontend:
     # Static checks + unit tests for the viewer TS — a layer the frontend never had.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,12 @@ def _is_chromium_installed() -> bool:
         from playwright.sync_api import sync_playwright
     except ImportError:
         return False
+    # The renderer honours a preinstalled Chromium (see ViewerRenderer.__aenter__).
+    override = os.environ.get("BAMCP_CHROMIUM_EXECUTABLE") or os.environ.get(
+        "PLAYWRIGHT_CHROMIUM_EXECUTABLE"
+    )
+    if override:
+        return Path(override).exists()
     try:
         with sync_playwright() as p:
             # executable_path raises if the browser isn't installed.

@@ -1,4 +1,4 @@
-.PHONY: verify install test test-network test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval-smoke giab-benchmark eval-acmg eval-matrix eval-matrix-mock eval eval-cached eval-compare eval-dry eval-vision-setup render-viewer render-viewer-all-modes
+.PHONY: verify install test test-network test-e2e test-all lint format typecheck docker-build docker-test clean coverage coverage-strict build-viewer eval-smoke giab-benchmark eval-acmg eval-matrix eval-matrix-mock eval eval-cached eval-compare eval-dry eval-vision-setup eval-visual-dry render-viewer render-viewer-all-modes
 
 # Full local regression loop: every ci.yml gate in one command (see the script).
 verify:
@@ -6,6 +6,7 @@ verify:
 
 build-viewer:
 	cd src/bamcp/static && npm install && npm run build
+	PYTHONPATH=src python scripts/render_viewer.py --record-build-hash
 
 install: build-viewer
 	pip install -e ".[dev]"
@@ -62,6 +63,13 @@ coverage-strict:
 eval-smoke:
 	python -m bamcp.eval.truthset --manifest tests/eval/datasets/synthetic_v1/manifest.yaml
 	python -m bamcp.eval.truthset --manifest tests/eval/datasets/indel_v1/manifest.yaml --min-precision 1.0
+
+# Visual-vs-text eval, hermetic dry run (see docs/eval/visual-preregistration.md):
+# deterministic vt_eval fixtures → every stimulus condition → leak-lint → grader
+# self-tests (oracle = 100%, random ≈ chance, invalid = wrong). Renders the V PNGs when a
+# Chromium is available (PLAYWRIGHT_CHROMIUM_EXECUTABLE honoured), else skips them loudly.
+eval-visual-dry:
+	python -m bamcp.eval.visual dry --out .eval-results/visual-dry
 
 # Real GIAB benchmark (network-gated, not in CI). Builds the slice then scores
 # it at a realistic calling operating point. See tests/eval/datasets/giab/.

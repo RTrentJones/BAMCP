@@ -254,3 +254,17 @@ def test_config_prewarm_env(monkeypatch):
     monkeypatch.setenv("BAMCP_PREWARM", "nope")
     with pytest.raises(ValueError, match="BAMCP_PREWARM"):
         BAMCPConfig.from_env()
+
+
+async def test_prewarm_uses_real_demo_registry(monkeypatch, opened):
+    """Against the real bamcp.demos registry (network stubbed): every demo is warmed."""
+    demos_mod = pytest.importorskip("bamcp.demos")
+    monkeypatch.setattr("bamcp.core.validation.validate_path", lambda *a: None)
+    monkeypatch.setattr("bamcp.core.validation.validate_reference_path", lambda *a: None)
+    sample = demos_mod.DemoDataset(
+        alias="T", file_path=BAM, build="GRCh38", contig_style="chr", reference_url=REF
+    )
+    monkeypatch.setattr(demos_mod, "DEMO_DATASETS", {**demos_mod.DEMO_DATASETS, "T": sample})
+    n = len(demos_mod.DEMO_DATASETS)
+    assert await prewarm.prewarm_demos(BAMCPConfig(transport="sse")) == n
+    assert (BAM, REF) in opened

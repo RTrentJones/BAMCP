@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 
 RUBRIC_VERSION = "1.0"
 _VALID_FORMATS = ("text", "rubric")
+# "json" is what callers reach for; it means the machine-readable rubric document.
+_FORMAT_ALIASES = {"json": "rubric"}
 
 # Intended-use boundary. BAMCP surfaces evidence to support human curation; it
 # is not a diagnostic device and its output must not be treated as a clinical
@@ -182,9 +184,9 @@ def format_curation_summary(summary: dict) -> str:
         "",
         "OBSERVATION",
         f"  VAF: {v['vaf']:.1%} ({v.get('alt_count', 'N/A')} alt reads / {v['depth']} total depth)",
-        "",
-        "QUALITY METRICS",
     ]
+    lines.extend(_format_filter_check(summary.get("filter_check"), summary.get("applied_filters")))
+    lines.extend(["", "QUALITY METRICS"])
 
     if q.get("mean_quality") is None:
         # Read evidence not computed: say so instead of rendering placeholder zeros as
@@ -247,6 +249,41 @@ def format_curation_summary(summary: dict) -> str:
     lines.extend(["", "INTENDED USE", f"  {summary.get('intended_use', INTENDED_USE)}"])
 
     return "\n".join(lines)
+
+
+def _format_filter_check(check: dict | None, applied: dict | None) -> list[str]:
+    """The CALLING FILTERS block: does this site pass the filters get_variants applies?"""
+    if not check:
+        return []
+    lines = ["", "CALLING FILTERS"]
+    if check["passes_filters"]:
+        lines.append("  Passes the applied filters (get_variants reports it).")
+    else:
+        lines.append(
+            "  FAILS the applied filters: "
+            + ", ".join(check["failed_filters"])
+            + " — get_variants does NOT report this site."
+        )
+    at = check["at_filters"]
+    lines.append(
+        f"  At the filters: {at['alt_count']}/{at['depth']} alt reads (VAF {at['vaf']:.1%})"
+    )
+    unf = check.get("unfiltered")
+    if unf:
+        lines.append(
+            f"  Unfiltered (min_baseq=0): {unf['alt_count']}/{unf['depth']} alt reads "
+            f"(VAF {unf['vaf']:.1%}); {check.get('low_baseq_alt_reads_removed', 0)} alt read(s) "
+            "removed by min_baseq"
+        )
+        lines.append(f"  {check.get('note', '')}")
+    if applied:
+        filters = ", ".join(
+            f"{k}={applied[k]}"
+            for k in ("min_vaf", "min_depth", "min_alt_count", "min_mapq", "min_baseq")
+            if k in applied
+        )
+        lines.append(f"  Applied filters: {filters}")
+    return lines
 
 
 def _external_status_line(name: str, block: dict | None) -> str | None:
@@ -320,7 +357,13 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
       deterministic grading.
     """
     # Import here to avoid circular dependency (tools imports from this module's siblings)
-    from ..core.tools import _applied_filters, _fetch_region_with_timeout, _resolve_reference
+    from ..core.tools import (
+        _applied_filters,
+        _fetch_region_with_timeout,
+        _resolve_reference_info,
+        probe_site,
+        site_filter_check,
+    )
 
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
@@ -332,8 +375,9 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     # Same resolution as every other tool: a caller-supplied reference is validated (the
     # untrusted SSRF vector), then the operator default, then the public FASTA matching the
     # BAM's build and contig style — so a bare demo/remote BAM still gets SNV evidence.
-    _, reference = await _resolve_reference(args, config)
-    output_format = args.get("format", "text")
+    resolved = await _resolve_reference_info(args, config)
+    reference = resolved.effective
+    output_format = _FORMAT_ALIASES.get(args.get("format", "text"), args.get("format", "text"))
     if output_format not in _VALID_FORMATS:
         output_format = "text"
     include_clinical = bool(args.get("include_clinical", False))
@@ -378,25 +422,44 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
             target_variant = v
             break
 
-    if not target_variant:
-        return _error_response(
-            f"Variant {chrom}:{pos} {ref}>{alt} not found in region. "
-            f"Variants found: {len(data.variants)}. Absence may reflect the applied "
-            "filters rather than a true reference call.",
-            output_format,
-            applied_filters=_applied_filters(config, {}, include_max_reads=True),
-        )
-
-    # Build the support index (mismatches for SNVs, CIGAR events for indels) and
-    # compute evidence.
-    if is_indel(target_variant):
-        evidence = compute_indel_evidence(build_indel_index(data.reads), target_variant)
-    else:
-        evidence = compute_variant_evidence(build_mismatch_index(data.reads), target_variant)
-    computed = bool(evidence.get("read_evidence_computed", True))
-    artifact_risk = compute_artifact_risk(
-        target_variant, evidence, data.reference_sequence, data.start
+    applied_filters = _applied_filters(
+        config,
+        {},
+        include_max_reads=True,
+        min_alt_count=config.min_alt_count,
+        reference_source=resolved.source,
     )
+    filter_check = site_filter_check(target_variant, config) if target_variant else None
+    if target_variant is not None and filter_check and filter_check["passes_filters"]:
+        # Build the support index (mismatches for SNVs, CIGAR events for indels) and
+        # compute evidence.
+        if is_indel(target_variant):
+            evidence = compute_indel_evidence(build_indel_index(data.reads), target_variant)
+        else:
+            evidence = compute_variant_evidence(build_mismatch_index(data.reads), target_variant)
+        artifact_risk = compute_artifact_risk(
+            target_variant, evidence, data.reference_sequence, data.start
+        )
+    else:
+        # The requested site fails the calling filters (or wasn't called at all): evaluate it
+        # anyway — hiding a low-BQ one-strand artifact behind "not found" defeats curation.
+        try:
+            probed = await probe_site(file_path, data, pos - 1, ref, alt, reference, config)
+        except (asyncio.TimeoutError, TimeoutError):
+            return _error_response("Timeout fetching region data", output_format)
+        if probed is None:
+            return _error_response(
+                f"Variant {chrom}:{pos} {ref}>{alt} not found in region: no read supports the alt "
+                "allele at this position, even with min_baseq=0 and no VAF/alt-read floor. "
+                f"Variants called in the window: {len(data.variants)}.",
+                output_format,
+                applied_filters=applied_filters,
+            )
+        target_variant = probed["variant"]
+        evidence = probed["evidence"]
+        artifact_risk = target_variant["artifact_risk"]
+        filter_check = probed["filter_check"]
+    computed = bool(evidence.get("read_evidence_computed", True))
 
     confidence = compute_confidence(target_variant, evidence, artifact_risk)
 
@@ -429,6 +492,8 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
             "near_end_cutoff_bp": evidence.get("near_end_cutoff_bp"),
             "near_end_expected_fraction": evidence.get("near_end_expected_fraction"),
         },
+        "filter_check": filter_check,
+        "applied_filters": applied_filters,
         "artifact_assessment": artifact_risk,
         "confidence": confidence,
         "recommendations": generate_curator_recommendations(

@@ -133,3 +133,13 @@ class TestGlossary:
 
     def test_lookup_ignores_blank(self):
         assert lookup_terms(["", "  "]) == []
+
+
+@pytest.mark.unit
+def test_gene_scale_loci_are_flagged_by_span():
+    from bamcp.demos import DemoLocus
+
+    loci = [loc for d in DEMO_DATASETS.values() for loc in d.loci]
+    genes = {loc.region for loc in loci if loc.gene_scale}
+    assert genes == {"chr17:43044295-43125483", "13:32889214-32974405"}
+    assert DemoLocus("chr1:1-200", "x", "y").span == 200

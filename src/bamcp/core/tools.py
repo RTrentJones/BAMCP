@@ -70,7 +70,9 @@ from .parsers import (
     fetch_region,
     format_region,
     load_vcf_variants,
+    open_fasta,
     parse_region,
+    register_reference_index,
 )
 from .serialization import build_enhanced_variants, serialize_region_data
 from .validation import (
@@ -349,7 +351,6 @@ _LOOKUP_FOUND = "found"
 _LOOKUP_NOT_FOUND = "not_found"
 _LOOKUP_UNAVAILABLE = "unavailable"
 _LOOKUP_DISABLED = "disabled"
-_LOOKUP_INVALID = "invalid_input"
 
 
 def _lookup_result(payload: dict[str, Any], *, status: str, disclaimer: str) -> dict:
@@ -371,6 +372,22 @@ def _lookup_build(args: dict[str, Any], config: BAMCPConfig) -> tuple[str | None
     if args.get("build"):
         return normalize_genome_build(args["build"]), "explicit"
     return normalize_genome_build(config.genome_build), "server-default"
+
+
+def _validate_lookup_input(args: dict[str, Any], config: BAMCPConfig) -> tuple[str, str]:
+    """Validate a variant lookup's chrom/pos/ref/alt/build; raise ToolInputError if invalid.
+
+    Returns the resolved ``(build, build_source)``.
+    """
+    error = validate_variant_input(args["chrom"], args["pos"], args["ref"], args["alt"])
+    if error:
+        raise ToolInputError(error)
+    build, build_source = _lookup_build(args, config)
+    if build is None:
+        raise ToolInputError(
+            f"Unrecognized build {args.get('build')!r}; use GRCh37/hg19 or GRCh38/hg38"
+        )
+    return build, build_source
 
 
 _CANDIDATE_VARIANT_DISCLAIMER = (
@@ -778,7 +795,7 @@ def _open_remote_inputs_sync(
     from .parsers import _open_alignment
 
     if reference:
-        with pysam.FastaFile(reference) as fasta:
+        with open_fasta(reference) as fasta:
             if fasta.references:
                 fasta.fetch(fasta.references[0], 0, 1)
     if file_path:
@@ -786,8 +803,46 @@ def _open_remote_inputs_sync(
             _ = samfile.references
 
 
+async def _ensure_reference_indexes(reference: str | None, config: BAMCPConfig) -> None:
+    """Cache a remote reference FASTA's .fai (+ .gzi for bgzip) and register them for open_fasta.
+
+    Best effort: a failed download leaves htslib to fetch the index remotely as before.
+    """
+    if reference is None or not _is_remote(reference) or not config.allow_remote_files:
+        return
+    services = get_services(config)
+    paths = services.cache.get_reference_index_paths(reference)
+    if paths is None:
+        return
+    fai, gzi = paths
+    wanted = [(fai, reference + ".fai")] + ([(gzi, reference + ".gzi")] if gzi else [])
+    locks = services.index_download_locks
+    lock = locks.setdefault(fai, asyncio.Lock())
+    try:
+        async with lock:
+            missing = [(p, u) for p, u in wanted if not services.cache.is_valid(p)]
+            if missing:
+                async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+                    for path, url in missing:
+                        try:
+                            got = await _download_index_streaming(client, url, path, config)
+                        except (httpx.RequestError, OSError, ValueError) as e:
+                            logger.warning("Reference index download error for %s: %s", url, e)
+                            return
+                        if not got:
+                            return
+                        services.cache.enforce_budget(keep=got)
+            register_reference_index(reference, fai, gzi)
+    finally:
+        if not lock.locked() and locks.get(fai) is lock:
+            del locks[fai]
+
+
 async def _warm_remote_inputs(
-    file_path: str, reference: str | None, index_path: str | None
+    file_path: str,
+    reference: str | None,
+    index_path: str | None,
+    config: BAMCPConfig | None = None,
 ) -> None:
     """Give a cold remote BAM/CRAM or reference its one-off open under the cold-start budget.
 
@@ -796,6 +851,8 @@ async def _warm_remote_inputs(
     ``TimeoutError``; any other failure is left for the real parse to report with its own
     message (the input simply stays cold).
     """
+    if config is not None:
+        await _ensure_reference_indexes(reference, config)
     cold_file = file_path if _is_remote(file_path) and file_path not in _warm_inputs else None
     cold_ref = reference if _is_remote(reference) and reference not in _warm_inputs else None
     if not cold_file and not cold_ref:
@@ -1031,7 +1088,7 @@ async def _fetch_region_with_timeout(
     # runs warm under the normal BAM_PARSE_TIMEOUT_SECONDS.
     if _is_remote(file_path) or _is_remote(reference):
         index_path = await _ensure_cached_index(file_path, config)
-        await _warm_remote_inputs(file_path, reference, index_path)
+        await _warm_remote_inputs(file_path, reference, index_path, config)
     try:
         return await _fetch_region_data(
             file_path,
@@ -1045,16 +1102,38 @@ async def _fetch_region_with_timeout(
             vcf_primary=vcf_primary,
         )
     except asyncio.TimeoutError as e:
-        detail = (
-            "; the remote reference FASTA's index is fetched on first use and is often "
-            "the slow part — retrying usually succeeds once it is warm"
-            if reference and "://" in reference
-            else ""
-        )
         raise TimeoutError(
             f"Timed out after {BAM_PARSE_TIMEOUT_SECONDS:g}s reading {region} "
-            f"(mode={mode}){detail}."
+            f"(mode={mode}){_timeout_hint(region, reference)}."
         ) from e
+
+
+# Above this span a parse timeout is about the region's size, not a cold input.
+TIMEOUT_LARGE_REGION_BP = 2_000
+
+
+def _timeout_hint(region: str, reference: str | None) -> str:
+    """What to do about a parse timeout: shrink a large window, or retry once a cold input warms.
+
+    A gene-scale window (tens of kb of reads) is slow however warm the inputs are, so the
+    cold-reference hint would send the caller into a pointless retry; it is given only when the
+    remote reference really has not been opened yet.
+    """
+    try:
+        _, start, end = parse_region(region)
+    except ValueError:
+        start = end = 0
+    if end - start > TIMEOUT_LARGE_REGION_BP:
+        return (
+            f"; the region spans {end - start:,} bp — request a smaller window (≤200 bp for "
+            "visualize_region/get_variants), or use get_coverage for a gene-scale region"
+        )
+    if _is_remote(reference) and reference not in _warm_inputs:
+        return (
+            "; the remote reference FASTA's index is fetched on first use and is often "
+            "the slow part — retrying usually succeeds once it is warm"
+        )
+    return ""
 
 
 async def _fetch_region_data(
@@ -1293,7 +1372,7 @@ async def _bam_contigs(file_path: str, config: BAMCPConfig) -> list[dict]:
         return cached
     index_path = await _ensure_cached_index(file_path, config)
     # A cold remote BAM's first open gets the cold-start budget, not the parse timeout.
-    await _warm_remote_inputs(file_path, None, index_path)
+    await _warm_remote_inputs(file_path, None, index_path, config)
     contigs = await asyncio.wait_for(
         _run_in_parse_pool(_read_contigs_sync, file_path, config.reference, index_path),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
@@ -1520,13 +1599,211 @@ async def _score_candidates(
             out.append(
                 _unscored(v, _UNSCORED_TIMEOUT_NOTE if timed_out else _UNSCORED_CAP_NOTE, data)
             )
+    bamcp_candidates = sum(1 for v in variants if v.get("source") == "bamcp")
+    unscored_indels = sum(
+        1 for v in variants if v.get("source") == "bamcp" and len(v["ref"]) != len(v["alt"])
+    )
     summary = {
+        "candidates": bamcp_candidates,
         "scored_sites": len(scored_ids),
         "max_sites": GET_VARIANTS_EVIDENCE_MAX_SITES,
         "capped": len(snvs) > GET_VARIANTS_EVIDENCE_MAX_SITES,
+        "unscored_capped": max(0, len(snvs) - GET_VARIANTS_EVIDENCE_MAX_SITES),
+        "unscored_indels": unscored_indels,
         "timed_out": timed_out,
     }
     return out, summary
+
+
+# -- Requested-site probe (curation / classify) ----------------------------------------------
+# get_variants answers "what passes the calling filters here?". A curator asking about ONE named
+# site needs the opposite: that site's evidence even when it fails those filters — a low-BQ,
+# one-strand artifact is exactly what min_baseq/min_alt_count hide, so "not found" would be a
+# useless (and misleading) answer for the demo artifact. The probe re-reads only the requested
+# site with min_baseq=0 and no VAF/depth/alt-read floor, and says which filters it fails.
+
+SITE_PROBE_NOTE = (
+    "Evaluated at the requested site with min_baseq=0 and no VAF/depth/alt-read floor so its "
+    "evidence can be judged; a site that fails the applied filters is NOT reported by "
+    "get_variants."
+)
+
+
+def _failed_filters(
+    at_filters: dict[str, Any],
+    *,
+    min_vaf: float,
+    min_depth: int,
+    min_alt_count: int,
+    baseq_removed: int,
+) -> list[str]:
+    """Which calling thresholds the site's filtered counts fail (min_baseq when it dropped alts)."""
+    failed = []
+    if at_filters["vaf"] < min_vaf:
+        failed.append("min_vaf")
+    if at_filters["depth"] < min_depth:
+        failed.append("min_depth")
+    if at_filters["alt_count"] < min_alt_count:
+        failed.append("min_alt_count")
+    if failed and baseq_removed > 0:
+        failed.insert(0, "min_baseq")
+    return failed
+
+
+def site_filter_check(
+    variant: dict[str, Any],
+    config: BAMCPConfig,
+    *,
+    unfiltered: dict[str, Any] | None = None,
+    min_vaf: float | None = None,
+    min_depth: int | None = None,
+    min_alt_count: int | None = None,
+) -> dict[str, Any]:
+    """``passes_filters`` + ``failed_filters`` for a site, from its counts under the filters.
+
+    ``variant`` carries the counts AT the applied filters (alt_count/depth/vaf); ``unfiltered``
+    (from :func:`probe_site`) the min_baseq=0 counts, when the site was probed.
+    """
+    min_vaf = config.min_vaf if min_vaf is None else min_vaf
+    min_depth = config.min_depth if min_depth is None else min_depth
+    min_alt_count = config.min_alt_count if min_alt_count is None else min_alt_count
+    at_filters: dict[str, Any] = {
+        "alt_count": int(variant.get("alt_count") or 0),
+        "depth": int(variant.get("depth") or 0),
+        "vaf": float(variant.get("vaf") or 0.0),
+    }
+    removed = 0
+    if unfiltered is not None:
+        removed = max(0, int(unfiltered["alt_count"]) - at_filters["alt_count"])
+    failed = _failed_filters(
+        at_filters,
+        min_vaf=min_vaf,
+        min_depth=min_depth,
+        min_alt_count=min_alt_count,
+        baseq_removed=removed,
+    )
+    check: dict[str, Any] = {
+        "passes_filters": not failed,
+        "failed_filters": failed,
+        "at_filters": at_filters,
+    }
+    if unfiltered is not None:
+        check["unfiltered"] = unfiltered
+        check["low_baseq_alt_reads_removed"] = removed
+        check["note"] = SITE_PROBE_NOTE
+    return check
+
+
+async def _pileup_site(
+    file_path: str,
+    contig: str,
+    pos0: int,
+    ref: str,
+    alt: str,
+    reference: str | None,
+    config: BAMCPConfig,
+    min_baseq: int,
+) -> dict[str, Any]:
+    """Pileup-annotate one SNV site at ``min_baseq`` (config MAPQ + read exclusions apply)."""
+    site: dict[str, Any] = {
+        "contig": contig,
+        "position": pos0,
+        "ref": ref,
+        "alt": alt,
+        "variant_kind": "snv",
+        "source": "probe",
+    }
+    index_path = await _ensure_cached_index(file_path, config)
+    await asyncio.wait_for(
+        _run_in_parse_pool(
+            annotate_vcf_snv_support,
+            file_path,
+            format_region(contig, pos0, pos0 + 1),
+            reference,
+            [site],
+            config.min_mapq,
+            min_baseq,
+            index_path,
+            sources=("probe",),
+        ),
+        timeout=BAM_PARSE_TIMEOUT_SECONDS,
+    )
+    return site
+
+
+async def probe_site(
+    file_path: str,
+    data: RegionData,
+    pos0: int,
+    ref: str,
+    alt: str,
+    reference: str | None,
+    config: BAMCPConfig,
+) -> dict[str, Any] | None:
+    """Evidence for the requested site even when it fails the calling filters.
+
+    SNVs: two single-site pileups (min_baseq=0 and the configured min_baseq), scored with the
+    same per-site evidence as get_variants (strand, alt base quality, read position, MAPQ).
+    Indels: the window is re-read with no VAF/depth floor and the CIGAR evidence is used.
+    Returns ``{"variant", "evidence", "filter_check"}`` (the variant 0-based, with
+    artifact_risk/confidence), or None when no read supports the allele at all.
+    """
+    from ..analysis.evidence import build_indel_index, compute_indel_evidence
+
+    contig = data.contig
+    if len(ref) == 1 == len(alt):
+        # Both pileups at once (each is a remote open + seek; they share nothing).
+        loose, strict = await asyncio.gather(
+            _pileup_site(file_path, contig, pos0, ref, alt, reference, config, 0),
+            _pileup_site(file_path, contig, pos0, ref, alt, reference, config, config.min_baseq),
+        )
+        if not loose.get("alt_count"):
+            return None
+        enhanced, evidence = _vcf_evidence(loose, data.reference_sequence, data.start)
+        enhanced["source"] = "bamcp"
+        enhanced["evidence_source"] = "pileup"
+        enhanced["read_evidence_computed"] = True
+        evidence["read_evidence_computed"] = True
+        unfiltered = {
+            "alt_count": int(loose["alt_count"]),
+            "depth": int(loose["depth"]),
+            "vaf": float(loose["vaf"]),
+        }
+        check = site_filter_check(strict, config, unfiltered=unfiltered)
+        return {"variant": enhanced, "evidence": evidence, "filter_check": check}
+
+    # Indel: alt-read support isn't base-quality-filtered, so only the VAF/depth floors hide it.
+    loose_data = await _fetch_region_with_timeout(
+        file_path,
+        format_region(contig, data.start, data.end),
+        reference,
+        config,
+        min_vaf=0.0,
+        min_depth=1,
+    )
+    target = next(
+        (
+            v
+            for v in loose_data.variants
+            if v["position"] == pos0 and v["ref"].upper() == ref and v["alt"].upper() == alt
+        ),
+        None,
+    )
+    if target is None:
+        return None
+    evidence = compute_indel_evidence(build_indel_index(loose_data.reads), target)
+    risk = compute_artifact_risk(target, evidence, loose_data.reference_sequence, loose_data.start)
+    variant = {
+        **target,
+        "artifact_risk": risk,
+        "confidence": compute_confidence(target, evidence, risk),
+        "read_evidence_computed": bool(evidence.get("read_evidence_computed", True)),
+    }
+    return {
+        "variant": variant,
+        "evidence": evidence,
+        "filter_check": site_filter_check(target, config),
+    }
 
 
 @telemetry_wrapper("get_variants")
@@ -1581,7 +1858,10 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     scored, evidence_summary = await _score_candidates(
         file_path, region, reference, kept, data, config
     )
-    variants = [annotate_interpretation(_one_based(v)) for v in scored]
+    variants = sorted(
+        (annotate_interpretation(_one_based(v)) for v in scored),
+        key=lambda v: (v["position"], v["ref"], v["alt"]),
+    )
 
     filters = _applied_filters(
         config,
@@ -1709,7 +1989,7 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
 
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
-    await _warm_remote_inputs(file_path, reference, index_path)
+    await _warm_remote_inputs(file_path, reference, index_path, config)
     contigs = await asyncio.wait_for(
         _run_in_parse_pool(_read_contigs_sync, file_path, reference, index_path),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
@@ -1798,12 +2078,14 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
 
     symbol = args.get("symbol", "")
     if not symbol:
-        return _err("search_gene requires 'symbol'")
+        raise ToolInputError("search_gene requires 'symbol'")
 
     file_path = args.get("file_path")
     requested = normalize_build_name(args["build"]) if args.get("build") else None
     if args.get("build") and requested is None:
-        return _err(f"Unrecognized build {args['build']!r}; use GRCh37/hg19 or GRCh38/hg38")
+        raise ToolInputError(
+            f"Unrecognized build {args['build']!r}; use GRCh37/hg19 or GRCh38/hg38"
+        )
 
     warnings: list[str] = []
     detected_build: str | None = None
@@ -1813,7 +2095,7 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
         except (ValueError, FileNotFoundError) as e:
             # A bad / disallowed / missing file_path is a caller error — never silently fall
             # back to the server default as if no BAM had been named.
-            return _err(f"Invalid file_path: {e}", status=_LOOKUP_INVALID)
+            raise ToolInputError(f"Invalid file_path: {e}") from e
         except Exception as e:  # noqa: BLE001 — unreadable header: reconciliation impossible
             if requested is None:
                 return _err(
@@ -1945,7 +2227,7 @@ async def _first_contig(file_path: str, reference: str | None, config: BAMCPConf
     the default from the file itself.
     """
     index_path = await _ensure_cached_index(file_path, config)
-    await _warm_remote_inputs(file_path, reference, index_path)
+    await _warm_remote_inputs(file_path, reference, index_path, config)
     contigs = await asyncio.wait_for(
         _run_in_parse_pool(_read_contigs_sync, file_path, reference, index_path),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
@@ -2067,16 +2349,23 @@ async def _viewer_response(
 async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Handle jump_to tool call.
 
-    Centers the viewer on a specific genomic position with a configurable window. With no
-    ``contig``, the BAM's first contig is used. The constructed region goes through the same
-    ``validate_region`` as visualize_region, so both tools accept exactly the same contigs.
+    Centers the viewer on a specific genomic position with a configurable window.
+    ``contig`` is required: a position alone is ambiguous, and silently defaulting to the
+    BAM's first contig showed chr1 reads for a chr17 position. The constructed region goes
+    through the same ``validate_region`` as visualize_region, so both tools accept exactly
+    the same contigs.
     """
     file_path = args["file_path"]
+    contig = args.get("contig")
+    if not contig:
+        raise ToolInputError(
+            "jump_to needs a contig as well as a position (e.g. contig='chr17' or '17' — "
+            "call list_contigs for this file's naming)."
+        )
     await asyncio.to_thread(validate_path, file_path, config)
     position = args["position"]
     window = args.get("window", config.default_window)
     resolved = await _resolve_reference_info(args, config)
-    contig = args.get("contig") or await _first_contig(file_path, resolved.effective, config)
 
     # ``position`` is 1-based; build a 1-based inclusive window of ``window`` bases
     # centred on it (start clamped at base 1).
@@ -2186,25 +2475,14 @@ async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> di
     ref = args["ref"]
     alt = args["alt"]
 
+    # Invalid input is a tool ERROR (isError), not an answer; not_found/unavailable/disabled
+    # stay answers. Validate before the enabled check so bad input fails the same either way.
+    build, build_source = _validate_lookup_input(args, config)
+
     if not config.clinvar_enabled:
         return _lookup_result(
             {"error": "ClinVar lookup is disabled"},
             status=_LOOKUP_DISABLED,
-            disclaimer=_CLINVAR_DISCLAIMER,
-        )
-
-    # Validate input parameters
-    validation_error = validate_variant_input(chrom, pos, ref, alt)
-    if validation_error:
-        return _lookup_result(
-            {"error": validation_error}, status=_LOOKUP_INVALID, disclaimer=_CLINVAR_DISCLAIMER
-        )
-
-    build, build_source = _lookup_build(args, config)
-    if build is None:
-        return _lookup_result(
-            {"error": f"Unrecognized build {args.get('build')!r}; use GRCh37/hg19 or GRCh38/hg38"},
-            status=_LOOKUP_INVALID,
             disclaimer=_CLINVAR_DISCLAIMER,
         )
     build_info = {"genome_build": build, "build_source": build_source}
@@ -2265,25 +2543,14 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
     ref = args["ref"]
     alt = args["alt"]
 
+    # Invalid input is a tool ERROR (isError), not an answer; not_found/unavailable/disabled
+    # stay answers. Validate before the enabled check so bad input fails the same either way.
+    build, build_source = _validate_lookup_input(args, config)
+
     if not config.gnomad_enabled:
         return _lookup_result(
             {"error": "gnomAD lookup is disabled"},
             status=_LOOKUP_DISABLED,
-            disclaimer=_GNOMAD_DISCLAIMER,
-        )
-
-    # Validate input parameters
-    validation_error = validate_variant_input(chrom, pos, ref, alt)
-    if validation_error:
-        return _lookup_result(
-            {"error": validation_error}, status=_LOOKUP_INVALID, disclaimer=_GNOMAD_DISCLAIMER
-        )
-
-    build, build_source = _lookup_build(args, config)
-    if build is None:
-        return _lookup_result(
-            {"error": f"Unrecognized build {args.get('build')!r}; use GRCh37/hg19 or GRCh38/hg38"},
-            status=_LOOKUP_INVALID,
             disclaimer=_GNOMAD_DISCLAIMER,
         )
     build_info = {"genome_build": build, "build_source": build_source}
@@ -2343,6 +2610,7 @@ class _ScanProgress:
     """
 
     variants: list[dict] = field(default_factory=list)
+    scan_start: int = 0
     scanned_end: int = 0
     scan_end: int = 0
     contig_length: int | None = None
@@ -2406,8 +2674,13 @@ def _scan_contig_progressive(
     max_region: int,
     index_filename: str | None,
     min_alt_count: int | None = None,
+    scan_start: int = 0,
+    scan_stop: int | None = None,
 ) -> None:
     """Scan ``contig`` chunk by chunk into ``progress``, stopping at ``deadline`` (monotonic).
+
+    ``[scan_start, scan_stop)`` (0-based half-open; stop defaults to the contig end) bounds the
+    scan, capped at ``max_region`` bases.
 
     Runs in the parse pool. Checks the deadline (and the handler's ``stop`` flag, set when the
     hard timeout abandons it) before every chunk, so a slow remote scan ends cleanly with the
@@ -2422,14 +2695,17 @@ def _scan_contig_progressive(
         contig_length = _header_lengths(samfile).get(contig)
         if contig_length is None:
             raise ValueError(f"Contig '{contig}' not found in the alignment header")
-        scan_end = min(contig_length, max_region)
+        stop = contig_length if scan_stop is None else min(scan_stop, contig_length)
+        scan_end = min(stop, scan_start + max_region)
         with progress.lock:
             progress.contig_length = contig_length
+            progress.scan_start = scan_start
+            progress.scanned_end = scan_start
             progress.scan_end = scan_end
         # Adaptive chunking: start small, double while chunks are fast, halve when slow.
         size = min(SCAN_VARIANTS_MIN_CHUNK_SIZE, chunk_size)
-        chunk_start = 0
-        with pysam.FastaFile(reference_path) as fasta:
+        chunk_start = scan_start
+        with open_fasta(reference_path) as fasta:
             while chunk_start < scan_end:
                 if progress.stop.is_set() or time.monotonic() >= deadline:
                     with progress.lock:
@@ -2469,6 +2745,10 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
     ``truncation_reason`` — a partial answer, never a bare timeout. Failures (no reference,
     unknown contig, nothing scanned at all) raise :class:`ToolInputError` so they reach the
     client as an MCP error result. With no ``contig``, the BAM's first contig is scanned.
+
+    ``region`` (1-based ``contig:start-end``, no size cap) scans just that stretch — how a
+    truncated scan is resumed: the truncation text and ``next_region`` give the exact remainder.
+    Output is sorted by position (when capped, the highest-VAF candidates are the ones kept).
     """
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
@@ -2486,8 +2766,19 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
 
     index_path = await _ensure_cached_index(file_path, config)
     # Cold remote inputs get their one-off open under the cold budget, not the scan deadline.
-    await _warm_remote_inputs(file_path, reference, index_path)
-    contig = args.get("contig") or await _first_contig(file_path, reference, config)
+    await _warm_remote_inputs(file_path, reference, index_path, config)
+    scan_start, scan_stop = 0, None
+    if args.get("region"):
+        validate_region(args["region"])
+        region_contig, scan_start, scan_stop = parse_region(args["region"], max_size=None)
+        if args.get("contig") and args["contig"] != region_contig:
+            raise ToolInputError(
+                f"contig '{args['contig']}' does not match region '{args['region']}'; "
+                "pass one or the other."
+            )
+        contig = region_contig
+    else:
+        contig = args.get("contig") or await _first_contig(file_path, reference, config)
 
     progress = _ScanProgress()
     deadline = time.monotonic() + SCAN_VARIANTS_DEADLINE_SECONDS
@@ -2509,6 +2800,8 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
                 max_region=SCAN_VARIANTS_MAX_REGION,
                 index_filename=index_path,
                 min_alt_count=min_alt_count,
+                scan_start=scan_start,
+                scan_stop=scan_stop,
             ),
             timeout=SCAN_VARIANTS_TIMEOUT_SECONDS,
         )
@@ -2523,6 +2816,7 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
 
     with progress.lock:
         all_variants = list(progress.variants)
+        scan_start = progress.scan_start
         scanned_end = progress.scanned_end
         scan_end = progress.scan_end
         contig_length = progress.contig_length
@@ -2538,18 +2832,28 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
 
     truncated = hard_timeout or deadline_hit or scanned_end < scan_end
     truncation_reason = None
+    # The exact unscanned remainder (1-based inclusive), to pass back as `region`.
+    next_region = format_region(contig, scanned_end, scan_end) if scanned_end < scan_end else None
     if truncated:
         budget = SCAN_VARIANTS_TIMEOUT_SECONDS if hard_timeout else SCAN_VARIANTS_DEADLINE_SECONDS
         truncation_reason = (
-            f"time budget of {budget:g}s reached after scanning {scanned_end:,} of "
-            f"{scan_end:,} bp; candidates beyond scanned_region were NOT examined — use "
-            "get_variants (or scan again) on the unscanned remainder"
+            f"time budget of {budget:g}s reached after scanning {scanned_end - scan_start:,} "
+            f"of {scan_end - scan_start:,} bp; candidates beyond scanned_region were NOT "
+            + (
+                f"examined — call scan_variants again with region='{next_region}' to scan the "
+                "remainder"
+                if next_region
+                else "examined"
+            )
         )
 
+    # When capped, keep the highest-VAF candidates; report them in genomic order.
     all_variants.sort(key=lambda v: v["vaf"], reverse=True)
-    variants = all_variants[:SCAN_VARIANTS_MAX_RESULTS]
+    variants = sorted(all_variants[:SCAN_VARIANTS_MAX_RESULTS], key=lambda v: v["position"])
     # 1-based inclusive; None when not a single chunk completed.
-    scanned_region = format_region(contig, 0, scanned_end) if scanned_end > 0 else None
+    scanned_region = (
+        format_region(contig, scan_start, scanned_end) if scanned_end > scan_start else None
+    )
 
     filters = _applied_filters(
         config,
@@ -2567,7 +2871,10 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
             "smaller region to detect indels",
             "scanned_region": scanned_region,
             "contig_length": contig_length,
-            "truncated_by_max_region": scan_end < contig_length,
+            "truncated_by_max_region": scan_end < (scan_stop or contig_length)
+            and scan_end < contig_length,
+            "per_site_evidence": "not computed by scan_variants (coverage-based scan); run "
+            "get_variants on a small window around a candidate for artifact_risk/confidence",
             "max_region": SCAN_VARIANTS_MAX_REGION,
             "truncated_by_deadline": truncated,
             "total_candidates": len(all_variants),
@@ -2580,13 +2887,15 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
 
     payload: dict[str, Any] = {
         "contig": contig,
-        "variants": [_one_based(v) for v in variants],
+        "variants": [annotate_interpretation(_one_based(v)) for v in variants],
         "count": len(variants),
         "truncated": truncated,
         "scanned_region": scanned_region,
     }
     if truncation_reason:
         payload["truncation_reason"] = truncation_reason
+    if truncated and next_region:
+        payload["next_region"] = next_region
     payload.update(
         {
             "coordinate_system": _LLM_COORDINATE_SYSTEM,

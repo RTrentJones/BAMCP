@@ -122,12 +122,14 @@ GLOSSARY: list[GlossaryTerm] = [
         "(snv_detection disabled without a reference, truncated reads).",
         "A variant listed passed these filters.",
         "A missing variant may simply have been filtered out or undetectable — absence is not "
-        "proof the site is reference. Loosen filters to look again.",
+        "proof the site is reference. Loosen filters to look again, or ask "
+        "get_variant_curation_summary about the exact site: it evaluates it anyway and lists "
+        "the filters it fails (filter_check).",
     ),
     GlossaryTerm(
         "1-based coordinates",
         "Positions count from 1, like VCF, samtools and genome browsers. 'chr17:100-200' "
-        "includes both base 100 and base 200; 'chr17:150-150' is one base.",
+        "includes both base 100 and base 200; 'chr17:150-150' (or just 'chr17:150') is one base.",
         "Positions from BAMCP can be pasted into ClinVar, gnomAD or a genome browser as-is "
         "(same genome build).",
         "Coordinates from a different genome build (GRCh37 vs GRCh38) do not line up — "

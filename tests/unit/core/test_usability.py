@@ -382,6 +382,14 @@ class TestInlineEvidence:
             assert "_alt_qualities" not in v
         pse = p["applied_filters"]["per_site_evidence"]
         assert pse["capped"] is False and pse["scored_sites"] > 0
+        # Every candidate is accounted for: scored SNVs + unscored indels (+ capped SNVs).
+        assert pse["candidates"] == p["count"]
+        indels = sum(1 for v in p["variants"] if len(v["ref"]) != len(v["alt"]))
+        assert pse["unscored_indels"] == indels
+        assert pse["scored_sites"] + pse["unscored_indels"] + pse["unscored_capped"] == p["count"]
+        # Output is in genomic order.
+        positions = [v["position"] for v in p["variants"]]
+        assert positions == sorted(positions)
         # The planted strand-bias site is flagged inline.
         sb = next(v for v in p["variants"] if v["position"] == 1051)
         assert "strand_bias" in sb["concerns"]
@@ -398,6 +406,7 @@ class TestInlineEvidence:
         )
         pse = p["applied_filters"]["per_site_evidence"]
         assert pse["capped"] is True and pse["scored_sites"] == 1
+        assert pse["unscored_capped"] == pse["candidates"] - 1 - pse["unscored_indels"]
         unscored = [v for v in p["variants"] if v.get("read_evidence_computed") is False]
         assert unscored and all(v["confidence"] == "low" for v in unscored)
         assert all("read_evidence_unavailable" in v["concerns"] for v in unscored)

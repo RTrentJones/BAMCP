@@ -4,8 +4,9 @@ The first call to a remote BAM is a cold start: the index (.bai) is downloaded, 
 header is read, and the reference FASTA's .fai/.gzi are fetched. On the hosted demo that made
 a newcomer's very first ``get_variants`` time out. When the server starts on an HTTP transport,
 this module walks ``bamcp.demos.DEMO_DATASETS`` in the background and does that work up front:
-cache each demo's index, then open the BAM header and the reference .fai in the parse pool
-(which also marks them warm, so the cold-start budget isn't needed later).
+cache each demo's index and its reference's .fai/.gzi (reused by every later open of that
+FASTA), then open the BAM header and the reference in the parse pool (which also marks them
+warm, so the cold-start budget isn't needed later).
 
 It never blocks readiness, never raises, and is a no-op when the demos module is absent, when
 ``config.prewarm`` is false, or on the stdio transport (a single local client gains nothing
@@ -54,7 +55,7 @@ async def _prewarm_one(name: str, dataset: Any, config: BAMCPConfig) -> bool:
     if reference:
         await asyncio.to_thread(validate_reference_path, reference, config)
     index_path = await _ensure_cached_index(file_path, config)
-    await _warm_remote_inputs(file_path, reference, index_path)
+    await _warm_remote_inputs(file_path, reference, index_path, config)
     logger.info("Prewarmed demo %s", name)
     return True
 

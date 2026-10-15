@@ -98,13 +98,13 @@ Thirteen tools, all registered in `server.py`:
 | Tool | Notes |
 |------|-------|
 | `visualize_region` | Reads + UI. Auto-detects compact mode for large regions. |
-| `jump_to` | Jump to a position with a configurable window (UI + data). |
+| `jump_to` | Jump to a position with a configurable window (UI + data). `contig` is required — never default it. |
 | `get_variants` | `variant_source` (`auto`/`vcf`/`bamcp`) selects the source: `vcf` makes a caller's VCF authoritative and attaches BAMCP read-level evidence per site; `auto` overlays a VCF on local candidates; `bamcp` is local-only. |
-| `scan_variants` | Scan a broader region for candidate variants. |
+| `scan_variants` | Time-bounded SNV scan of a contig or `region`; a truncated scan returns `next_region` (pass it back as `region` to resume). Output sorted by position. |
 | `get_coverage` | Depth-of-coverage statistics. |
 | `list_contigs` | Contigs + genome build detection + suggested public reference URL. |
 | `get_region_summary` | Text-only summary for LLM reasoning (no UI). |
-| `get_variant_curation_summary` | Curation summary with artifact risk assessment. |
+| `get_variant_curation_summary` | Curation summary with artifact risk assessment. The *requested* site is probed (`core/tools.probe_site`: min_baseq=0, no VAF/alt floor) when it fails the calling filters, and `filter_check` reports `passes_filters` + `failed_filters`; `classify_variant`'s observation does the same (`status: below_filters`). |
 | `classify_variant` | ACMG classification via evidence fusion (`analysis/acmg.py`, `fusion.py`). |
 | `lookup_clinvar` / `lookup_gnomad` | Clinical significance / population allele frequency. |
 | `search_gene` | Gene symbol → coordinates. Build-aware: auto-detects from the BAM. |
@@ -116,7 +116,7 @@ what *couldn't* be detected (`snv_detection` without a reference, `indel_detecti
 size cap, `reads_truncated`, scan truncation), not just the thresholds.
 
 **Coordinates.** Region strings at the tool boundary are **1-based inclusive, samtools-style**
-(`chr1:1051-1051` is one base); `parse_region` converts once to 0-based half-open internally and
+(`chr1:1051-1051`, or just `chr1:1051`, is one base); `parse_region` converts once to 0-based half-open internally and
 `format_region` is its inverse. Output positions are 1-based. The viewer's `ui/init` payload is
 the one exception (`coordinate_system: "0-based-half-open"`). External lookups (ClinVar, gnomAD,
 gene) must be queried in the **BAM's** assembly — pass `build`, never assume the server default.
@@ -178,12 +178,24 @@ only `.bam`/`.cram` for local files, error messages sanitized (never leak config
 **One error envelope.** Every tool runs through `_run()` in `server.py`, which maps any handler
 exception via `core/errors.py:sanitize_tool_exception` to an `isError=true` result with a
 client-safe message. Handlers raise `ToolInputError` for caller-facing failures — don't return
-`{"error": ...}` as a success. Lookup `not_found` is an answer, not an error.
+`{"error": ...}` as a success. Lookup `not_found` is an answer, not an error; invalid input (bad allele, position, build) is an
+error. Argument-schema failures (wrong/missing parameter names) never reach `_run` — FastMCP
+validates first — so `_install_argument_error_mapping` maps them to one short line listing the
+tool's expected parameters instead of a raw pydantic dump.
 `tool_specs.py` must match the server's parameter sets (parity test in `test_tool_specs.py`).
 
 `mcp>=1.23.0` is a hard floor (CVE-2025-66416 DNS rebinding fix).
 
 Prod compose hardening: `cap_drop: [ALL]`, `no-new-privileges`, `read_only`, `memory: 2g`, non-root.
+
+## Viewer payload
+
+The viewer tools (`visualize_region`, `jump_to`) return two things: the **text content** is the
+compact LLM-facing summary (headline, top variant interpretations, applied filters — bounded by
+`VIEWER_SUMMARY_MAX_CHARS`), while **`structuredContent`** (built from the handler's
+`_meta["ui/init"]`) carries the full UI payload — reads, coverage, per-variant evidence — that
+the MCP Apps viewer reads. Don't move the payload out of `structuredContent` (the viewer depends
+on it) and don't grow the text back into a read dump.
 
 ## Viewer UI
 

@@ -32,7 +32,7 @@ ALLELE_PATTERN = re.compile(r"^[ACGTN]+$", re.IGNORECASE)
 # coordinates are anchored to the END of the string — split on the last ':' when parsing.
 REGION_PATTERN = re.compile(
     r"^[0-9A-Za-z!#$%&+./:;?@^_|~-][0-9A-Za-z!#$%&*+./:;=?@^_|~-]*:"
-    r"(\d{1,3}(?:,\d{3})*|\d{1,11})-(\d{1,3}(?:,\d{3})*|\d{1,11})\Z"
+    r"(\d{1,3}(?:,\d{3})*|\d{1,11})(?:-(\d{1,3}(?:,\d{3})*|\d{1,11}))?\Z"
 )
 
 # Input length limits
@@ -220,7 +220,10 @@ def validate_region(region: str) -> None:
         raise ValueError(f"Region string too long (max {MAX_REGION_LENGTH} characters)")
 
     if not REGION_PATTERN.match(region):
-        raise ValueError(f"Invalid region format: '{region}'. Expected format: chr1:1000-2000")
+        raise ValueError(
+            f"Invalid region format: '{region}'. Expected 1-based inclusive 'chr1:1000-2000' "
+            "(or a single base, 'chr1:1000')"
+        )
 
 
 def validate_path(file_path: str, config: BAMCPConfig) -> None:

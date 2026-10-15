@@ -536,3 +536,22 @@ class TestGenomeBuildNormalization:
     @pytest.mark.unit
     def test_gnomad_dataset_defaults_to_per_build(self):
         assert BAMCPConfig().gnomad_dataset == "auto"
+
+
+@pytest.mark.unit
+class TestNcbiApiKeyEnv:
+    def test_unset_or_blank_is_none(self, monkeypatch):
+        monkeypatch.delenv("BAMCP_NCBI_API_KEY", raising=False)
+        assert BAMCPConfig.from_env().ncbi_api_key is None
+        monkeypatch.setenv("BAMCP_NCBI_API_KEY", "   ")
+        assert BAMCPConfig.from_env().ncbi_api_key is None
+
+    def test_valid_key_is_stripped(self, monkeypatch):
+        monkeypatch.setenv("BAMCP_NCBI_API_KEY", " abc123DEF \n")
+        assert BAMCPConfig.from_env().ncbi_api_key == "abc123DEF"
+
+    def test_malformed_key_fails_loudly_without_echoing_it(self, monkeypatch):
+        monkeypatch.setenv("BAMCP_NCBI_API_KEY", '"secretvalue"')
+        with pytest.raises(ValueError, match="BAMCP_NCBI_API_KEY") as exc:
+            BAMCPConfig.from_env()
+        assert "secretvalue" not in str(exc.value)

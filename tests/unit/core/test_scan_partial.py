@@ -76,6 +76,57 @@ async def test_deadline_returns_partial_results(small_bam_path, ref_config, monk
     assert scanned_end < payload["applied_filters"]["contig_length"]
     # Only candidates inside the scanned region are reported (1-based positions).
     assert all(v["position"] <= scanned_end for v in payload["variants"])
+    # The remainder is named exactly, as a region scan_variants accepts.
+    contig_length = payload["applied_filters"]["contig_length"]
+    assert payload["next_region"] == f"chr1:{scanned_end + 1}-{contig_length}"
+    assert f"region='{payload['next_region']}'" in payload["truncation_reason"]
+
+
+async def test_region_resumes_a_truncated_scan(small_bam_path, ref_config):
+    """Scanning the remainder region covers exactly the bases a full scan would."""
+    full = _payload(
+        await tools.handle_scan_variants(
+            {"file_path": small_bam_path, "contig": "chr1"}, ref_config
+        )
+    )
+    first = _payload(
+        await tools.handle_scan_variants(
+            {"file_path": small_bam_path, "region": "chr1:1-300"}, ref_config
+        )
+    )
+    rest_end = full["applied_filters"]["contig_length"]
+    rest = _payload(
+        await tools.handle_scan_variants(
+            {"file_path": small_bam_path, "region": f"chr1:301-{rest_end}"}, ref_config
+        )
+    )
+    assert first["scanned_region"] == "chr1:1-300"
+    assert rest["scanned_region"] == f"chr1:301-{rest_end}"
+    assert all(v["position"] <= 300 for v in first["variants"])
+    assert all(v["position"] > 300 for v in rest["variants"])
+    key = lambda v: (v["position"], v["alt"])  # noqa: E731
+    assert sorted(map(key, first["variants"] + rest["variants"])) == sorted(
+        map(key, full["variants"])
+    )
+
+
+async def test_scan_output_sorted_by_position_with_interpretation(small_bam_path, ref_config):
+    payload = _payload(
+        await tools.handle_scan_variants(
+            {"file_path": small_bam_path, "contig": "chr1", "min_alt_count": 1, "min_vaf": 0.05},
+            ref_config,
+        )
+    )
+    positions = [v["position"] for v in payload["variants"]]
+    assert positions == sorted(positions)
+    assert all("interpretation" in v for v in payload["variants"])
+
+
+async def test_region_and_contig_must_agree(small_bam_path, ref_config):
+    with pytest.raises(ToolInputError, match="does not match"):
+        await tools.handle_scan_variants(
+            {"file_path": small_bam_path, "contig": "chr2", "region": "chr1:1-100"}, ref_config
+        )
 
 
 async def test_hard_timeout_returns_partial_results(small_bam_path, ref_config, monkeypatch):

@@ -7,14 +7,17 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
+from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from . import __version__
 from .analysis.acmg import handle_classify_variant
 from .analysis.curation import handle_get_variant_curation_summary
 from .config import BAMCPConfig
-from .core.errors import sanitize_tool_exception
+from .core.errors import format_argument_error, sanitize_tool_exception
 from .core.tools import (
     handle_cleanup_cache,
     handle_get_coverage,
@@ -57,6 +60,33 @@ def _viewer_result(result: dict) -> CallToolResult:
     )
 
 
+def _install_argument_error_mapping(mcp: FastMCP) -> None:
+    """Map schema-validation failures to a short message naming the expected parameters.
+
+    Argument validation runs inside FastMCP (before ``_run``), which renders the raw pydantic
+    dump (with an errors.pydantic.dev URL) as the tool error. Wrap the tool manager's
+    ``call_tool`` so that one failure mode gets the same client-friendly envelope as the rest.
+    """
+    manager = mcp._tool_manager
+    original = manager.call_tool
+
+    async def call_tool(
+        name: str, arguments: dict[str, Any], context: Any = None, convert_result: bool = False
+    ) -> Any:
+        try:
+            return await original(name, arguments, context=context, convert_result=convert_result)
+        except ToolError as e:
+            cause = e.__cause__
+            tool = manager.get_tool(name)
+            if isinstance(cause, ValidationError) and tool is not None:
+                raise ToolError(
+                    format_argument_error(name, cause, tool.parameters, arguments)
+                ) from None
+            raise
+
+    manager.call_tool = call_tool  # type: ignore[method-assign]
+
+
 def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     """Create and configure the BAMCP MCP server."""
     if config is None:
@@ -90,6 +120,8 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         kwargs["auth"] = build_auth_settings(config)
 
     mcp = FastMCP(**kwargs)
+    # serverInfo.version: BAMCP's own version, not the mcp SDK's (FastMCP's default fallback).
+    mcp._mcp_server.version = __version__
 
     async def _run(tool: str, handler: _Handler, args: dict[str, Any]) -> dict:
         """Run a handler under the one error envelope: any failure surfaces as an MCP error
@@ -171,15 +203,15 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     @mcp.tool(
         description=(
             "Jump to a specific genomic position and view surrounding reads. "
-            "position is 1-based (VCF/samtools convention). If contig is omitted, the "
-            "BAM's first contig is used."
+            "contig and position are both required; position is 1-based (VCF/samtools "
+            "convention). Contig names follow the BAM (call list_contigs: 'chr17' vs '17')."
         ),
         meta=_VIEWER_META,
     )
     async def jump_to(
         file_path: str,
+        contig: str,
         position: int,
-        contig: str | None = None,
         window: int | None = None,
         reference: str | None = None,
         vcf_path: str | None = None,
@@ -290,7 +322,9 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         description=(
             "Get a detailed curation summary for a specific variant with artifact risk "
             "assessment, quality metrics, and recommendations for clinical interpretation. "
-            "Use this for in-depth variant review by genetic curators. Set format='rubric' "
+            "Use this for in-depth variant review by genetic curators. The named site is "
+            "evaluated even when it fails the calling filters (filter_check says which), so a "
+            "filtered-out artifact is scored, not 'not found'. Set format='rubric' (or 'json') "
             "for machine-scorable JSON; include_clinical=true adds ClinVar/gnomAD context."
         ),
     )
@@ -377,15 +411,19 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     @mcp.tool(
         description=(
-            "Scan an entire contig for candidate variants using fast coverage-based detection. "
-            "Requires a reference genome (" + AUTO_REFERENCE_NOTE + ") Returns up to 500 "
-            "candidate variants ranked by VAF. If contig is omitted, the BAM's first contig is "
-            "scanned. " + DETECTION_DEFAULTS_NOTE
+            "Scan a contig (or a 1-based region 'contig:start-end') for candidate SNVs using "
+            "fast coverage-based detection. Requires a reference genome ("
+            + AUTO_REFERENCE_NOTE
+            + ") Returns up to 500 candidates (the highest-VAF ones when capped) sorted by "
+            "position. A scan that hits its time budget returns partial results with "
+            "truncated=true and next_region: pass that as region to continue. If contig and "
+            "region are omitted, the BAM's first contig is scanned. " + DETECTION_DEFAULTS_NOTE
         ),
     )
     async def scan_variants(
         file_path: str,
         contig: str | None = None,
+        region: str | None = None,
         reference: str | None = None,
         min_vaf: float | None = None,
         min_depth: int | None = None,
@@ -394,6 +432,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         args = _args(
             file_path=file_path,
             contig=contig,
+            region=region,
             reference=reference,
             min_vaf=min_vaf,
             min_depth=min_depth,
@@ -424,6 +463,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         return get_viewer_html()
 
     register_demo_surface(mcp)
+    _install_argument_error_mapping(mcp)
 
     # -- Deploy identity -----------------------------------------------------
     # Greenlight's verify gate compares the commit the image was built from (GREENLIGHT_SHA, baked

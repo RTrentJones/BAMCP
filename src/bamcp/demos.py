@@ -20,6 +20,9 @@ from .core.errors import ToolInputError
 from .core.reference import CONTIG_STYLE_CHR, CONTIG_STYLE_NOCHR, get_public_reference_url
 
 DEMO_PREFIX = "demo:"
+# A locus wider than this is a whole gene: reading every read in it is slow (~1 min on a remote
+# 60x BAM) and its pileup is unreadable, so the tour surveys it with get_coverage instead.
+GENE_SCALE_MIN_BP = 2_000
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,17 @@ class DemoLocus:
     region: str
     label: str
     note: str
+
+    @property
+    def span(self) -> int:
+        """Bases covered by ``region`` (1-based inclusive)."""
+        start, end = self.region.rsplit(":", 1)[1].replace(",", "").split("-")
+        return int(end) - int(start) + 1
+
+    @property
+    def gene_scale(self) -> bool:
+        """Too large for get_variants/visualize_region: survey with get_coverage, then zoom."""
+        return self.span > GENE_SCALE_MIN_BP
 
 
 @dataclass(frozen=True)
@@ -79,9 +93,12 @@ DEMO_DATASETS: dict[str, DemoDataset] = {
                 region="chr17:43096101-43096200",
                 label="BRCA1 artifact cluster around chr17:43096151 T>G",
                 note=(
-                    "A cluster of low-VAF mismatches (43096151 T>G ~22%, plus 43096165, "
-                    "43096197 ...) carried by low-base-quality bases on one strand: the "
-                    "classic look of a sequencing artifact. Compare it with the het SNV."
+                    "43096151 T>G: 11 of ~50 reads (22%), all on the forward strand, mean alt "
+                    "base quality ~Q8 — the classic look of a sequencing artifact. The default "
+                    "min_baseq=13 drops 9 of those bases (2/35 remain), so get_variants does "
+                    "not report it; get_variant_curation_summary on the site scores it HIGH "
+                    "artifact risk (strand bias + low base quality) and lists the filters it "
+                    "fails. Compare it with the het SNV."
                 ),
             ),
             DemoLocus(
@@ -123,7 +140,7 @@ DEMO_DATASETS: dict[str, DemoDataset] = {
                 ),
             ),
             DemoLocus(
-                region="13:32889611-32973805",
+                region="13:32889214-32974405",
                 label="BRCA2 gene (GRCh37)",
                 note=(
                     "Gene-scale region on a nochr GRCh37 BAM: contig is '13', not 'chr13'. "
@@ -200,6 +217,7 @@ __all__ = [
     "CONTIG_STYLE_NOCHR",
     "DEMO_DATASETS",
     "DEMO_PREFIX",
+    "GENE_SCALE_MIN_BP",
     "DemoDataset",
     "DemoLocus",
     "available_aliases",

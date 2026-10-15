@@ -68,6 +68,45 @@ class TokenBucketRateLimiter:
                 self._tokens -= 1
 
 
+# Bounded retry for NCBI's shared-quota throttling (429) and transient gateway errors. Under
+# shared demo load several sessions draw on one NCBI quota, so a 429 is expected, not an outage.
+NCBI_RETRY_STATUSES = frozenset({429, 502, 503, 504})
+NCBI_MAX_RETRIES = 3
+NCBI_RETRY_BASE_DELAY = 0.5  # seconds; doubles per attempt
+NCBI_RETRY_MAX_DELAY = 8.0  # cap, also on a server-sent Retry-After
+
+
+def _retry_delay(resp: httpx.Response, attempt: int) -> float:
+    """Seconds to wait before retry ``attempt`` (0-based): Retry-After if numeric, else backoff."""
+    header = str(resp.headers.get("retry-after") or "").strip()
+    delay = float(NCBI_RETRY_BASE_DELAY * (2**attempt))
+    # Numeric seconds only; the HTTP-date form falls back to exponential backoff.
+    if header.replace(".", "", 1).isdigit():
+        delay = float(header)
+    return max(0.0, min(delay, NCBI_RETRY_MAX_DELAY))
+
+
+async def ncbi_get(
+    client: httpx.AsyncClient,
+    url: str,
+    params: dict[str, Any],
+    rate_limiter: TokenBucketRateLimiter,
+    *,
+    max_retries: int = NCBI_MAX_RETRIES,
+) -> httpx.Response:
+    """GET an E-utilities URL under the shared token bucket, retrying 429/5xx a bounded number
+    of times (honoring a numeric ``Retry-After``, capped). Returns the last response; the caller
+    still checks its status, so an exhausted retry surfaces as ``unavailable``."""
+    attempt = 0
+    while True:
+        await rate_limiter.acquire()
+        resp = await client.get(url, params=params)
+        if resp.status_code not in NCBI_RETRY_STATUSES or attempt >= max_retries:
+            return resp
+        await asyncio.sleep(_retry_delay(resp, attempt))
+        attempt += 1
+
+
 def ncbi_rate_limiter(api_key: str | None) -> TokenBucketRateLimiter:
     """Build a token bucket sized to NCBI's limit for this key (or no key)."""
     return TokenBucketRateLimiter(NCBI_RATE_LIMIT_WITH_KEY if api_key else NCBI_RATE_LIMIT_NO_KEY)

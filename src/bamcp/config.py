@@ -76,6 +76,20 @@ def _env_float(name: str, default: float) -> float:
         raise ValueError(f"{name}={raw!r} is not a number") from None
 
 
+def _env_api_key(name: str) -> str | None:
+    """Read an API-key env var strictly: unset/blank is None; otherwise alphanumeric only.
+
+    A stray quote or space (``BAMCP_NCBI_API_KEY=" abc"``) would be sent to NCBI verbatim and
+    rejected on every call; fail at startup instead. The value itself is never echoed.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    if not raw.isascii() or not raw.isalnum() or len(raw) > 128:
+        raise ValueError(f"{name} is not a valid API key (expected 1-128 letters/digits)")
+    return raw
+
+
 def _ensure_cache_dir(explicit: str | None) -> str:
     """Create the cache directory, tolerating a read-only home.
 
@@ -297,7 +311,7 @@ class BAMCPConfig:
             token_expiry=_env_int("BAMCP_TOKEN_EXPIRY", DEFAULT_TOKEN_EXPIRY_SECONDS),
             verify_token=env.get("BAMCP_VERIFY_TOKEN") or None,
             allow_dynamic_registration=_env_bool("BAMCP_ALLOW_DYNAMIC_REGISTRATION", False),
-            ncbi_api_key=env.get("BAMCP_NCBI_API_KEY"),
+            ncbi_api_key=_env_api_key("BAMCP_NCBI_API_KEY"),
             clinvar_enabled=_env_bool("BAMCP_CLINVAR_ENABLED", True),
             gnomad_enabled=_env_bool("BAMCP_GNOMAD_ENABLED", True),
             gnomad_dataset=env.get("BAMCP_GNOMAD_DATASET", DEFAULT_GNOMAD_DATASET),

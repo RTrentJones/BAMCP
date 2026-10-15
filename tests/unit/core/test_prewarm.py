@@ -29,6 +29,11 @@ def _isolate(monkeypatch):
 
     monkeypatch.setattr(tools, "_ensure_cached_index", no_index)
 
+    async def no_ref_index(reference, config):
+        return None
+
+    monkeypatch.setattr(tools, "_ensure_reference_indexes", no_ref_index)
+
 
 @pytest.fixture
 def opened(monkeypatch):
@@ -268,3 +273,63 @@ async def test_prewarm_uses_real_demo_registry(monkeypatch, opened):
     n = len(demos_mod.DEMO_DATASETS)
     assert await prewarm.prewarm_demos(BAMCPConfig(transport="sse")) == n
     assert (BAM, REF) in opened
+
+
+# --- reference .fai/.gzi cache ---------------------------------------------------------------
+
+
+async def test_reference_indexes_are_cached_once_and_registered(monkeypatch, tmp_path):
+    """A remote bgzip reference's .fai/.gzi are downloaded once and handed to open_fasta."""
+    from bamcp.core import parsers
+
+    monkeypatch.undo()  # this test exercises the real _ensure_reference_indexes
+    monkeypatch.setattr(parsers, "_REFERENCE_INDEXES", type(parsers._REFERENCE_INDEXES)())
+    fetched = []
+
+    async def fake_download(client, url, path, config):
+        fetched.append(url)
+        with open(path, "w") as fh:
+            fh.write("x")
+        return path
+
+    monkeypatch.setattr(tools, "_download_index_streaming", fake_download)
+    config = BAMCPConfig(cache_dir=str(tmp_path), allow_remote_files=True)
+    ref = "https://example.org/genome.fa.gz"
+    await tools._ensure_reference_indexes(ref, config)
+    await tools._ensure_reference_indexes(ref, config)
+    assert fetched == [ref + ".fai", ref + ".gzi"]  # second call is a cache hit
+    fai, gzi = parsers._REFERENCE_INDEXES[ref]
+    assert fai.endswith(".fai") and gzi is not None and gzi.endswith(".gzi")
+
+
+async def test_reference_indexes_skipped_for_local_or_disabled(monkeypatch, tmp_path):
+    monkeypatch.undo()
+
+    async def boom(*a, **k):
+        raise AssertionError("must not download")
+
+    monkeypatch.setattr(tools, "_download_index_streaming", boom)
+    await tools._ensure_reference_indexes("/data/ref.fa", BAMCPConfig(allow_remote_files=True))
+    await tools._ensure_reference_indexes("https://example.org/r.fa", BAMCPConfig())
+
+
+def test_open_fasta_uses_registered_local_index(monkeypatch, comprehensive_ref_fasta_path):
+    import pysam
+
+    from bamcp.core import parsers
+
+    monkeypatch.setattr(parsers, "_REFERENCE_INDEXES", type(parsers._REFERENCE_INDEXES)())
+    seen = {}
+    real = pysam.FastaFile
+
+    def spy(path, **kw):
+        seen.update(kw)
+        return real(path, **kw)
+
+    monkeypatch.setattr(parsers.pysam, "FastaFile", spy)
+    parsers.register_reference_index(
+        comprehensive_ref_fasta_path, comprehensive_ref_fasta_path + ".fai", None
+    )
+    with parsers.open_fasta(comprehensive_ref_fasta_path) as fasta:
+        assert fasta.references
+    assert seen["filepath_index"].endswith(".fai")

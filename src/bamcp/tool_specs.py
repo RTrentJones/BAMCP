@@ -32,7 +32,7 @@ _VARIANT_SOURCE = {
 # The region-string contract every region-taking tool shares (parse_region converts it).
 REGION_FORMAT_NOTE = (
     "region is 1-based and inclusive, samtools-style ('chr1:1000-2000' covers bases "
-    "1000..2000; 'chr1:1051-1051' is the single base 1051)."
+    "1000..2000; 'chr1:1051-1051' or just 'chr1:1051' is the single base 1051)."
 )
 _REGION = {**_STR, "description": "1-based inclusive, samtools-style, e.g. chr1:1000-2000"}
 
@@ -111,8 +111,8 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "jump_to": {
         "description": "Jump to a specific genomic position and view the surrounding reads in "
-        "the interactive viewer. position is 1-based (VCF/samtools convention). If "
-        "contig is omitted, the BAM's first contig is used.",
+        "the interactive viewer. contig and position are both required; position is 1-based "
+        "(VCF/samtools convention). Contig names follow the BAM (list_contigs: 'chr17' vs '17').",
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -123,7 +123,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "vcf_path": _VCF_PATH,
                 "variant_source": _VARIANT_SOURCE,
             },
-            ["file_path", "position"],
+            ["file_path", "contig", "position"],
         ),
     },
     "visualize_region": {
@@ -179,8 +179,9 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "get_variant_curation_summary": {
         "description": "Get a detailed curation summary for a specific variant with artifact-risk "
-        "assessment, quality metrics, and curator recommendations. Set format='rubric' for a "
-        "machine-scorable JSON with 0-1 quality scores. Positions are 1-based.",
+        "assessment, quality metrics, and curator recommendations. The named site is evaluated "
+        "even when it fails the calling filters (filter_check says which). Set format='rubric' "
+        "(or 'json') for a machine-scorable JSON with 0-1 quality scores. Positions are 1-based.",
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -190,21 +191,29 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "alt": _STR,
                 "window": _INT,
                 "reference": _STR,
-                "format": {**_STR, "enum": ["text", "rubric"]},
+                "format": {**_STR, "enum": ["text", "rubric", "json"]},
                 "include_clinical": {"type": "boolean"},
             },
             ["file_path", "chrom", "pos", "ref", "alt"],
         ),
     },
     "scan_variants": {
-        "description": "Scan an entire contig for variants using fast coverage-based detection. "
-        "Requires a reference genome (" + AUTO_REFERENCE_NOTE + ") Returns up to 500 variants "
-        "ranked by VAF. If contig is omitted, the BAM's first contig is scanned. "
-        + DETECTION_DEFAULTS_NOTE,
+        "description": "Scan a contig (or a 1-based region 'contig:start-end') for candidate "
+        "SNVs using fast coverage-based detection. Requires a reference genome ("
+        + AUTO_REFERENCE_NOTE
+        + ") Returns up to 500 candidates (the highest-VAF ones when capped) sorted by "
+        "position. A scan that hits its time budget returns partial results with "
+        "truncated=true and next_region: pass that as region to continue. If contig and region "
+        "are omitted, the BAM's first contig is scanned. " + DETECTION_DEFAULTS_NOTE,
         "input_schema": _obj(
             {
                 "file_path": _STR,
                 "contig": _STR,
+                "region": {
+                    **_STR,
+                    "description": "1-based inclusive 'contig:start-end' to scan (e.g. a "
+                    "truncated scan's next_region); no size cap",
+                },
                 "reference": _STR,
                 "min_vaf": _NUM,
                 "min_depth": _INT,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import re
 import sys
@@ -27,19 +28,87 @@ _DEFAULT_HEIGHT = 800
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
-def _check_rebuild_needed() -> str | None:
-    """Return a warning string when source TS is newer than dist/viewer.html."""
-    dist = _STATIC_DIR / "dist" / "viewer.html"
+# Written next to dist/viewer.html after a build (``--record-build-hash``): the content hash
+# of the sources that produced it, plus the dist hash so a later un-stamped rebuild is detected.
+BUILD_STAMP_NAME = ".viewer-sources.json"
+
+
+def _viewer_source_files(static_dir: Path) -> list[Path]:
+    """The files whose content determines dist/viewer.html (tests excluded)."""
+    files = [f for f in static_dir.glob("*.ts") if not f.name.endswith(".test.ts")]
+    files += [static_dir / "viewer.html", static_dir / "package-lock.json"]
+    return sorted((f for f in files if f.is_file()), key=lambda f: f.name)
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def viewer_source_hash(static_dir: Path | None = None) -> str:
+    """Content hash of the viewer sources (names + bytes) — independent of mtimes."""
+    static_dir = static_dir or _STATIC_DIR
+    h = hashlib.sha256()
+    for f in _viewer_source_files(static_dir):
+        h.update(f.name.encode("utf-8") + b"\0")
+        h.update(f.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def record_build_hash(static_dir: Path | None = None) -> Path:
+    """Stamp dist/ with the source + dist hashes. Run right after ``npm run build``."""
+    static_dir = static_dir or _STATIC_DIR
+    dist = static_dir / "dist" / "viewer.html"
     if not dist.exists():
-        return f"WARNING: {dist} does not exist. Run 'cd src/bamcp/static && npm run build'."
+        raise SystemExit(f"{dist} does not exist; build the viewer before recording its hash.")
+    stamp = static_dir / "dist" / BUILD_STAMP_NAME
+    stamp.write_text(
+        json.dumps({"sources": viewer_source_hash(static_dir), "dist": _sha256_file(dist)}) + "\n",
+        encoding="utf-8",
+    )
+    return stamp
+
+
+def _read_stamp(static_dir: Path, dist: Path) -> str | None:
+    """The recorded source hash, or None when there is no stamp matching this dist build."""
+    stamp = static_dir / "dist" / BUILD_STAMP_NAME
+    try:
+        data = json.loads(stamp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("dist") != _sha256_file(dist):
+        return None  # dist was rebuilt after the stamp was written — the stamp says nothing.
+    sources = data.get("sources")
+    return sources if isinstance(sources, str) else None
+
+
+def _check_rebuild_needed() -> str | None:
+    """Return a warning string when dist/viewer.html was not built from the current sources.
+
+    Compares a content hash of the sources against the hash recorded at build time
+    (``--record-build-hash``), so a fresh checkout or a branch switch that only touches
+    mtimes does not warn. Without a stamp it falls back to the old mtime comparison.
+    """
+    dist = _STATIC_DIR / "dist" / "viewer.html"
+    rebuild = "Run 'cd src/bamcp/static && npm run build'"
+    if not dist.exists():
+        return f"WARNING: {dist} does not exist. {rebuild}."
+    recorded = _read_stamp(_STATIC_DIR, dist)
+    if recorded is not None:
+        if recorded == viewer_source_hash(_STATIC_DIR):
+            return None
+        return (
+            "WARNING: viewer sources changed since dist/viewer.html was built "
+            f"(content hash mismatch). {rebuild} to pick up your changes."
+        )
     dist_mtime = dist.stat().st_mtime
-    src_files = list(_STATIC_DIR.glob("*.ts")) + [_STATIC_DIR / "viewer.html"]
-    newer = [f for f in src_files if f.exists() and f.stat().st_mtime > dist_mtime]
+    newer = [f for f in _viewer_source_files(_STATIC_DIR) if f.stat().st_mtime > dist_mtime]
     if newer:
         names = ", ".join(f.name for f in newer)
         return (
             f"WARNING: viewer sources newer than dist/viewer.html ({names}). "
-            "Run 'cd src/bamcp/static && npm run build' to pick up your changes."
+            f"{rebuild} to pick up your changes (then '--record-build-hash' "
+            "to switch this check to content hashes)."
         )
     return None
 
@@ -165,6 +234,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Element to screenshot. Default: #container, or #viewer with --blind.",
     )
     p.add_argument("--out", default=".render-dev/last.png", help="Output PNG path.")
+    p.epilog = (
+        "Run 'render_viewer --record-build-hash' right after 'npm run build' to stamp dist/ "
+        "with a content hash of the sources (enables the hash-based staleness check)."
+    )
     p.add_argument(
         "--print-path-only",
         action="store_true",
@@ -217,6 +290,10 @@ async def _async_main(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = sys.argv[1:] if argv is None else argv
+    if raw == ["--record-build-hash"]:
+        print(record_build_hash())
+        return 0
     args = _parse_args(argv)
     if not args.print_path_only:
         warning = _check_rebuild_needed()

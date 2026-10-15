@@ -166,6 +166,96 @@ class TestRebuildGuard:
         assert "does not exist" in warning
 
 
+class TestHashStaleness:
+    def _static(self, tmp_path: Path) -> Path:
+        static = tmp_path / "static"
+        (static / "dist").mkdir(parents=True)
+        (static / "renderer.ts").write_text("// v1")
+        (static / "viewer.html").write_text("<html>src</html>")
+        (static / "dist" / "viewer.html").write_text("<html>built</html>")
+        return static
+
+    @pytest.mark.unit
+    def test_fresh_stamp_ignores_newer_mtimes(self, monkeypatch, tmp_path: Path):
+        """A checkout/branch switch bumps mtimes without changing content: no warning."""
+        import os
+
+        from bamcp.eval import render_cli
+
+        static = self._static(tmp_path)
+        render_cli.record_build_hash(static)
+        future = time.time() + 3600
+        os.utime(static / "renderer.ts", (future, future))
+        monkeypatch.setattr(render_cli, "_STATIC_DIR", static)
+        assert render_cli._check_rebuild_needed() is None
+
+    @pytest.mark.unit
+    def test_content_change_warns_even_with_old_mtime(self, monkeypatch, tmp_path: Path):
+        import os
+
+        from bamcp.eval import render_cli
+
+        static = self._static(tmp_path)
+        render_cli.record_build_hash(static)
+        (static / "renderer.ts").write_text("// v2")
+        os.utime(static / "renderer.ts", (0, 0))
+        monkeypatch.setattr(render_cli, "_STATIC_DIR", static)
+        warning = render_cli._check_rebuild_needed()
+        assert warning is not None and "content hash" in warning
+
+    @pytest.mark.unit
+    def test_test_files_do_not_affect_hash(self, tmp_path: Path):
+        from bamcp.eval import render_cli
+
+        static = self._static(tmp_path)
+        before = render_cli.viewer_source_hash(static)
+        (static / "constants.test.ts").write_text("// test only")
+        assert render_cli.viewer_source_hash(static) == before
+        (static / "state.ts").write_text("// new source")
+        assert render_cli.viewer_source_hash(static) != before
+
+    @pytest.mark.unit
+    def test_stamp_for_older_dist_is_ignored(self, monkeypatch, tmp_path: Path):
+        """Rebuilt without re-stamping: the stamp no longer describes dist → mtime fallback."""
+        import os
+
+        from bamcp.eval import render_cli
+
+        static = self._static(tmp_path)
+        render_cli.record_build_hash(static)
+        (static / "renderer.ts").write_text("// v2")
+        (static / "dist" / "viewer.html").write_text("<html>rebuilt</html>")
+        os.utime(static / "renderer.ts", (0, 0))
+        monkeypatch.setattr(render_cli, "_STATIC_DIR", static)
+        assert render_cli._check_rebuild_needed() is None
+
+    @pytest.mark.unit
+    def test_corrupt_stamp_falls_back(self, monkeypatch, tmp_path: Path):
+        from bamcp.eval import render_cli
+
+        static = self._static(tmp_path)
+        (static / "dist" / render_cli.BUILD_STAMP_NAME).write_text("not json")
+        monkeypatch.setattr(render_cli, "_STATIC_DIR", static)
+        assert render_cli._read_stamp(static, static / "dist" / "viewer.html") is None
+
+    @pytest.mark.unit
+    def test_record_requires_dist(self, tmp_path: Path):
+        from bamcp.eval import render_cli
+
+        with pytest.raises(SystemExit, match="does not exist"):
+            render_cli.record_build_hash(tmp_path)
+
+    @pytest.mark.unit
+    def test_main_record_build_hash(self, monkeypatch, capsys, tmp_path: Path):
+        from bamcp.eval import render_cli
+
+        static = self._static(tmp_path)
+        monkeypatch.setattr(render_cli, "_STATIC_DIR", static)
+        assert render_cli.main(["--record-build-hash"]) == 0
+        assert render_cli.BUILD_STAMP_NAME in capsys.readouterr().out
+        assert render_cli._check_rebuild_needed() is None
+
+
 class TestPrintPathOnly:
     @pytest.mark.unit
     def test_main_prints_only_path_when_flag_set(self, monkeypatch, capsys, tmp_path: Path):

@@ -2747,7 +2747,6 @@ class TestSearchGeneBuildResolution:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_unrecognized_build_errors(self, monkeypatch):
-        import json as _json
 
         from bamcp.core.tools import handle_search_gene
 

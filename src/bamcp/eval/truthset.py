@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,14 @@ from .metrics import PRF, ArtifactCheck, artifact_recall, prf_from_sets, risk_ty
 from .router import InProcessRouter, ToolRouter
 
 DEFAULT_VAF_TOLERANCE = 0.02
+
+# Detection-operating-point keys a manifest may pin (``operating_point:``). The server's
+# defaults are tuned for a newcomer on real data (noise suppressed); a truth set that plants
+# low-MAPQ / low-depth artifact sites must be scored at the sensitivity operating point it was
+# designed for, or the artifacts are filtered out before curation can flag them.
+OPERATING_POINT_KEYS = frozenset(
+    {"min_vaf", "min_depth", "min_mapq", "min_baseq", "min_alt_count", "max_reads"}
+)
 
 # Ordinal artifact likelihood, for the one-sided expected_likelihood check.
 _LIKELIHOOD_ORDER = {"low": 0, "medium": 1, "high": 2}
@@ -82,6 +90,8 @@ class TruthSet:
     # Absolute tolerance for expected_vaf checks. Manifest VAFs are rounded to two
     # decimals, so 0.02 absorbs rounding without hiding a real allele-count change.
     vaf_tolerance: float = DEFAULT_VAF_TOLERANCE
+    # Pinned caller thresholds (see OPERATING_POINT_KEYS); applied by score_truthset.
+    operating_point: dict[str, Any] = field(default_factory=dict)
 
 
 def load_truthset(path: str | Path) -> TruthSet:
@@ -115,7 +125,19 @@ def load_truthset(path: str | Path) -> TruthSet:
         variant_sites=sites,
         negative_regions=negatives,
         vaf_tolerance=float(doc.get("vaf_tolerance", DEFAULT_VAF_TOLERANCE)),
+        operating_point=_parse_operating_point(doc.get("operating_point"), path),
     )
+
+
+def _parse_operating_point(raw: Any, path: str | Path) -> dict[str, Any]:
+    if not raw:
+        return {}
+    if not isinstance(raw, dict) or not set(raw) <= OPERATING_POINT_KEYS:
+        raise ValueError(
+            f"Truth-set manifest {path}: operating_point keys must be a subset of "
+            f"{sorted(OPERATING_POINT_KEYS)}"
+        )
+    return dict(raw)
 
 
 def _parse_site(raw: dict[str, Any]) -> TruthSite:
@@ -295,8 +317,16 @@ async def score_truthset(
     truthset: TruthSet,
     config: BAMCPConfig,
     router: ToolRouter | None = None,
+    *,
+    apply_operating_point: bool = True,
 ) -> TruthsetReport:
-    """Run the BAMCP tools over ``truthset`` and compute deterministic metrics."""
+    """Run the BAMCP tools over ``truthset`` and compute deterministic metrics.
+
+    The manifest's pinned ``operating_point`` is applied on top of ``config`` unless the
+    caller already merged it (the CLI does, so its explicit flags win).
+    """
+    if apply_operating_point and truthset.operating_point:
+        config = replace(config, **truthset.operating_point)
     router = router or InProcessRouter(config)
     bam = truthset.bam
     reference = truthset.reference
@@ -547,27 +577,32 @@ def main(argv: list[str] | None = None) -> int:
         default=0.95,
         help="Minimum variant precision (default 0.95).",
     )
-    # Detection operating point. The BAMCP defaults (min-vaf 0.02, min-depth 2)
-    # are tuned for curation sensitivity, not calling; override them here to
-    # score the caller at a realistic variant-calling threshold.
+    # Detection operating point. A manifest may pin one (operating_point:); these
+    # flags override it, e.g. to score the caller at a realistic calling threshold.
     p.add_argument("--min-vaf", type=float, default=None, help="Override caller min VAF.")
     p.add_argument("--min-depth", type=int, default=None, help="Override caller min depth.")
     p.add_argument("--min-mapq", type=int, default=None, help="Override caller min MAPQ.")
+    p.add_argument(
+        "--min-alt-count", type=int, default=None, help="Override caller min alt-read count."
+    )
     p.add_argument("--max-reads", type=int, default=None, help="Override caller max reads.")
     args = p.parse_args(argv)
 
     truthset = load_truthset(args.manifest)
-    overrides: dict[str, Any] = {"reference": truthset.reference}
+    # Manifest-pinned operating point first; explicit CLI flags override it.
+    overrides: dict[str, Any] = {**truthset.operating_point, "reference": truthset.reference}
     if args.min_vaf is not None:
         overrides["min_vaf"] = args.min_vaf
     if args.min_depth is not None:
         overrides["min_depth"] = args.min_depth
     if args.min_mapq is not None:
         overrides["min_mapq"] = args.min_mapq
+    if args.min_alt_count is not None:
+        overrides["min_alt_count"] = args.min_alt_count
     if args.max_reads is not None:
         overrides["max_reads"] = args.max_reads
     config = BAMCPConfig(**overrides)
-    report = asyncio.run(score_truthset(truthset, config))
+    report = asyncio.run(score_truthset(truthset, config, apply_operating_point=False))
     passed, failures = report.meets_floors(
         min_recall=args.min_recall, min_precision=args.min_precision
     )

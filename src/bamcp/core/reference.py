@@ -118,6 +118,36 @@ def contig_style(contigs: list[dict]) -> str:
     return CONTIG_STYLE_CHR if prefixed * 2 > len(names) else CONTIG_STYLE_NOCHR
 
 
+# Mitochondrion naming differs beyond the prefix: UCSC "chrM" vs Ensembl/1000G "MT".
+_MITO_ALIASES = {"chrM": "MT", "MT": "chrM", "chrMT": "MT", "M": "chrM"}
+
+
+def alternate_contig_names(contig: str) -> list[str]:
+    """Other-style spellings of ``contig``: ``chr13`` <-> ``13``, ``chrM`` <-> ``MT``."""
+    out: list[str] = []
+    if contig in _MITO_ALIASES:
+        out.append(_MITO_ALIASES[contig])
+    if contig.startswith("chr") and len(contig) > 3:
+        out.append(contig[3:])
+    elif not contig.startswith("chr"):
+        out.append("chr" + contig)
+    return [c for c in dict.fromkeys(out) if c != contig]
+
+
+def map_contig_to_style(contig: str, names: set[str] | frozenset[str]) -> str | None:
+    """Return the spelling of ``contig`` that exists in ``names`` (itself first), else None.
+
+    Used to translate a gene's NCBI ``chr13`` into a ``13``-style BAM's contig (and back),
+    so a region handed to the next tool actually exists in that BAM.
+    """
+    if contig in names:
+        return contig
+    for alt in alternate_contig_names(contig):
+        if alt in names:
+            return alt
+    return None
+
+
 def get_public_reference_url(build: str, style: str | None = None) -> str | None:
     """Get a public, index-backed FASTA URL for a genome build.
 

@@ -136,9 +136,9 @@ GLOSSARY: list[GlossaryTerm] = [
     GlossaryTerm(
         "reference_source",
         "Where the reference genome used for SNV detection came from: supplied by you "
-        "('user'), configured by the server operator ('server'), or chosen automatically to "
-        "match the BAM's build and contig naming ('auto'). No reference means SNV detection "
-        "is disabled.",
+        "('explicit'), configured by the server operator ('config'), or chosen automatically "
+        "to match the BAM's build and contig naming ('auto'). 'none' means there was no "
+        "reference, so SNV/indel detection is disabled.",
         "With a matching reference, mismatches against it are real differences in the reads.",
         "Without one, a lack of SNVs means nothing; with the wrong build, everything is off.",
     ),

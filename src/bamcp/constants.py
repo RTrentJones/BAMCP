@@ -20,10 +20,17 @@ DEFAULT_CACHE_DIR = Path.home() / ".cache" / "bamcp"
 # Genomics operation defaults
 DEFAULT_MAX_READS = 10_000
 DEFAULT_WINDOW_SIZE = 500
-DEFAULT_MIN_VAF = 0.02
+# Candidate-detection operating point. Tuned so a newcomer's first get_variants on real
+# short-read data returns real variants rather than sequencing noise: a 10 kb BRCA1 window
+# at MAPQ0/BQ0/no-alt-count floor returned ~40 candidates, ~39 of them single-read errors.
+# Every response echoes these in applied_filters, and callers can loosen them per call.
+DEFAULT_MIN_VAF = 0.10
 DEFAULT_MIN_DEPTH = 2
-DEFAULT_MIN_MAPQ = 0
-DEFAULT_MIN_BASEQ = 0
+DEFAULT_MIN_MAPQ = 20
+DEFAULT_MIN_BASEQ = 13
+# Minimum number of alt-supporting reads for a BAMCP candidate (VCF records are never
+# dropped by it). One or two reads carrying a base is the signature of a sequencing error.
+DEFAULT_MIN_ALT_COUNT = 3
 
 # Candidate indel detection runs a pysam pileup pass (costlier than count_coverage).
 # Skip it above this region size so large visualize_region requests stay responsive;

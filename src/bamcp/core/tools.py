@@ -7,6 +7,7 @@ import functools
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -14,7 +15,7 @@ import weakref
 from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import urljoin
@@ -22,7 +23,14 @@ from urllib.parse import urljoin
 import httpx
 import pysam
 
-from ..analysis.evidence import enhance_vcf_variants
+from ..analysis.evidence import (
+    _not_computed_evidence,
+    _vcf_evidence,
+    annotate_interpretation,
+    compute_artifact_risk,
+    compute_confidence,
+    enhance_vcf_variants,
+)
 from ..clients.clinvar import ClinVarClient
 from ..clients.genes import GeneClient, GeneLookupError
 from ..clients.gnomad import GnomadClient, GnomadQueryError
@@ -64,7 +72,7 @@ from .parsers import (
     load_vcf_variants,
     parse_region,
 )
-from .serialization import serialize_region_data
+from .serialization import build_enhanced_variants, serialize_region_data
 from .validation import (
     is_cram,
     validate_path,
@@ -150,6 +158,10 @@ class BAMCPServices:
     # _set_cached_region. Values are (created_monotonic, data, approx_bytes).
     region_cache: OrderedDict[tuple, _RegionCacheEntry] = field(default_factory=OrderedDict)
     index_download_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    # Parsed BAM/CRAM headers (contig name/length lists), LRU-bounded by entry count
+    # (_HEADER_CACHE_MAX). Keyed by (file_path, local fingerprint) so a replaced local file
+    # is re-read. Feeds build/style detection for auto-reference and search_gene.
+    header_cache: OrderedDict[tuple, list[dict]] = field(default_factory=OrderedDict)
     _clinvar: ClinVarClient | None = field(default=None, repr=False)
     _gnomad: GnomadClient | None = field(default=None, repr=False)
     _genes: GeneClient | None = field(default=None, repr=False)
@@ -214,6 +226,7 @@ class BAMCPServices:
         self._ncbi_limiter = None
         self.region_cache.clear()
         self.index_download_locks.clear()
+        self.header_cache.clear()
 
     def clear_caches(self) -> int:
         """Drop downloaded index files and the region cache; return index files removed.
@@ -223,6 +236,7 @@ class BAMCPServices:
         """
         removed = self.cache.cleanup_session()
         self.region_cache.clear()
+        self.header_cache.clear()
         return removed
 
 
@@ -422,8 +436,14 @@ def _applied_filters(
     include_max_reads: bool,
     detection: dict[str, Any] | None = None,
     reads_truncated: bool | None = None,
+    min_alt_count: int | None = None,
+    reference_source: str | None = None,
 ) -> dict[str, Any]:
     """The read/variant thresholds actually applied to this response.
+
+    ``min_alt_count`` and ``reference_source`` are echoed only when the caller passes them,
+    i.e. only by tools that actually apply the alt-read floor / resolved the reference
+    (``explicit`` | ``config`` | ``auto`` | ``none``).
 
     ``min_vaf``/``min_depth`` honor per-call overrides; ``min_mapq``/``min_baseq`` are
     operator config. ``max_reads`` gates how many reads are *displayed* (viewer tools),
@@ -440,6 +460,10 @@ def _applied_filters(
         "excluded_reads": list(EXCLUDED_READ_FLAGS),
         "overlapping_mates": OVERLAPPING_MATES_POLICY,
     }
+    if min_alt_count is not None:
+        filters["min_alt_count"] = min_alt_count
+    if reference_source is not None:
+        filters["reference_source"] = reference_source
     if include_max_reads:
         filters["max_reads"] = config.max_reads
     if reads_truncated is not None:
@@ -457,6 +481,10 @@ def _format_filters_line(filters: dict[str, Any]) -> str:
         f"MAPQ≥{filters['min_mapq']}",
         f"baseQ≥{filters['min_baseq']}",
     ]
+    if "min_alt_count" in filters:
+        parts.append(f"alt reads≥{filters['min_alt_count']}")
+    if "reference_source" in filters:
+        parts.append(f"reference: {filters['reference_source']}")
     if "max_reads" in filters:
         parts.append(f"≤{filters['max_reads']} reads shown")
     if filters.get("reads_truncated"):
@@ -1214,20 +1242,144 @@ def _format_variant_line(variant: dict[str, Any]) -> str:
     return line
 
 
-async def _resolve_reference(
-    args: dict[str, Any], config: BAMCPConfig
-) -> tuple[str | None, str | None]:
-    """Return ``(explicit_reference, effective_reference)`` for a tool call.
+# Reference provenance vocabulary, echoed as applied_filters.reference_source.
+REFERENCE_SOURCE_EXPLICIT = "explicit"  # the caller passed `reference`
+REFERENCE_SOURCE_CONFIG = "config"  # the operator's BAMCP_REFERENCE
+REFERENCE_SOURCE_AUTO = "auto"  # registry FASTA matching the BAM's build + contig style
+REFERENCE_SOURCE_NONE = "none"  # no reference: SNV/indel detection is off
+
+# Header-cache bound (entries). A header with thousands of decoy/HLA contigs is ~100s of KB
+# as Python objects, so keep this small; a miss costs one header read.
+_HEADER_CACHE_MAX = 32
+
+
+@dataclass(frozen=True)
+class ResolvedReference:
+    """The reference a tool call will use, and where it came from.
+
+    ``explicit`` is the caller-supplied value (the only one safe to echo as caller input);
+    ``effective`` is what the parsers get; ``source`` is one of the REFERENCE_SOURCE_* values;
+    ``note`` explains why no auto reference was chosen, when that is the case.
+    """
+
+    explicit: str | None
+    effective: str | None
+    source: str
+    note: str | None = None
+
+    @property
+    def echo(self) -> str | None:
+        """The reference to hand back for viewer refetches: explicit or auto, never config.
+
+        An auto reference is a public, allow-listed registry URL, so re-validating it as
+        caller input on a refetch passes; the operator default stays server-side.
+        """
+        if self.source in (REFERENCE_SOURCE_EXPLICIT, REFERENCE_SOURCE_AUTO):
+            return self.effective
+        return None
+
+
+async def _bam_contigs(file_path: str, config: BAMCPConfig) -> list[dict]:
+    """The BAM/CRAM header's ``[{name, length}]`` list, from a bounded per-server cache.
+
+    Callers validate ``file_path`` first. CRAM headers decode without a reference; the
+    operator reference is passed through only as pysam's ``reference_filename``.
+    """
+    cache = get_services(config).header_cache
+    key = (file_path, _local_fingerprint(file_path))
+    cached = cache.get(key)
+    if cached is not None:
+        cache.move_to_end(key)
+        return cached
+    index_path = await _ensure_cached_index(file_path, config)
+    # A cold remote BAM's first open gets the cold-start budget, not the parse timeout.
+    await _warm_remote_inputs(file_path, None, index_path)
+    contigs = await asyncio.wait_for(
+        _run_in_parse_pool(_read_contigs_sync, file_path, config.reference, index_path),
+        timeout=BAM_PARSE_TIMEOUT_SECONDS,
+    )
+    cache[key] = contigs
+    while len(cache) > _HEADER_CACHE_MAX:
+        cache.popitem(last=False)
+    return contigs
+
+
+async def _auto_reference(file_path: str, config: BAMCPConfig) -> tuple[str | None, str | None]:
+    """Pick the registry FASTA matching the BAM's build AND contig style, or explain why not.
+
+    Returns ``(url, note)``. The URL goes through the same :func:`validate_reference_path`
+    as caller input (scheme, extension, port, the host allow-list, non-global IPs), so auto
+    selection can never reach a host the operator has not allowed.
+    """
+    from .reference import contig_style, detect_genome_build, get_public_reference_url
+
+    try:
+        contigs = await _bam_contigs(file_path, config)
+    except Exception as e:  # noqa: BLE001 — the main fetch reports the real error
+        logger.info("auto-reference: header read failed for %s: %s", file_path, e)
+        return None, "auto-reference skipped: the alignment header could not be read"
+    build = detect_genome_build(contigs)["build"]
+    if build == "unknown":
+        return None, (
+            "no reference: the genome build was not recognized from the header; "
+            "pass 'reference' to enable SNV/indel detection"
+        )
+    style = contig_style(contigs)
+    url = get_public_reference_url(build, style)
+    if url is None:
+        return None, (
+            f"no reference: no public indexed {build} FASTA is known for {style}-style "
+            "contigs; pass 'reference' to enable SNV/indel detection"
+        )
+    try:
+        await asyncio.to_thread(validate_reference_path, url, config)
+    except (ValueError, FileNotFoundError) as e:
+        logger.info("auto-reference: %s rejected by validation: %s", url, e)
+        return None, (
+            f"no reference: the public {build} FASTA is not permitted by this server's "
+            "remote-file policy; pass 'reference' to enable SNV/indel detection"
+        )
+    return url, None
+
+
+async def _resolve_reference_info(
+    args: dict[str, Any], config: BAMCPConfig, *, auto: bool = True
+) -> ResolvedReference:
+    """Resolve a tool call's reference: explicit arg > operator config > auto > none.
 
     Validates only a caller-supplied reference — that is the untrusted SSRF vector. A
     ``config.reference`` default is operator-set (trusted) and may legitimately be absent for BAM
     inputs or discovery paths like list_contigs, so it is neither required nor SSRF-checked here.
-    The explicit value is returned separately because only it may be echoed back to the caller.
+
+    With neither, and remote files enabled (the public FASTAs are remote), ``auto`` picks the
+    registry FASTA matching ``args['file_path']``'s detected build and contig naming style
+    (see :func:`_auto_reference`) so detection works on a bare BAM URL.
     """
     explicit_reference = args.get("reference")
     if explicit_reference:
         await asyncio.to_thread(validate_reference_path, explicit_reference, config)
-    return explicit_reference, explicit_reference or config.reference
+        return ResolvedReference(explicit_reference, explicit_reference, REFERENCE_SOURCE_EXPLICIT)
+    if config.reference:
+        return ResolvedReference(None, config.reference, REFERENCE_SOURCE_CONFIG)
+    file_path = args.get("file_path")
+    if auto and config.allow_remote_files and file_path:
+        url, note = await _auto_reference(file_path, config)
+        if url is not None:
+            return ResolvedReference(None, url, REFERENCE_SOURCE_AUTO)
+        return ResolvedReference(None, None, REFERENCE_SOURCE_NONE, note)
+    return ResolvedReference(None, None, REFERENCE_SOURCE_NONE)
+
+
+async def _resolve_reference(
+    args: dict[str, Any], config: BAMCPConfig, *, auto: bool = True
+) -> tuple[str | None, str | None]:
+    """Return ``(explicit_reference, effective_reference)`` for a tool call.
+
+    Thin wrapper over :func:`_resolve_reference_info` (which also reports the source). The
+    explicit value is returned separately because only it may be echoed back to the caller.
+    """
+    resolved = await _resolve_reference_info(args, config, auto=auto)
+    return resolved.explicit, resolved.effective
 
 
 def _resolve_variant_source(variant_source: str, vcf_path: str | None) -> tuple[str | None, bool]:
@@ -1248,6 +1400,135 @@ def _resolve_variant_source(variant_source: str, vcf_path: str | None) -> tuple[
     return vcf_path, variant_source == "vcf"
 
 
+# Bounded per-site evidence for get_variants: each BAMCP SNV candidate gets a pileup-backed
+# strand/quality/position record (artifact_risk + confidence) — up to this many sites per call,
+# so a noisy wide region can't turn one request into thousands of pileups. Past the cap the
+# remaining candidates are flagged (applied_filters.per_site_evidence.capped).
+GET_VARIANTS_EVIDENCE_MAX_SITES = 50
+
+_UNSCORED_INDEL_NOTE = (
+    "Indel read-level evidence is not computed by get_variants; use visualize_region or "
+    "get_variant_curation_summary at this site."
+)
+_UNSCORED_CAP_NOTE = (
+    f"Per-site evidence is computed for at most {GET_VARIANTS_EVIDENCE_MAX_SITES} candidates "
+    "per call; narrow the region to score this one."
+)
+_UNSCORED_TIMEOUT_NOTE = "Per-site evidence timed out; retry or narrow the region."
+
+
+def _passes_candidate_filters(
+    v: dict[str, Any], min_vaf: float, min_depth: int, min_alt_count: int
+) -> bool:
+    """Tool-layer thresholds for a BAMCP candidate. VCF records always pass (authoritative)."""
+    if v.get("source") == "vcf":
+        return True
+    alt_count = v.get("alt_count")
+    return (
+        v["vaf"] >= min_vaf
+        and v["depth"] >= min_depth
+        and (alt_count is None or alt_count >= min_alt_count)
+    )
+
+
+def _apply_alt_count(data: RegionData, min_alt_count: int) -> RegionData:
+    """``data`` with BAMCP candidates below ``min_alt_count`` dropped (never mutates the cache).
+
+    Detection's VAF/depth floors already ran in the parser; the alt-read floor is applied here so
+    the region cache stays keyed by the parser thresholds only.
+    """
+    kept = [
+        v
+        for v in data.variants
+        if v.get("source") == "vcf" or (v.get("alt_count") or 0) >= min_alt_count
+    ]
+    if len(kept) == len(data.variants):
+        return data
+    return replace(data, variants=kept)
+
+
+def _unscored(variant: dict[str, Any], reason: str, data: RegionData) -> dict[str, Any]:
+    """Score a candidate whose read-level evidence was not computed — honestly, as unknown.
+
+    Context risks (homopolymer, low depth) still apply; the missing strand/quality evidence is
+    itself a ``read_evidence_unavailable`` risk, and confidence is never better than low.
+    """
+    evidence = _not_computed_evidence(reason)
+    risk = compute_artifact_risk(variant, evidence, data.reference_sequence, data.start)
+    out = dict(variant)
+    out["read_evidence_computed"] = False
+    out["artifact_risk"] = risk
+    out["confidence"] = compute_confidence(variant, evidence, risk)
+    out["is_low_confidence"] = out["confidence"] == "low"
+    return out
+
+
+async def _score_candidates(
+    file_path: str,
+    region: str,
+    reference: str | None,
+    variants: list[dict[str, Any]],
+    data: RegionData,
+    config: BAMCPConfig,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Attach artifact_risk + confidence to BAMCP candidates (readless get_variants path).
+
+    SNVs (up to GET_VARIANTS_EVIDENCE_MAX_SITES) are pileup-annotated — htslib sees every read
+    at the site — and scored exactly like VCF SNVs. Indels and over-cap SNVs are scored as
+    "evidence not computed". ``variants`` must be private copies (the annotator writes into
+    them). Returns ``(variants, per_site_evidence_summary)``.
+    """
+    snvs = [
+        v for v in variants if v.get("source") == "bamcp" and len(v["ref"]) == 1 == len(v["alt"])
+    ]
+    to_score = snvs[:GET_VARIANTS_EVIDENCE_MAX_SITES]
+    scored_ids = {id(v) for v in to_score}
+    timed_out = False
+    if to_score and reference:
+        try:
+            index_path = await _ensure_cached_index(file_path, config)
+            await asyncio.wait_for(
+                _run_in_parse_pool(
+                    annotate_vcf_snv_support,
+                    file_path,
+                    region,
+                    reference,
+                    to_score,
+                    config.min_mapq,
+                    config.min_baseq,
+                    index_path,
+                    sources=("bamcp",),
+                ),
+                timeout=BAM_PARSE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            timed_out = True
+            scored_ids = set()
+
+    out: list[dict[str, Any]] = []
+    for v in variants:
+        if v.get("source") != "bamcp":
+            out.append(v)
+        elif id(v) in scored_ids:
+            enhanced, _ = _vcf_evidence(v, data.reference_sequence, data.start)
+            enhanced["evidence_source"] = "pileup"
+            enhanced["read_evidence_computed"] = True
+            out.append(enhanced)
+        elif len(v["ref"]) != len(v["alt"]):
+            out.append(_unscored(v, _UNSCORED_INDEL_NOTE, data))
+        else:
+            out.append(
+                _unscored(v, _UNSCORED_TIMEOUT_NOTE if timed_out else _UNSCORED_CAP_NOTE, data)
+            )
+    summary = {
+        "scored_sites": len(scored_ids),
+        "max_sites": GET_VARIANTS_EVIDENCE_MAX_SITES,
+        "capped": len(snvs) > GET_VARIANTS_EVIDENCE_MAX_SITES,
+        "timed_out": timed_out,
+    }
+    return out, summary
+
+
 @telemetry_wrapper("get_variants")
 async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Return variants without UI. Positions are 1-based (VCF/dbSNP convention).
@@ -1259,16 +1540,21 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         not add its own candidates but still reads the BAM to attach read-level
         evidence at each VCF site. Requires ``vcf_path``.
       - ``"bamcp"``: BAMCP's read-level candidates only; any ``vcf_path`` is ignored.
+
+    Every variant carries ``artifact_risk``, ``confidence``, ``concerns`` and a plain-language
+    ``interpretation`` (with a zygosity hint).
     """
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
     region = args["region"]
     validate_region(region)
-    _, reference = await _resolve_reference(args, config)
+    resolved = await _resolve_reference_info(args, config)
+    reference = resolved.effective
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
+    min_alt_count = args.get("min_alt_count", config.min_alt_count)
 
     # Readless: BAMCP candidates come from count_coverage, and VCF sites get their
     # read-level support attached by the fetch (annotate_vcf_snv_support), which
@@ -1285,27 +1571,36 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         vcf_primary=vcf_primary,
     )
 
-    # Give VCF SNVs the same confidence/artifact contract as the viewer so callers
-    # get read-level curation outside the UI (BAMCP candidates stay raw — readless).
+    # VCF SNVs get the viewer's confidence/artifact contract from their annotated support;
+    # BAMCP candidates are then scored per site (bounded) by _score_candidates. Copies only:
+    # the fetched variant dicts live in the region cache.
     detected = enhance_vcf_variants(data.variants, data.reference_sequence, data.start)
-    variants = [
-        _one_based(v)
-        for v in detected
-        if v.get("source") == "vcf" or (v["vaf"] >= min_vaf and v["depth"] >= min_depth)
+    kept = [
+        dict(v) for v in detected if _passes_candidate_filters(v, min_vaf, min_depth, min_alt_count)
     ]
+    scored, evidence_summary = await _score_candidates(
+        file_path, region, reference, kept, data, config
+    )
+    variants = [annotate_interpretation(_one_based(v)) for v in scored]
 
+    filters = _applied_filters(
+        config,
+        args,
+        include_max_reads=False,
+        detection=_detection_status(region, reference, vcf_primary),
+        min_alt_count=min_alt_count,
+        reference_source=resolved.source,
+    )
+    filters["per_site_evidence"] = evidence_summary
+    if resolved.note:
+        filters["reference_note"] = resolved.note
     payload: dict[str, Any] = {
         "variants": variants,
         "count": len(variants),
         "variant_source": variant_source,
         "coordinate_system": _LLM_COORDINATE_SYSTEM,
         "variant_type": "candidate",
-        "applied_filters": _applied_filters(
-            config,
-            args,
-            include_max_reads=False,
-            detection=_detection_status(region, reference, vcf_primary),
-        ),
+        "applied_filters": filters,
         "filter_note": _FILTER_ABSENCE_NOTE,
         "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
     }
@@ -1320,7 +1615,8 @@ async def handle_get_coverage(args: dict[str, Any], config: BAMCPConfig) -> dict
     await asyncio.to_thread(validate_path, file_path, config)
     region = args["region"]
     validate_region(region)
-    _, reference = await _resolve_reference(args, config)
+    # Coverage never needs a reference for BAM (no base comparison); only CRAM decode does.
+    _, reference = await _resolve_reference(args, config, auto=is_cram(file_path))
 
     data = await _fetch_region_with_timeout(file_path, region, reference, config, mode="coverage")
 
@@ -1360,17 +1656,43 @@ async def _detect_bam_build(file_path: str, config: BAMCPConfig) -> dict:
     from .reference import detect_genome_build
 
     await asyncio.to_thread(validate_path, file_path, config)
-    index_path = await _ensure_cached_index(file_path, config)
-    contigs = await asyncio.wait_for(
-        _run_in_parse_pool(_read_contigs_sync, file_path, config.reference, index_path),
-        timeout=BAM_PARSE_TIMEOUT_SECONDS,
-    )
-    return detect_genome_build(contigs)
+    return detect_genome_build(await _bam_contigs(file_path, config))
+
+
+# Primary assembled chromosomes in either naming style (chr1..chr22, X, Y, M/MT).
+_PRIMARY_CONTIG_RE = re.compile(r"^(chr)?([1-9]|1[0-9]|2[0-2]|X|Y|M|MT)$")
+# With no recognizable primary contigs (non-human / unusual naming), show at most this many.
+_LIST_CONTIGS_FALLBACK_MAX = 100
+
+
+def _contig_category(name: str) -> str:
+    """Bucket a contig name: primary | alt | decoy | unplaced | hla | other."""
+    if _PRIMARY_CONTIG_RE.match(name):
+        return "primary"
+    lower = name.lower()
+    if lower.endswith("_alt"):
+        return "alt"
+    if "decoy" in lower or lower == "hs37d5" or lower.startswith("chrun_jtfh"):
+        return "decoy"
+    if lower.startswith("hla-"):
+        return "hla"
+    if (
+        "random" in lower
+        or lower.startswith("chrun")
+        or lower.startswith(("gl", "kn", "ki", "jh", "nt_"))
+    ):
+        return "unplaced"
+    return "other"
 
 
 @telemetry_wrapper("list_contigs")
 async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict:
-    """List contigs in a BAM/CRAM file and detect genome build."""
+    """Summarize a BAM/CRAM's contigs: build, naming style and reference first, then contigs.
+
+    By default only the primary chromosomes are listed (an HG002 GRCh38 header carries ~2,600
+    alt/decoy/HLA contigs, which buried the build at the end of a ~157KB response); the rest
+    are counted by category. ``include_all=true`` lists every contig.
+    """
     from .reference import (
         CONTIG_STYLE_CHR,
         contig_style,
@@ -1380,11 +1702,14 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
 
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
-    _, reference = await _resolve_reference(args, config)
+    include_all = bool(args.get("include_all", False))
+    # Discovery path: never auto-pick a reference here — reporting the suggestion IS the job.
+    resolved = await _resolve_reference_info(args, config, auto=False)
+    reference = resolved.effective
 
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
-
+    await _warm_remote_inputs(file_path, reference, index_path)
     contigs = await asyncio.wait_for(
         _run_in_parse_pool(_read_contigs_sync, file_path, reference, index_path),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
@@ -1412,25 +1737,46 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
                 "Supply your own via the 'reference' argument or BAMCP_REFERENCE — it must be "
                 "uncompressed or bgzip-compressed (not plain gzip) and have a .fai beside it."
             )
+        elif config.allow_remote_files:
+            reference_note = (
+                "Variant tools use this reference automatically when you pass none "
+                "(reference_source: auto)."
+            )
 
-    return {
-        "content": [
-            {
-                "type": "text",
-                "text": json.dumps(
-                    {
-                        "contigs": contigs,
-                        "genome_build": build_info,
-                        "contig_style": style,
-                        "reference_configured": config.reference is not None,
-                        "suggested_reference_url": suggested_url,
-                        "reference_note": reference_note,
-                        "coordinate_system": _INTERNAL_COORDINATE_SYSTEM,
-                    }
-                ),
-            }
-        ]
+    counts: dict[str, int] = {}
+    for c in contigs:
+        cat = _contig_category(str(c["name"]))
+        counts[cat] = counts.get(cat, 0) + 1
+    primary = [c for c in contigs if _contig_category(str(c["name"])) == "primary"]
+    if include_all:
+        shown, shown_kind = contigs, "all"
+    elif primary:
+        shown, shown_kind = primary, "primary"
+    else:
+        shown = contigs[:_LIST_CONTIGS_FALLBACK_MAX]
+        shown_kind = "all" if len(shown) == len(contigs) else "first"
+
+    # Summary first: a caller (or a truncating client) sees the build and the reference
+    # guidance before any contig list.
+    payload: dict[str, Any] = {
+        "genome_build": build_info,
+        "contig_style": style,
+        "reference_configured": config.reference is not None,
+        "suggested_reference_url": suggested_url,
+        "reference_note": reference_note,
+        "contig_counts": {"total": len(contigs), **dict(sorted(counts.items()))},
+        "contigs_shown": shown_kind,
+        "contigs_omitted": len(contigs) - len(shown),
+        "contigs": shown,
+        # Lengths are base counts; any region you build from them is 1-based inclusive.
+        "coordinate_system": _LLM_COORDINATE_SYSTEM,
     }
+    if len(shown) < len(contigs):
+        payload["contigs_note"] = (
+            f"{len(contigs) - len(shown)} non-primary contigs omitted "
+            "(alt/decoy/HLA/unplaced); pass include_all=true to list every contig."
+        )
+    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 
 
 @telemetry_wrapper("search_gene")
@@ -1539,21 +1885,57 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     if note:
         warnings.append(note)
 
+    # NCBI names chromosomes UCSC-style (chr13); a 1000G/Ensembl BAM calls it 13. Translate
+    # to the BAM's own spelling so the returned region opens in that BAM as-is.
+    chrom = result.chrom
+    mapped_from: str | None = None
+    if file_path:
+        chrom, mapped_from, contig_warning = await _map_gene_contig(file_path, chrom, config)
+        if contig_warning:
+            warnings.append(contig_warning)
+
     payload: dict[str, Any] = {
         "symbol": result.symbol,
         "name": result.name,
         # GeneClient already converts NCBI's 0-based chrstart/chrstop to 1-based
         # inclusive, which is exactly the region string every region-taking tool reads.
-        "region": f"{result.chrom}:{result.start}-{result.end}",
+        "region": f"{chrom}:{result.start}-{result.end}",
         "strand": result.strand,
         "genome_build": result.build,
         "build_source": source,
         "bam_build": detected_build,
         "coordinate_system": _LLM_COORDINATE_SYSTEM,
     }
+    if mapped_from is not None:
+        payload["contig_mapped_from"] = mapped_from
     if warnings:
         payload["warning"] = "; ".join(warnings)
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+
+
+async def _map_gene_contig(
+    file_path: str, chrom: str, config: BAMCPConfig
+) -> tuple[str, str | None, str | None]:
+    """Map a gene's contig to the BAM's naming style: ``(contig, mapped_from, warning)``.
+
+    Best-effort: an unreadable header leaves the contig unchanged (build detection above has
+    already reported that); a contig absent in both spellings becomes a warning.
+    """
+    from .reference import alternate_contig_names, map_contig_to_style
+
+    try:
+        await asyncio.to_thread(validate_path, file_path, config)
+        names = {str(c["name"]) for c in await _bam_contigs(file_path, config)}
+    except Exception as e:  # noqa: BLE001 — mapping is advisory
+        logger.debug("search_gene: contig mapping skipped for %s: %s", file_path, e)
+        return chrom, None, None
+    mapped = map_contig_to_style(chrom, names)
+    if mapped is None:
+        tried = " or ".join([repr(chrom), *(repr(a) for a in alternate_contig_names(chrom))])
+        return chrom, None, f"contig {tried} is not in the BAM header — check list_contigs"
+    if mapped != chrom:
+        return mapped, chrom, None
+    return chrom, None, None
 
 
 async def _first_contig(file_path: str, reference: str | None, config: BAMCPConfig) -> str:
@@ -1563,6 +1945,7 @@ async def _first_contig(file_path: str, reference: str | None, config: BAMCPConf
     the default from the file itself.
     """
     index_path = await _ensure_cached_index(file_path, config)
+    await _warm_remote_inputs(file_path, reference, index_path)
     contigs = await asyncio.wait_for(
         _run_in_parse_pool(_read_contigs_sync, file_path, reference, index_path),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
@@ -1572,34 +1955,86 @@ async def _first_contig(file_path: str, reference: str | None, config: BAMCPConf
     return str(contigs[0]["name"])
 
 
+# The viewer tools' text content is what the LLM reads; the full payload (reads, coverage,
+# evidence) rides in _meta / structuredContent for the UI. Keep the text a compact summary.
+VIEWER_SUMMARY_MAX_CHARS = 1500
+_VIEWER_SUMMARY_MAX_VARIANTS = 5
+_VIEWER_SUMMARY_LINE_MAX = 220
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _viewer_summary(
+    headline: str, data: RegionData, variants: list[dict], filters: dict[str, Any]
+) -> str:
+    """A compact (< VIEWER_SUMMARY_MAX_CHARS) text summary of a viewer response."""
+    coverage = data.coverage
+    mean_cov = round(sum(coverage) / len(coverage), 1) if coverage else 0
+    lines = [
+        f"{headline}: {len(data.reads)} reads shown, mean depth {mean_cov}x, "
+        f"{len(variants)} candidate variants; reference: "
+        f"{filters.get('reference_source', 'n/a')}."
+    ]
+    ranked = sorted(
+        variants,
+        key=lambda v: (v.get("confidence") != "high", -(v.get("alt_count") or 0)),
+    )
+    for v in ranked[:_VIEWER_SUMMARY_MAX_VARIANTS]:
+        lines.append("  " + _clip(str(v.get("interpretation", "")), _VIEWER_SUMMARY_LINE_MAX))
+    if len(variants) > _VIEWER_SUMMARY_MAX_VARIANTS:
+        lines.append(
+            f"  …and {len(variants) - _VIEWER_SUMMARY_MAX_VARIANTS} more (get_variants lists all)."
+        )
+    filters_line = _clip("Applied filters: " + _format_filters_line(filters), 400)
+    tail = [
+        filters_line,
+        "Reads, coverage and per-variant evidence are in the viewer, not repeated here.",
+    ]
+    text = "\n".join(lines + tail)
+    # Hard bound: drop variant lines (never the headline/filters) until it fits.
+    while len(text) > VIEWER_SUMMARY_MAX_CHARS and len(lines) > 1:
+        lines.pop()
+        text = "\n".join(lines + tail)
+    return _clip(text, VIEWER_SUMMARY_MAX_CHARS)
+
+
 async def _viewer_response(
     args: dict[str, Any],
     config: BAMCPConfig,
     file_path: str,
     region: str,
-    explicit_reference: str | None,
-    reference: str | None,
+    resolved: ResolvedReference,
     summary_prefix: Callable[[RegionData], str],
 ) -> dict:
     """Fetch a region and build the MCP Apps viewer response (shared by visualize/jump_to).
 
-    The summary text (for LLM context) echoes the applied filters — the LLM reasons over this
-    text, not _meta; the full payload goes only in ``_meta.ui/init``.
+    The text content (what the LLM reads) is a compact summary that echoes the applied
+    filters; the full payload goes only in ``_meta.ui/init``.
     """
+    reference = resolved.effective
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
 
     data = await _fetch_region_with_timeout(
         file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
     )
+    data = _apply_alt_count(data, config.min_alt_count)
     filters = _applied_filters(
         config,
         args,
         include_max_reads=True,
         detection=_detection_status(region, reference, vcf_primary),
         reads_truncated=data.reads_truncated,
+        min_alt_count=config.min_alt_count,
+        reference_source=resolved.source,
     )
+    if resolved.note:
+        filters["reference_note"] = resolved.note
     payload = serialize_region_data(data)
+    # Internal 0-based positions in the payload; the interpretation text prints 1-based.
+    payload["variants"] = [annotate_interpretation(v, one_based=False) for v in payload["variants"]]
     payload["coordinate_system"] = _INTERNAL_COORDINATE_SYSTEM
     payload["variant_type"] = "candidate"
     payload["applied_filters"] = filters
@@ -1608,19 +2043,17 @@ async def _viewer_response(
     payload["file_path"] = file_path  # For client-side re-queries
     # Preserve the full data-source context so the viewer's pan/zoom/detail refetches carry it.
     # Without reference, follow-up calls lose mismatch evidence and CRAM decode fails on navigation.
-    # Echo ONLY a caller-supplied reference: a config-default reference is re-applied server-side on
-    # refetch and stays trusted — echoing it would make refetches re-validate the operator default
-    # as caller input and fail when it's outside the caller allow-list.
+    # Echo a caller-supplied or auto-selected reference (an allow-listed public URL, so the
+    # refetch's caller-input validation accepts it). Never a config default: it is re-applied
+    # server-side on refetch, and echoing it would make refetches re-validate the operator
+    # default as caller input and fail when it's outside the caller allow-list.
     payload["variant_source"] = variant_source
-    if explicit_reference is not None:
-        payload["reference"] = explicit_reference
+    if resolved.echo is not None:
+        payload["reference"] = resolved.echo
     if effective_vcf is not None:
         payload["vcf_path"] = effective_vcf
 
-    summary = (
-        f"{summary_prefix(data)}: {len(data.reads)} reads, "
-        f"{len(data.variants)} candidate variants (filters: {_format_filters_line(filters)})"
-    )
+    summary = _viewer_summary(summary_prefix(data), data, payload["variants"], filters)
     return {
         "content": [{"type": "text", "text": summary}],
         "_meta": {
@@ -1642,8 +2075,8 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     await asyncio.to_thread(validate_path, file_path, config)
     position = args["position"]
     window = args.get("window", config.default_window)
-    explicit_reference, reference = await _resolve_reference(args, config)
-    contig = args.get("contig") or await _first_contig(file_path, reference, config)
+    resolved = await _resolve_reference_info(args, config)
+    contig = args.get("contig") or await _first_contig(file_path, resolved.effective, config)
 
     # ``position`` is 1-based; build a 1-based inclusive window of ``window`` bases
     # centred on it (start clamped at base 1).
@@ -1657,8 +2090,7 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
         config,
         file_path,
         region,
-        explicit_reference,
-        reference,
+        resolved,
         lambda data: f"Jumped to {data.contig}:{position}",
     )
 
@@ -1673,15 +2105,14 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
     await asyncio.to_thread(validate_path, file_path, config)
     region = args["region"]
     validate_region(region)
-    explicit_reference, reference = await _resolve_reference(args, config)
+    resolved = await _resolve_reference_info(args, config)
 
     return await _viewer_response(
         args,
         config,
         file_path,
         region,
-        explicit_reference,
-        reference,
+        resolved,
         lambda data: f"Region {format_region(data.contig, data.start, data.end)}",
     )
 
@@ -1690,19 +2121,23 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
 async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Handle get_region_summary tool call.
 
-    Text-only summary for LLM reasoning — no UI metadata.
+    Text-only summary for LLM reasoning — no UI metadata. Each variant line is followed by
+    its plain-language interpretation (zygosity hint, artifact risk, confidence).
     """
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
     region = args["region"]
     validate_region(region)
-    _, reference = await _resolve_reference(args, config)
+    resolved = await _resolve_reference_info(args, config)
+    reference = resolved.effective
     variant_source = args.get("variant_source", "auto")
     effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
+    min_alt_count = args.get("min_alt_count", config.min_alt_count)
 
     data = await _fetch_region_with_timeout(
         file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
     )
+    data = _apply_alt_count(data, min_alt_count)
 
     coverage = data.coverage
     mean_cov = round(sum(coverage) / len(coverage), 2) if coverage else 0
@@ -1714,6 +2149,8 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
         include_max_reads=True,
         detection=_detection_status(region, reference, vcf_primary),
         reads_truncated=data.reads_truncated,
+        min_alt_count=min_alt_count,
+        reference_source=resolved.source,
     )
     summary_lines = [
         f"Region: {format_region(data.contig, data.start, data.end)}",
@@ -1725,11 +2162,15 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
         f"Coordinate system: {_LLM_COORDINATE_SYSTEM}",
         _CANDIDATE_VARIANT_DISCLAIMER,
     ]
+    if resolved.note:
+        summary_lines.insert(5, f"Reference: {resolved.note}")
 
-    for v in data.variants:
+    enhanced, _ = build_enhanced_variants(data)
+    for v in enhanced:
         # 1-based position (VCF/dbSNP convention); SV type/span + per-sample genotypes
-        # surfaced by _format_variant_line().
+        # surfaced by _format_variant_line(), then the plain-language reading.
         summary_lines.append(_format_variant_line(v))
+        summary_lines.append("    " + annotate_interpretation(v, one_based=False)["interpretation"])
 
     return {"content": [{"type": "text", "text": "\n".join(summary_lines)}]}
 
@@ -2031,11 +2472,11 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
     """
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
-    _, reference = await _resolve_reference(args, config)
+    resolved = await _resolve_reference_info(args, config)
+    reference = resolved.effective
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
-    # Package-A's min_alt_count (arg, else config default); tolerated if absent.
-    min_alt_count = args.get("min_alt_count", getattr(config, "min_alt_count", None))
+    min_alt_count = args.get("min_alt_count", config.min_alt_count)
 
     if not reference:
         raise ToolInputError(
@@ -2110,7 +2551,13 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
     # 1-based inclusive; None when not a single chunk completed.
     scanned_region = format_region(contig, 0, scanned_end) if scanned_end > 0 else None
 
-    filters = _applied_filters(config, args, include_max_reads=False)
+    filters = _applied_filters(
+        config,
+        args,
+        include_max_reads=False,
+        min_alt_count=min_alt_count,
+        reference_source=resolved.source,
+    )
     # Self-describing scope: what was scanned, and what this scan cannot see.
     filters.update(
         {

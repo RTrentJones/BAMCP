@@ -426,7 +426,13 @@ class TestHandleGetVariants:
         assert raw_positions, "fixture region should contain at least one variant"
 
         result = await handle_get_variants(
-            {"file_path": small_bam_path, "region": region, "min_vaf": 0.05, "min_depth": 1},
+            {
+                "file_path": small_bam_path,
+                "region": region,
+                "min_vaf": 0.05,
+                "min_depth": 1,
+                "min_alt_count": 1,
+            },
             config_with_ref,
         )
         tool_positions = sorted(

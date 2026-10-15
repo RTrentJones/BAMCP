@@ -1,6 +1,6 @@
 """BAM/CRAM file parsing using pysam."""
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -268,11 +268,29 @@ def format_region(contig: str, start0: int, end: int) -> str:
     return f"{contig}:{start0 + 1}-{end}"
 
 
+def contig_not_found_message(contig: str, names: Iterable[str]) -> str:
+    """A caller-safe "contig not found" message that names the other-style spelling.
+
+    A BAM using ``13`` rejects ``chr13`` (and vice versa) — the commonest wrong-contig error,
+    usually from coordinates copied out of a differently-styled source. Built only from the
+    caller's contig and the file's own header names (never operator config).
+    """
+    from .reference import map_contig_to_style
+
+    msg = f"Contig '{contig}' not found in the alignment header"
+    alt = map_contig_to_style(contig, frozenset(names))
+    if alt is not None and alt != contig:
+        msg += f"; this file names it '{alt}' — retry with '{alt}'"
+    else:
+        msg += "; check contig names with list_contigs"
+    return msg
+
+
 def _clamp_end(lengths: dict[str, int], contig: str, start: int, end: int) -> int:
     """Clamp ``end`` to the contig length; raise a clear error for unknown contigs/starts."""
     length = lengths.get(contig)
     if length is None:
-        raise ValueError(f"Contig '{contig}' not found in the alignment header")
+        raise ValueError(contig_not_found_message(contig, lengths))
     if start >= length:
         raise ValueError(
             f"Region start {start + 1} is past the end of {contig} (length {length:,})"
@@ -889,6 +907,7 @@ def detect_variants(
     min_vaf: float = 0.1,
     min_depth: int = 10,
     gap_depth: Sequence[int] | None = None,
+    min_alt_count: int = 1,
 ) -> list[dict]:
     """
     Detect candidate SNVs from coverage counts (A, C, G, T).
@@ -905,6 +924,9 @@ def detect_variants(
             count_coverage only tallies A/C/G/T, so at deletion-heavy loci the naive
             ``sum(A,C,G,T)`` denominator understates depth and inflates VAF. Adding
             gap_depth restores the true spanning depth.
+        min_alt_count: Minimum alt-supporting reads (1 = no floor). The tool layer applies
+            the configured floor itself; scan_contig passes it here so its result cap
+            counts only candidates that survive it.
 
     Returns:
         List of candidate variant dicts (contig, position, ref, alt, vaf, depth,
@@ -941,7 +963,7 @@ def detect_variants(
             if base == ref_base:
                 continue
 
-            if count == 0:
+            if count == 0 or count < min_alt_count:
                 continue
 
             vaf = count / total
@@ -1203,6 +1225,7 @@ def scan_contig(
     min_baseq: int = 0,
     max_region: int = 250_000_000,
     index_filename: str | None = None,
+    min_alt_count: int = 1,
 ) -> ScanResult:
     """Scan a contig for SNV candidates using fast coverage-based detection.
 
@@ -1220,9 +1243,10 @@ def scan_contig(
     all_variants: list[dict] = []
 
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        contig_length = _header_lengths(samfile).get(contig)
+        header_lengths = _header_lengths(samfile)
+        contig_length = header_lengths.get(contig)
         if contig_length is None:
-            raise ValueError(f"Contig '{contig}' not found in the alignment header")
+            raise ValueError(contig_not_found_message(contig, header_lengths))
 
         scan_end = min(contig_length, max_region)
 
@@ -1247,6 +1271,7 @@ def scan_contig(
                     chunk_start,
                     min_vaf,
                     min_depth,
+                    min_alt_count=min_alt_count,
                 )
                 if chunk_variants:
                     gaps = _deletion_depth_at(

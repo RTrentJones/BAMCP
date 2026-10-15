@@ -62,7 +62,6 @@ allow-list of genomics hosts — `ftp-trace.ncbi.nlm.nih.gov`, `ftp.ncbi.nlm.nih
 ([Installation](#installation)).
 
 **Default filters** for candidate variants:
-<!-- defaults: confirm at merge -->
 `min_mapq 20`, `min_baseq 13`, `min_vaf 0.10`, `min_alt_count 3` — every response echoes them
 in `applied_filters`, so a missing variant may simply have been filtered out.
 
@@ -408,7 +407,6 @@ Regions can be specified as:
 
 ### Core Settings
 
-<!-- defaults: confirm at merge -->
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
 | `BAMCP_REFERENCE` | Path to reference FASTA (required for CRAM) | None |

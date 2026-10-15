@@ -84,6 +84,27 @@ def _pm2_quality_caveat(pop: dict[str, Any]) -> str | None:
     )
 
 
+def _benign_frequency_caveat(pop: dict[str, Any]) -> str | None:
+    """Why this gnomAD record's AF can't support BA1/BS1 (a HIGH AF is unreliable too).
+
+    Mirrors the PM2 guard: an AF gnomAD itself flags as unreliable, or one from a site that
+    failed QC, must not become standalone/strong benign evidence either.
+    """
+    filters = pop.get("filters") or []
+    reasons = []
+    if pop.get("frequency_reliable") is False:
+        why = "; ".join(pop.get("warnings") or []) or "gnomAD flagged the frequency"
+        reasons.append(f"the frequency is not reliable ({why})")
+    if filters:
+        reasons.append(f"the site FAILED gnomAD QC filters {list(filters)}")
+    if not reasons:
+        return None
+    return (
+        " and ".join(reasons) + ", so a high AF here is NOT evidence of benignity. Do NOT "
+        "apply BA1/BS1 from this record; check another dataset first."
+    )
+
+
 def _frequency_criteria(pop: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Population-frequency criteria (PM2/BS1/BA1), with the observed AF attached."""
     status = pop.get("status") if pop is not None else None
@@ -118,18 +139,23 @@ def _frequency_criteria(pop: dict[str, Any] | None) -> list[dict[str, Any]]:
     caveat = _pm2_quality_caveat(pop)
     if caveat:
         pm2_text = f"global_af={global_af}, but {caveat}"
+    ba1_text = f"max_pop_af={max_af}. Apply only if this exceeds {BA1_AF_THRESHOLD}."
+    bs1_text = f"global_af={global_af}, max_pop_af={max_af}. Consider if above ~{BS1_AF_THRESHOLD}."
+    benign_caveat = _benign_frequency_caveat(pop)
+    if benign_caveat:
+        ba1_text = f"max_pop_af={max_af}, but {benign_caveat}"
+        bs1_text = f"global_af={global_af}, max_pop_af={max_af}, but {benign_caveat}"
     return [
         {
             "code": "BA1",
             "description": f"Allele frequency > {BA1_AF_THRESHOLD:.0%} in any population "
             "(standalone benign).",
-            "evaluate_with": f"max_pop_af={max_af}. Apply only if this exceeds {BA1_AF_THRESHOLD}.",
+            "evaluate_with": ba1_text,
         },
         {
             "code": "BS1",
             "description": "Allele frequency greater than expected for the disorder.",
-            "evaluate_with": f"global_af={global_af}, max_pop_af={max_af}. Consider if above "
-            f"~{BS1_AF_THRESHOLD}.",
+            "evaluate_with": bs1_text,
         },
         {
             "code": "PM2_supporting",
@@ -379,7 +405,11 @@ async def handle_classify_variant(args: dict[str, Any], config: BAMCPConfig) -> 
     alt = args["alt"]
     gene = args.get("gene")
     window = args.get("window", 50)
-    reference = args.get("reference", config.reference)
+    # Same resolution as every read tool: a caller-supplied reference is SSRF-validated (it is
+    # handed to htslib), else the operator default, else the auto-selected public FASTA.
+    from ..core.tools import _resolve_reference
+
+    _, reference = await _resolve_reference(args, config)
 
     validation_error = validate_variant_input(chrom, pos, ref, alt)
     if validation_error:

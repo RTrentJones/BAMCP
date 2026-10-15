@@ -147,3 +147,14 @@ async def test_demo_hg002_real_het_snv_live():
     assert not result.isError, result.content[0].text
     variants = json.loads(result.content[0].text)["variants"]
     assert any(v["position"] == 43099914 and v["alt"] == "A" for v in variants)
+
+
+@pytest.mark.unit
+async def test_check_variant_single_site_with_colon_contig():
+    """A single-base region on a colon-containing contig expands on the last colon."""
+    async with _client(BAMCPConfig()) as client:
+        result = await client.get_prompt(
+            "check_variant", {"file_path": "demo:HG002", "region": "HLA-A*01:01:01:01:100"}
+        )
+    text = result.messages[0].content.text
+    assert "HLA-A*01:01:01:01:100-100" in text

@@ -160,8 +160,10 @@ def register_demo_surface(mcp: FastMCP) -> None:
     )
     def check_variant(file_path: str = "demo:HG002", region: str = "chr17:43099914") -> str:
         target = region.strip()
-        if ":" in target and "-" not in target.split(":", 1)[1]:
-            contig, pos = target.split(":", 1)
+        # Split on the LAST colon, like parse_region: contigs such as HLA-A*01:01:01:01
+        # contain colons themselves.
+        if ":" in target and "-" not in target.rsplit(":", 1)[1]:
+            contig, pos = target.rsplit(":", 1)
             target = f"{contig}:{pos}-{pos}"
         return (
             f"Check the read evidence for a variant at {target} in file_path='{file_path}'.\n\n"

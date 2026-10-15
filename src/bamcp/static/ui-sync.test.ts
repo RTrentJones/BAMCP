@@ -37,6 +37,15 @@ describe("referenceBannerMessage", () => {
     })).toBeNull();
   });
 
+  it("does not banner a VCF-authoritative view even when no reference was resolved", () => {
+    expect(referenceBannerMessage({
+      applied_filters: {
+        snv_detection: "disabled: variant_source=vcf (the VCF is authoritative)",
+        reference_source: "none",
+      },
+    })).toBeNull();
+  });
+
   it("copes with absent or malformed fields", () => {
     expect(referenceBannerMessage(null)).toBeNull();
     expect(referenceBannerMessage(undefined)).toBeNull();

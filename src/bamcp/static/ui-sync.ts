@@ -29,6 +29,9 @@ export function referenceBannerMessage(data: Partial<RegionData> | null | undefi
     const rawSource = filters.reference_source ?? data.reference_source;
     const source = typeof rawSource === 'string' ? rawSource : '';
 
+    // A VCF-authoritative view deliberately skips BAM SNV calling; its variants are shown,
+    // so a missing reference there is not "calls hidden" — never banner it.
+    if (/^disabled/i.test(snv) && /variant_source\s*=\s*vcf/i.test(snv)) return null;
     const snvNoRef = /^disabled/i.test(snv) && /reference/i.test(snv);
     const sourceNone = /^none$/i.test(source);
     if (!snvNoRef && !sourceNone) return null;

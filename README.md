@@ -30,8 +30,9 @@ No install, no data of your own. The hosted demo server is **`https://bamcp.rtre
    ```
 
    ```text
-   On demo:HG002, compare chr17:43099914 with the cluster around chr17:43096151.
-   Which one looks like a sequencing artifact, and why? Explain it like I'm new to genomics.
+   On demo:HG002, compare chr17:43099914 G>A with chr17:43096151 T>G using
+   get_variant_curation_summary. Which one looks like a sequencing artifact, and why?
+   Explain it like I'm new to genomics.
    ```
 
    ```text
@@ -47,8 +48,11 @@ No install, no data of your own. The hosted demo server is **`https://bamcp.rtre
 **What you'll see:** an interactive pileup of real reads from the public
 [Genome in a Bottle](https://www.nist.gov/programs-projects/genome-bottle) sample HG002
 (about 60 reads deep), a clean heterozygous SNV where roughly half the reads carry the
-alternative base on both strands, an artifact cluster of low-quality one-strand mismatches next
-to it, and ClinVar/gnomAD context showing both curated SNVs are common, benign polymorphisms.
+alternative base on both strands, an artifact a few kb away (chr17:43096151 T>G: 11 of ~50
+reads, all on the forward strand, mean base quality ~Q8 — the default filters hide it from
+`get_variants`, and `get_variant_curation_summary` still scores it HIGH artifact risk and says
+which filters it fails), and ClinVar/gnomAD context showing both curated SNVs are common,
+benign polymorphisms.
 
 **Demo aliases** (usable as `file_path` in every tool): `demo:HG002` (GIAB HG002, GRCh38,
 `chr17`-style) and `demo:HG00096` (1000 Genomes, GRCh37, `17`-style). The curated loci live in
@@ -324,15 +328,17 @@ Returns coverage statistics without visualization.
 
 | Tool | Description | Required Args | Optional Args |
 |------|-------------|---------------|---------------|
-| `visualize_region` | View aligned reads with interactive UI | `file_path`, `region` | `reference`, `vcf_path`, `variant_source` |
-| `get_variants` | Detect and return candidate variants in a region | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_vaf`, `min_depth` |
-| `get_coverage` | Calculate depth statistics | `file_path`, `region` | `reference` |
-| `list_contigs` | List chromosomes and detect genome build | `file_path` | `reference` |
-| `jump_to` | Jump to a specific genomic position | `file_path`, `position` | `contig`, `window`, `reference`, `vcf_path`, `variant_source` |
-| `get_region_summary` | Text summary for LLM reasoning (no UI) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source` |
-| `lookup_clinvar` | Look up variant in ClinVar | `chrom`, `pos`, `ref`, `alt` | — |
-| `lookup_gnomad` | Look up variant in gnomAD | `chrom`, `pos`, `ref`, `alt` | — |
-| `get_variant_curation_summary` | Detailed curation with artifact risk | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference` |
+| `visualize_region` | View aligned reads with interactive UI (keep windows ≤200 bp) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source` |
+| `get_variants` | Detect and return candidate variants in a region, sorted by position | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_vaf`, `min_depth`, `min_alt_count` |
+| `get_coverage` | Calculate depth statistics (fast; fine for a whole gene) | `file_path`, `region` | `reference` |
+| `list_contigs` | List chromosomes and detect genome build | `file_path` | `reference`, `include_all` |
+| `jump_to` | Jump to a specific genomic position | `file_path`, `contig`, `position` | `window`, `reference`, `vcf_path`, `variant_source` |
+| `get_region_summary` | Text summary for LLM reasoning (no UI) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_alt_count` |
+| `scan_variants` | Time-bounded SNV scan of a contig or region; a truncated scan returns `next_region` to resume | `file_path` | `contig`, `region`, `reference`, `min_vaf`, `min_depth`, `min_alt_count` |
+| `lookup_clinvar` | Look up variant in ClinVar | `chrom`, `pos`, `ref`, `alt` | `build` |
+| `lookup_gnomad` | Look up variant in gnomAD | `chrom`, `pos`, `ref`, `alt` | `build` |
+| `get_variant_curation_summary` | Detailed curation with artifact risk; evaluates the named site even when it fails the calling filters (`filter_check`) | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference`, `format` (`text`/`rubric`; `json` = `rubric`), `include_clinical` |
+| `classify_variant` | ACMG reasoning scaffold over BAM + ClinVar + gnomAD evidence | `file_path`, `chrom`, `pos`, `ref`, `alt` | `gene`, `window`, `reference` |
 | `search_gene` | Search gene by symbol (NCBI); returns build-consistent coordinates | `symbol` | `file_path`, `build` |
 | `cleanup_cache` | Clean up session's index cache | — | — |
 

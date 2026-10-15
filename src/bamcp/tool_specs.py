@@ -179,8 +179,9 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "get_variant_curation_summary": {
         "description": "Get a detailed curation summary for a specific variant with artifact-risk "
-        "assessment, quality metrics, and curator recommendations. Set format='rubric' for a "
-        "machine-scorable JSON with 0-1 quality scores. Positions are 1-based.",
+        "assessment, quality metrics, and curator recommendations. The named site is evaluated "
+        "even when it fails the calling filters (filter_check says which). Set format='rubric' "
+        "(or 'json') for a machine-scorable JSON with 0-1 quality scores. Positions are 1-based.",
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -190,7 +191,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "alt": _STR,
                 "window": _INT,
                 "reference": _STR,
-                "format": {**_STR, "enum": ["text", "rubric"]},
+                "format": {**_STR, "enum": ["text", "rubric", "json"]},
                 "include_clinical": {"type": "boolean"},
             },
             ["file_path", "chrom", "pos", "ref", "alt"],

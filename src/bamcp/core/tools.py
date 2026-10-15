@@ -1752,12 +1752,13 @@ async def probe_site(
 
     contig = data.contig
     if len(ref) == 1 == len(alt):
-        loose = await _pileup_site(file_path, contig, pos0, ref, alt, reference, config, 0)
+        # Both pileups at once (each is a remote open + seek; they share nothing).
+        loose, strict = await asyncio.gather(
+            _pileup_site(file_path, contig, pos0, ref, alt, reference, config, 0),
+            _pileup_site(file_path, contig, pos0, ref, alt, reference, config, config.min_baseq),
+        )
         if not loose.get("alt_count"):
             return None
-        strict = await _pileup_site(
-            file_path, contig, pos0, ref, alt, reference, config, config.min_baseq
-        )
         enhanced, evidence = _vcf_evidence(loose, data.reference_sequence, data.start)
         enhanced["source"] = "bamcp"
         enhanced["evidence_source"] = "pileup"

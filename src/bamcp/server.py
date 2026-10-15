@@ -322,7 +322,9 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         description=(
             "Get a detailed curation summary for a specific variant with artifact risk "
             "assessment, quality metrics, and recommendations for clinical interpretation. "
-            "Use this for in-depth variant review by genetic curators. Set format='rubric' "
+            "Use this for in-depth variant review by genetic curators. The named site is "
+            "evaluated even when it fails the calling filters (filter_check says which), so a "
+            "filtered-out artifact is scored, not 'not found'. Set format='rubric' (or 'json') "
             "for machine-scorable JSON; include_clinical=true adds ClinVar/gnomAD context."
         ),
     )

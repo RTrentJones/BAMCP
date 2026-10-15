@@ -93,9 +93,12 @@ DEMO_DATASETS: dict[str, DemoDataset] = {
                 region="chr17:43096101-43096200",
                 label="BRCA1 artifact cluster around chr17:43096151 T>G",
                 note=(
-                    "A cluster of low-VAF mismatches (43096151 T>G ~22%, plus 43096165, "
-                    "43096197 ...) carried by low-base-quality bases on one strand: the "
-                    "classic look of a sequencing artifact. Compare it with the het SNV."
+                    "43096151 T>G: 11 of ~50 reads (22%), all on the forward strand, mean alt "
+                    "base quality ~Q8 — the classic look of a sequencing artifact. The default "
+                    "min_baseq=13 drops 9 of those bases (2/35 remain), so get_variants does "
+                    "not report it; get_variant_curation_summary on the site scores it HIGH "
+                    "artifact risk (strand bias + low base quality) and lists the filters it "
+                    "fails. Compare it with the het SNV."
                 ),
             ),
             DemoLocus(

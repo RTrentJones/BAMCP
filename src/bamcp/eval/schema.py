@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .models import DEFAULT_SUBJECT_MODEL
+
 
 @dataclass
 class EvalCase:
@@ -101,7 +103,7 @@ class RunConfig:
     test_cases_path: Path
     output_dir: Path
     provider: str = "anthropic"
-    model: str = "claude-opus-4-7"
+    model: str = DEFAULT_SUBJECT_MODEL
     judge_provider: str | None = None
     judge_model: str | None = None
     cache: bool = False

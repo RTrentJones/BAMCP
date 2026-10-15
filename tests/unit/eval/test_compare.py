@@ -219,11 +219,12 @@ async def test_run_comparison_refuses_self_judging_before_running(tmp_path):
 def test_build_judge_is_shared_and_separate():
     pytest.importorskip("anthropic")
     from bamcp.eval.compare import build_judge
+    from bamcp.eval.models import COMPARISON_MODELS
     from bamcp.eval.providers import DEFAULT_JUDGE_MODEL
 
     assert build_judge(RunSpec("m", "mock", "m")) is None
-    j1 = build_judge(RunSpec("a", "anthropic", "claude-opus-4-8"))
-    j2 = build_judge(RunSpec("b", "anthropic", "claude-sonnet-4-5"))
+    j1 = build_judge(RunSpec("a", "anthropic", COMPARISON_MODELS[0]))
+    j2 = build_judge(RunSpec("b", "anthropic", COMPARISON_MODELS[1]))
     assert j1.model == j2.model == DEFAULT_JUDGE_MODEL
 
 

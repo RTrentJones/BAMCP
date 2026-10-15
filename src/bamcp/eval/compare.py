@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .models import COMPARISON_MODELS
 from .providers import (
     DEFAULT_JUDGE_MODEL,
     DEFAULT_JUDGE_PROVIDER,
@@ -405,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--models",
         nargs="+",
-        default=["claude-opus-4-8", "claude-sonnet-4-5"],
+        default=list(COMPARISON_MODELS),
         help="Models to compare (each run with and without tools).",
     )
     p.add_argument(

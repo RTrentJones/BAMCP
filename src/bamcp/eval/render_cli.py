@@ -22,6 +22,8 @@ from .renderer import ViewerRenderer
 
 _VARIANT_PATTERN = re.compile(r"^([^:]+):(\d+):([ACGTN]+)>([ACGTN]+)$", re.IGNORECASE)
 
+_DEFAULT_HEIGHT = 800
+
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
@@ -84,6 +86,29 @@ def _resolve_region(bam_path: str, region: str | None) -> str:
     return f"{contig}:1-{end}"
 
 
+def _parse_height(value: str) -> int | str:
+    if value.lower() == "auto":
+        return "auto"
+    try:
+        height = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--height must be an integer or 'auto', got {value!r}"
+        ) from None
+    if height <= 0:
+        raise argparse.ArgumentTypeError("--height must be positive")
+    return height
+
+
+def _resolve_height(args: argparse.Namespace) -> int | None:
+    """Explicit --height wins; otherwise 800, or auto-fit (None) for a blinded render."""
+    if args.height == "auto":
+        return None
+    if args.height is not None:
+        return int(args.height)
+    return None if args.blind else _DEFAULT_HEIGHT
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="render_viewer",
@@ -116,7 +141,29 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     p.add_argument("--width", type=int, default=1024, help="Viewport width in pixels.")
-    p.add_argument("--height", type=int, default=800, help="Viewport height in pixels.")
+    p.add_argument(
+        "--height",
+        type=_parse_height,
+        default=None,
+        help=(
+            "Viewport height in pixels, or 'auto' to grow until every read row fits. "
+            "Default: 800, or 'auto' with --blind."
+        ),
+    )
+    p.add_argument(
+        "--blind",
+        action="store_true",
+        help=(
+            "Blinded eval stimulus: no variant table/overlays/verdicts, hashed read names, "
+            "pinned display settings, clipped to #viewer, depth-sized height."
+        ),
+    )
+    p.add_argument(
+        "--clip",
+        choices=["#viewer", "#container"],
+        default=None,
+        help="Element to screenshot. Default: #container, or #viewer with --blind.",
+    )
     p.add_argument("--out", default=".render-dev/last.png", help="Output PNG path.")
     p.add_argument(
         "--print-path-only",
@@ -136,15 +183,23 @@ async def _async_main(args: argparse.Namespace) -> int:
         payload = _load_ui_init_json(args.ui_init_json)
 
     pos, alt = _parse_active_variant(args.active_variant)
+    if args.blind and (pos is not None or args.clip == "#container"):
+        raise SystemExit("--blind cannot be combined with --active-variant or --clip '#container'")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     start = time.monotonic()
-    async with ViewerRenderer(viewport_width=args.width, viewport_height=args.height) as renderer:
+    height = _resolve_height(args)
+    async with ViewerRenderer(
+        viewport_width=args.width, viewport_height=height or _DEFAULT_HEIGHT
+    ) as renderer:
         png_bytes = await renderer.capture(
             payload,
             args.mode,
+            blind=args.blind,
+            viewport=(args.width, height),
+            clip=args.clip,
             active_variant_position=pos,
             active_variant_alt=alt,
         )
@@ -156,7 +211,7 @@ async def _async_main(args: argparse.Namespace) -> int:
     else:
         print(
             f"Rendered {len(png_bytes):,} bytes to {out_path} "
-            f"(mode={args.mode}, {elapsed_ms:.0f}ms)"
+            f"(mode={args.mode}{', blind' if args.blind else ''}, {elapsed_ms:.0f}ms)"
         )
     return 0
 

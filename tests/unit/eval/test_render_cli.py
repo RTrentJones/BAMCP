@@ -36,9 +36,31 @@ class TestArgParsing:
         args = _parse_args(["--bam", "x.bam"])
         assert args.mode == "expanded"
         assert args.width == 1024
-        assert args.height == 800
+        assert args.height is None
+        assert args.blind is False
+        assert args.clip is None
         assert args.out == ".render-dev/last.png"
         assert args.print_path_only is False
+
+    @pytest.mark.unit
+    def test_height_resolution(self):
+        from bamcp.eval.render_cli import _resolve_height
+
+        assert _resolve_height(_parse_args(["--bam", "x.bam"])) == 800
+        assert _resolve_height(_parse_args(["--bam", "x.bam", "--blind"])) is None
+        assert _resolve_height(_parse_args(["--bam", "x.bam", "--height", "auto"])) is None
+        assert _resolve_height(_parse_args(["--bam", "x.bam", "--blind", "--height", "600"])) == 600
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad", ["tall", "0", "-5"])
+    def test_height_rejects_garbage(self, bad):
+        with pytest.raises(SystemExit):
+            _parse_args(["--bam", "x.bam", "--height", bad])
+
+    @pytest.mark.unit
+    def test_clip_validated(self):
+        with pytest.raises(SystemExit):
+            _parse_args(["--bam", "x.bam", "--clip", "#table"])
 
 
 class TestActiveVariantParsing:
@@ -220,3 +242,55 @@ class TestPrintPathOnly:
         assert rc == 0
         assert "Rendered" in captured.out
         assert "dv-strips" in captured.out
+
+
+class TestBlindCli:
+    def _stub(self, monkeypatch, calls: list):
+        from bamcp.eval import render_cli
+
+        async def fake_capture(self, payload, mode, **kw):
+            calls.append({"mode": mode, **kw})
+            return b"\x89PNG"
+
+        async def fake_aenter(self):
+            return self
+
+        async def fake_aexit(self, *exc):
+            return None
+
+        async def fake_build(*a, **kw):
+            return {"contig": "chr1", "start": 1, "end": 10}
+
+        monkeypatch.setattr(render_cli.ViewerRenderer, "capture", fake_capture)
+        monkeypatch.setattr(render_cli.ViewerRenderer, "__aenter__", fake_aenter)
+        monkeypatch.setattr(render_cli.ViewerRenderer, "__aexit__", fake_aexit)
+        monkeypatch.setattr(render_cli, "_build_payload_from_bam", fake_build)
+        monkeypatch.setattr(render_cli, "_resolve_region", lambda bam, region: "chr1:1-10")
+        monkeypatch.setattr(render_cli, "_check_rebuild_needed", lambda: None)
+        return render_cli
+
+    @pytest.mark.unit
+    def test_blind_flag_reaches_capture(self, monkeypatch, tmp_path: Path):
+        calls: list = []
+        render_cli = self._stub(monkeypatch, calls)
+        out = tmp_path / "b.png"
+        assert render_cli.main(["--bam", "f.bam", "--blind", "--out", str(out)]) == 0
+        assert calls[0]["blind"] is True
+        assert calls[0]["viewport"] == (1024, None)
+        assert calls[0]["clip"] is None
+
+    @pytest.mark.unit
+    def test_default_is_unblinded_fixed_viewport(self, monkeypatch, tmp_path: Path):
+        calls: list = []
+        render_cli = self._stub(monkeypatch, calls)
+        render_cli.main(["--bam", "f.bam", "--out", str(tmp_path / "x.png")])
+        assert calls[0]["blind"] is False
+        assert calls[0]["viewport"] == (1024, 800)
+
+    @pytest.mark.unit
+    def test_blind_rejects_active_variant(self, monkeypatch, tmp_path: Path):
+        render_cli = self._stub(monkeypatch, [])
+        with pytest.raises(SystemExit, match="blind"):
+            render_cli.main(
+                ["--bam", "f.bam", "--blind", "--active-variant", "chr1:5:A>T", "--out", "x.png"]
+            )

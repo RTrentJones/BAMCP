@@ -37,8 +37,9 @@
             --color-base-c: #3b82f6;
 
             /* Colors - Reads */
-            --color-read-forward: #60a5fa;
-            --color-read-reverse: #a78bfa;
+            /* Must match COLOR_PALETTES.strand / INDEL_COLORS in constants.ts */
+            --color-read-forward: #3b82f6;
+            --color-read-reverse: #ef4444;
             --color-soft-clip: #f59e0b;
             --color-insertion: #9333ea;
             --color-deletion: #1f2937;
@@ -182,7 +183,9 @@
         /* Legend */
         #legend {
             display: flex;
-            gap: var(--spacing-xl);
+            flex-wrap: wrap;
+            row-gap: var(--spacing-xs);
+            column-gap: var(--spacing-lg);
             padding: var(--spacing-sm) var(--spacing-md);
             background: var(--color-bg-tertiary);
             border-bottom: 1px solid var(--color-border-light);
@@ -205,9 +208,59 @@
         .color-box.base-c { background: var(--color-base-c); }
         .color-box.read-forward { background: var(--color-read-forward); }
         .color-box.read-reverse { background: var(--color-read-reverse); }
-        .color-box.soft-clip { background: var(--color-soft-clip); opacity: 0.5; }
-        .color-box.insertion { background: var(--color-insertion); }
-        .color-box.deletion { background: var(--color-deletion); }
+        .color-box.base-n { background: #9ca3af; }
+        .color-box.read-forward { clip-path: polygon(0 0, 65% 0, 100% 50%, 65% 100%, 0 100%); border: none; }
+        .color-box.read-reverse { clip-path: polygon(35% 0, 100% 0, 100% 100%, 35% 100%, 0 50%); border: none; }
+        .color-box.mapq-fade { background: linear-gradient(to right, rgba(59,130,246,1), rgba(59,130,246,0.2)); width: 28px; }
+        .color-box.mapq-zero { background: #fff; border: 1px solid #6b7280; }
+        .color-box.mismatch { background: linear-gradient(to right, transparent 35%, var(--color-base-t) 35%, var(--color-base-t) 65%, transparent 65%), var(--color-read-forward); opacity: 0.9; }
+        .color-box.variant-dot { border-radius: 50%; background: var(--color-base-t); border: 1px solid #000; }
+        .color-box.soft-clip { background: rgba(156, 163, 175, 0.4); border: 1px dashed #6b7280; }
+        .color-box.insertion { background: linear-gradient(to right, transparent 40%, var(--color-insertion) 40%, var(--color-insertion) 60%, transparent 60%); border: none; }
+        .color-box.deletion { background: linear-gradient(to bottom, transparent 40%, var(--color-deletion) 40%, var(--color-deletion) 60%, transparent 60%); border: none; }
+        .color-box.cov-area { background: #93c5fd; border-color: #3b82f6; }
+        .color-box.cov-low { background: rgba(239, 68, 68, 0.2); }
+        .color-box.cov-zero { background: repeating-linear-gradient(45deg, rgba(239,68,68,0.4), rgba(239,68,68,0.4) 2px, rgba(239,68,68,0.7) 2px, rgba(239,68,68,0.7) 4px); }
+        .color-box.dv-mismatch { background: #06b6d4; }
+        .legend-note { color: var(--color-text-faint); }
+        /* Mode-specific legend sections: DV channels only in DV modes. */
+        .legend-dv { display: none; }
+        #legend[data-mode="dv-strips"] .legend-dv-strips,
+        #legend[data-mode="dv-composite"] .legend-dv-composite { display: flex; }
+
+        /* No-reference banner (outside #viewer, between legend and tracks) */
+        #reference-banner {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-md);
+            padding: 6px var(--spacing-md);
+            background: #fef3c7;
+            color: #78350f;
+            border-bottom: 1px solid #f59e0b;
+            font-size: 12px;
+            font-weight: 500;
+            flex-shrink: 0;
+        }
+        #reference-banner::before { content: '⚠'; }
+        #reference-banner.hidden { display: none; }
+
+        /* "N reads not shown" bar, pinned to the bottom of the visible #viewer area */
+        #hidden-reads-indicator {
+            position: absolute;
+            left: 0;
+            right: 0;
+            height: 22px;
+            line-height: 22px;
+            padding: 0 var(--spacing-md);
+            background: rgba(30, 41, 59, 0.88);
+            color: #e5e7eb;
+            font-size: 11px;
+            z-index: 15;
+            pointer-events: none;
+            white-space: nowrap;
+            overflow: hidden;
+        }
+        #hidden-reads-indicator.hidden { display: none; }
 
         /* Viewer - fills available space, scrolls if needed */
         #viewer {
@@ -695,25 +748,52 @@
             <button id="fullscreen-btn" title="Toggle fullscreen">&#x26F6;</button>
             <button id="debug-btn" title="Toggle debug overlay">Debug</button>
         </div>
-        <div id="legend">
+        <div id="legend" data-mode="compact">
             <span class="legend-section">
                 <span class="legend-title">Bases:</span>
                 <span class="legend-item"><span class="color-box base-a"></span>A</span>
                 <span class="legend-item"><span class="color-box base-t"></span>T</span>
                 <span class="legend-item"><span class="color-box base-g"></span>G</span>
                 <span class="legend-item"><span class="color-box base-c"></span>C</span>
+                <span class="legend-item"><span class="color-box base-n"></span>N</span>
             </span>
-            <span class="legend-section">
-                <span class="legend-title">Reads:</span>
+            <span class="legend-section" title="Read colour and arrow direction; at base zoom shown as the bottom stripe and arrowhead">
+                <span class="legend-title">Strand:</span>
                 <span class="legend-item"><span class="color-box read-forward"></span>Forward</span>
                 <span class="legend-item"><span class="color-box read-reverse"></span>Reverse</span>
             </span>
+            <span class="legend-section" title="Read opacity scales with mapping quality">
+                <span class="legend-title">MAPQ:</span>
+                <span class="legend-item"><span class="color-box mapq-fade"></span>60 → 0 (faded = low)</span>
+                <span class="legend-item"><span class="color-box mapq-zero"></span>MAPQ 0</span>
+            </span>
             <span class="legend-section">
-                <span class="legend-title">Features:</span>
-                <span class="legend-item"><span class="color-box soft-clip"></span>Soft-clip</span>
+                <span class="legend-title">Marks:</span>
+                <span class="legend-item" title="A read base differing from the reference, coloured by the read's base"><span class="color-box mismatch"></span>Mismatch</span>
+                <span class="legend-item" title="Read carrying a called variant allele"><span class="color-box variant-dot"></span>Variant</span>
                 <span class="legend-item"><span class="color-box insertion"></span>Insertion</span>
                 <span class="legend-item"><span class="color-box deletion"></span>Deletion</span>
+                <span class="legend-item"><span class="color-box soft-clip"></span>Soft-clip</span>
             </span>
+            <span class="legend-section">
+                <span class="legend-title">Coverage:</span>
+                <span class="legend-item"><span class="color-box cov-area"></span>Depth</span>
+                <span class="legend-item"><span class="color-box cov-low"></span>&lt;10x</span>
+                <span class="legend-item"><span class="color-box cov-zero"></span>0x</span>
+            </span>
+            <span class="legend-section legend-dv legend-dv-composite">
+                <span class="legend-title">DV composite:</span>
+                <span class="legend-note">R = supports selected variant · G = base quality · B = MAPQ</span>
+                <span class="legend-item"><span class="color-box dv-mismatch"></span>top = mismatch</span>
+                <span class="legend-note">bottom stripe + arrow = strand</span>
+            </span>
+            <span class="legend-section legend-dv legend-dv-strips">
+                <span class="legend-title">DV strips (top→bottom):</span>
+                <span class="legend-note">base · base quality · MAPQ · strand · supports variant · mismatch (cyan)</span>
+            </span>
+        </div>
+        <div id="reference-banner" class="hidden" role="status" data-blind-hide>
+            <span id="reference-banner-text"></span>
         </div>
         <div id="viewer">
             <canvas id="ruler-canvas"></canvas>
@@ -721,6 +801,7 @@
             <canvas id="coverage-canvas"></canvas>
             <canvas id="reads-canvas"></canvas>
             <div id="tooltip"></div>
+            <div id="hidden-reads-indicator" class="hidden" data-blind-hide data-count="0"></div>
             <div id="sequence-notice" class="hidden">
                 <span class="loading-text">Loading sequences...</span>
                 <span class="notice-text">Sequences not loaded.</span>

@@ -146,6 +146,10 @@ export interface RegionData {
     reference?: string;  // Reference FASTA path — preserved so CRAM/mismatch context survives refetches
     vcf_path?: string;  // Preserved across refetches so VCF sourcing sticks
     variant_source?: string;  // 'auto' | 'vcf' | 'bamcp'
+    // Server-echoed thresholds + what could not be detected (e.g. snv_detection:
+    // "disabled: no reference"). Optional: older servers omit it.
+    applied_filters?: Record<string, unknown>;
+    reference_source?: string;  // e.g. 'explicit' | 'auto' | 'none' (newer servers)
 }
 
 export interface ToolResultParams {

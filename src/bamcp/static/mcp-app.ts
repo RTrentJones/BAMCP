@@ -26,6 +26,12 @@ import {
     zoomViewport,
 } from "./constants";
 import { variantKey } from "./data-store";
+import {
+    firstHiddenRow,
+    hiddenReadCount,
+    hiddenReadsLabel,
+    referenceBannerMessage,
+} from "./ui-sync";
 import { Renderer } from "./renderer";
 import { StateManager, DEFAULT_SETTINGS } from "./state";
 import {
@@ -40,6 +46,8 @@ import {
 } from "./types";
 
 const CONTEXT_UPDATE_DEBOUNCE_MS = 300;
+// Fixed height of the in-viewer "N reads not shown" bar (matches viewer.html CSS).
+const HIDDEN_READS_BAR_PX = 22;
 
 /** Render per-sample genotypes as `name=allele/allele` (missing alleles as `.`). */
 function formatGenotypes(samples?: Record<string, Record<string, unknown>>): string[] {
@@ -100,6 +108,11 @@ class BAMCPViewer {
         this.client = new BAMCPClient();
         this.state = new StateManager();
         this.renderer = new Renderer(this.state);
+        // Every render re-syncs the DOM chrome, so any path that changes state and
+        // renders (host data, pan/zoom, or a direct hydrate that sets
+        // settings.displayMode and calls renderer.resize()) leaves the mode select,
+        // region box, banner and hidden-reads indicator consistent with the canvas.
+        this.renderer.onRendered = () => this.syncUiState();
 
         // Bind DOM elements
         this.tooltip = document.getElementById('tooltip')!;
@@ -159,6 +172,11 @@ class BAMCPViewer {
 
         this.setupEventListeners();
         this.setupKeyboardShortcuts();
+
+        // The reads area scrolls inside #viewer; keep the hidden-reads count current.
+        document.getElementById('viewer')?.addEventListener('scroll', () => {
+            this.updateHiddenReadsIndicator();
+        });
 
         // Window resize
         window.addEventListener('resize', () => this.renderer.resize());
@@ -823,7 +841,7 @@ class BAMCPViewer {
                 ),
                 reads: this.state.data.reads.length,
                 meanCoverage: parseFloat(meanCov),
-                variantCount: this.state.data.variants.length,
+                variantCount: this.state.data.variants?.length ?? 0,
             };
             this.client.updateModelContext(context);
             this.syncRegionInput();
@@ -842,6 +860,75 @@ class BAMCPViewer {
         input.value = toRegionString(
             this.state.data.contig, this.state.viewport.start, this.state.viewport.end,
         );
+    }
+
+    /** Sync all DOM chrome with the current state (called after every render). */
+    private syncUiState(): void {
+        this.syncSettingsControls();
+        this.syncRegionInput();
+        this.updateReferenceBanner();
+        this.updateHiddenReadsIndicator();
+    }
+
+    /** Make the toolbar selects show the settings actually being rendered. */
+    private syncSettingsControls(): void {
+        const s = this.state.settings;
+        const pairs: Array<[string, string]> = [
+            ['display-mode-select', s.displayMode],
+            ['color-by-select', s.colorBy],
+            ['sort-by-select', s.sortBy],
+        ];
+        for (const [id, value] of pairs) {
+            const el = document.getElementById(id) as HTMLSelectElement | null;
+            if (el && el.value !== value && document.activeElement !== el) el.value = value;
+        }
+        const legend = document.getElementById('legend');
+        if (legend && legend.dataset.mode !== s.displayMode) legend.dataset.mode = s.displayMode;
+    }
+
+    /** Show/hide the no-reference banner from the payload's applied_filters. */
+    private updateReferenceBanner(): void {
+        const banner = document.getElementById('reference-banner');
+        if (!banner) return;
+        const message = referenceBannerMessage(this.state.data);
+        const text = document.getElementById('reference-banner-text');
+        if (message) {
+            if (text && text.textContent !== message) text.textContent = message;
+            banner.classList.remove('hidden');
+        } else {
+            banner.classList.add('hidden');
+        }
+    }
+
+    /**
+     * Count reads that overlap the viewport but sit in packed rows below the
+     * visible part of #viewer (or past the canvas cap), and pin an
+     * "N reads not shown" bar to the bottom of the visible area.
+     */
+    private updateHiddenReadsIndicator(): void {
+        const el = document.getElementById('hidden-reads-indicator');
+        const viewerEl = document.getElementById('viewer');
+        if (!el || !viewerEl) return;
+        const count = this.hiddenReadsCount(viewerEl);
+        if (count <= 0) {
+            el.classList.add('hidden');
+            el.dataset.count = '0';
+            return;
+        }
+        el.textContent = hiddenReadsLabel(count);
+        el.dataset.count = String(count);
+        el.style.top = `${viewerEl.scrollTop + viewerEl.clientHeight - HIDDEN_READS_BAR_PX}px`;
+        el.classList.remove('hidden');
+    }
+
+    private hiddenReadsCount(viewerEl: HTMLElement): number {
+        if (!this.state.data || this.state.packedRows.length === 0) return 0;
+        const { height, gap } = this.renderer.getReadDimensions();
+        // Visible reads area, minus the bar itself (it covers the bottom rows).
+        const visibleH = viewerEl.scrollTop + viewerEl.clientHeight
+            - this.readsCanvas.offsetTop - HIDDEN_READS_BAR_PX;
+        const from = firstHiddenRow(visibleH, height + gap, height, this.renderer.drawnRowCount);
+        return hiddenReadCount(this.state.packedRows, this.state.viewport, from);
     }
 
     private renderVariantTable(): void {

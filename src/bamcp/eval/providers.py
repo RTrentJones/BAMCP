@@ -336,10 +336,28 @@ def get_provider(
 # -----------------------------------------------------------------------------
 
 
+# How a UI tool's render reaches the model under test:
+#   off         — text only (no render)
+#   text+image  — the tool's text result plus the viewer PNG
+#   image-only  — just the viewer PNG; the tool's text is withheld (the visual arm)
+VISION_OFF = "off"
+VISION_TEXT_IMAGE = "text+image"
+VISION_IMAGE_ONLY = "image-only"
+VISION_MODES = (VISION_OFF, VISION_TEXT_IMAGE, VISION_IMAGE_ONLY)
+
+# Sent in place of the withheld text when an image-only render could not be produced, so
+# the visual arm never silently falls back to the text it is meant to exclude.
+IMAGE_UNAVAILABLE_TEXT = "[viewer render unavailable; tool text withheld in image-only mode]"
+# What a non-vision (mock) provider sees for an image-only result.
+IMAGE_ONLY_PLACEHOLDER = "[viewer image]"
+
+
 def build_tool_result_content(
     text: str,
     image_bytes: bytes | None,
     provider_kind: str,
+    *,
+    image_only: bool = False,
 ) -> Any:
     """Build the right content-block shape for a tool_result, per provider.
 
@@ -352,33 +370,36 @@ def build_tool_result_content(
 
     When ``image_bytes`` is None or the provider doesn't support vision, the
     return value is the original ``text`` string.
+
+    ``image_only=True`` (the ``image-only`` vision mode) withholds ``text``: the result is
+    the image block alone, or :data:`IMAGE_UNAVAILABLE_TEXT` when there is no image —
+    never the tool text the visual arm is meant to exclude.
     """
     if image_bytes is None:
-        return text
+        return IMAGE_UNAVAILABLE_TEXT if image_only else text
 
     import base64
 
     encoded = base64.b64encode(image_bytes).decode("ascii")
 
+    image_block: dict[str, Any]
     if provider_kind == "anthropic":
-        return [
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": encoded,
-                },
+        image_block = {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": encoded,
             },
-            {"type": "text", "text": text},
-        ]
-    if provider_kind == "openai":
-        return [
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{encoded}"},
-            },
-            {"type": "text", "text": text},
-        ]
-    # Mock / unknown: fall back to plain text.
-    return text
+        }
+    elif provider_kind == "openai":
+        image_block = {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{encoded}"},
+        }
+    else:
+        # Mock / unknown: no image support — plain text (or a placeholder in image-only).
+        return IMAGE_ONLY_PLACEHOLDER if image_only else text
+    if image_only:
+        return [image_block]
+    return [image_block, {"type": "text", "text": text}]

@@ -559,3 +559,125 @@ def test_results_json_includes_new_fields(tmp_path: Path):
     parsed = json.loads(paths["json"].read_text())
     assert parsed[0]["vision_used"] is True
     assert parsed[0]["screenshots"] == [str(tmp_path / "x.png")]
+
+
+# ---------------------------------------------------------------------------
+# Vision modes: off / text+image / image-only
+# ---------------------------------------------------------------------------
+
+
+class TestImageOnlyContent:
+    PNG = b"\x89PNG\r\n\x1a\nbytes"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("kind", ["anthropic", "openai"])
+    def test_image_only_drops_text(self, kind):
+        out = build_tool_result_content("verdict: PASS", self.PNG, kind, image_only=True)
+        assert isinstance(out, list) and len(out) == 1
+        assert out[0]["type"] in ("image", "image_url")
+        assert "verdict" not in json.dumps(out)
+
+    @pytest.mark.unit
+    def test_image_only_without_image_withholds_text(self):
+        from bamcp.eval.providers import IMAGE_UNAVAILABLE_TEXT
+
+        out = build_tool_result_content("verdict: PASS", None, "anthropic", image_only=True)
+        assert out == IMAGE_UNAVAILABLE_TEXT
+
+    @pytest.mark.unit
+    def test_image_only_mock_gets_placeholder(self):
+        from bamcp.eval.providers import IMAGE_ONLY_PLACEHOLDER
+
+        out = build_tool_result_content("verdict", self.PNG, "mock", image_only=True)
+        assert out == IMAGE_ONLY_PLACEHOLDER
+
+
+def _two_call_script(small_bam_path, seen):
+    def script(messages, tools):
+        seen.append(messages)
+        if len(seen) == 1:
+            return ProviderResponse(
+                text="looking",
+                tool_calls=[
+                    ToolCall(
+                        id="v1",
+                        name="visualize_region",
+                        arguments={"file_path": small_bam_path, "region": "chr1:90-200"},
+                    ),
+                    ToolCall(
+                        id="c1",
+                        name="get_coverage",
+                        arguments={"file_path": small_bam_path, "region": "chr1:90-200"},
+                    ),
+                ],
+            )
+        return ProviderResponse(text="done")
+
+    return script
+
+
+class TestRunnerVisionModes:
+    async def _run(self, tmp_path, small_bam_path, cfg, vision_mode):
+        seen: list = []
+        provider = MockProvider(_two_call_script(small_bam_path, seen), vision_capable=True)
+        provider.kind = "anthropic"
+        case = EvalCase(name="modes", input="x", expected="x", rendering_modes=["expanded"])
+        result = await run_case(
+            case,
+            provider,
+            InProcessRouter(config=cfg),
+            judge=None,
+            output_dir=tmp_path,
+            rendering_mode="expanded",
+            vision_mode=vision_mode,
+        )
+        return result, seen[1][-1]["content"]
+
+    @pytest.mark.unit
+    async def test_image_only_sends_render_without_text(
+        self, tmp_path, small_bam_path, cfg, fake_renderer, monkeypatch
+    ):
+        monkeypatch.setattr(runner_mod, "_make_renderer", lambda: fake_renderer)
+        result, tool_results = await self._run(tmp_path, small_bam_path, cfg, "image-only")
+        assert result.vision_used is True
+        ui_result, coverage_result = tool_results
+        assert [b["type"] for b in ui_result["content"]] == ["image"]
+        # Non-UI tools keep their text even in image-only mode.
+        assert isinstance(coverage_result["content"], str) and coverage_result["content"]
+
+    @pytest.mark.unit
+    async def test_text_plus_image_sends_both(
+        self, tmp_path, small_bam_path, cfg, fake_renderer, monkeypatch
+    ):
+        monkeypatch.setattr(runner_mod, "_make_renderer", lambda: fake_renderer)
+        _result, tool_results = await self._run(tmp_path, small_bam_path, cfg, "text+image")
+        assert [b["type"] for b in tool_results[0]["content"]] == ["image", "text"]
+
+    @pytest.mark.unit
+    async def test_off_sends_text_only(
+        self, tmp_path, small_bam_path, cfg, fake_renderer, monkeypatch
+    ):
+        monkeypatch.setattr(runner_mod, "_make_renderer", lambda: fake_renderer)
+        result, tool_results = await self._run(tmp_path, small_bam_path, cfg, "off")
+        assert result.vision_used is False
+        assert isinstance(tool_results[0]["content"], str)
+        assert fake_renderer.calls == []
+
+    @pytest.mark.unit
+    async def test_image_only_capture_failure_withholds_text(
+        self, tmp_path, small_bam_path, cfg, fake_renderer, monkeypatch
+    ):
+        from bamcp.eval.providers import IMAGE_UNAVAILABLE_TEXT
+
+        monkeypatch.setattr(runner_mod, "_make_renderer", lambda: fake_renderer)
+        fake_renderer.make_fail_next()
+        _result, tool_results = await self._run(tmp_path, small_bam_path, cfg, "image-only")
+        assert tool_results[0]["content"] == IMAGE_UNAVAILABLE_TEXT
+
+    @pytest.mark.unit
+    def test_vision_mode_resolution(self):
+        assert runner_mod._resolve_vision_mode(False, None) == "text+image"
+        assert runner_mod._resolve_vision_mode(True, None) == "off"
+        assert runner_mod._resolve_vision_mode(True, "image-only") == "image-only"
+        with pytest.raises(ValueError, match="vision_mode"):
+            runner_mod._resolve_vision_mode(False, "pictures")

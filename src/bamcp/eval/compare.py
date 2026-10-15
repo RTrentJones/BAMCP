@@ -32,6 +32,8 @@ from typing import Any
 from .providers import (
     DEFAULT_JUDGE_MODEL,
     DEFAULT_JUDGE_PROVIDER,
+    VISION_MODES,
+    VISION_OFF,
     LLMProvider,
     MockProvider,
     ProviderResponse,
@@ -63,12 +65,21 @@ _LOCAL_TOOLS = frozenset(
 
 @dataclass(frozen=True)
 class RunSpec:
-    """One configuration to evaluate: a provider/model, with tools on or off."""
+    """One configuration to evaluate: a provider/model, with tools on or off.
+
+    ``vision`` (``off`` / ``text+image`` / ``image-only``) controls whether UI tool results
+    reach the model as text, text plus the rendered viewer, or the render alone.
+    """
 
     label: str
     provider: str
     model: str
     tools: bool = True
+    vision: str = VISION_OFF
+
+    def __post_init__(self) -> None:
+        if self.vision not in VISION_MODES:
+            raise ValueError(f"vision must be one of {VISION_MODES}, got {self.vision!r}")
 
     @property
     def slug(self) -> str:
@@ -94,6 +105,7 @@ class SpecResult:
             "provider": self.spec.provider,
             "model": self.spec.model,
             "tools": self.spec.tools,
+            "vision": self.spec.vision,
             "passed": self.passed,
             "total": self.total,
             "accuracy": round(self.accuracy, 4),
@@ -118,9 +130,14 @@ class ComparisonReport:
         return sorted(cats)
 
     def ablation_pairs(self) -> list[tuple[str, SpecResult, SpecResult]]:
-        """Match tools-on / tools-off specs by (provider, model) for the lift table."""
+        """Match tools-on / tools-off specs by (provider, model) for the lift table.
+
+        Tools-on specs with vision enabled are a different arm, not the tools baseline.
+        """
         by_key: dict[tuple[str, str], dict[bool, SpecResult]] = {}
         for s in self.specs:
+            if s.spec.tools and s.spec.vision != VISION_OFF:
+                continue
             by_key.setdefault((s.spec.provider, s.spec.model), {})[s.spec.tools] = s
         pairs = []
         for (_provider, model), variants in by_key.items():
@@ -178,12 +195,12 @@ def format_markdown(report: ComparisonReport, *, title: str = "BAMCP model compa
     lines = [f"# {title}", ""]
 
     lines += ["## Accuracy by configuration", ""]
-    lines += ["| Configuration | Provider | Model | Tools | Passed | Cases | Accuracy |"]
-    lines += ["|---|---|---|---|---:|---:|---:|"]
+    lines += ["| Configuration | Provider | Model | Tools | Vision | Passed | Cases | Accuracy |"]
+    lines += ["|---|---|---|---|---|---:|---:|---:|"]
     for s in sorted(report.specs, key=lambda s: s.accuracy, reverse=True):
         lines.append(
             f"| {s.spec.label} | {s.spec.provider} | `{s.spec.model}` | "
-            f"{'on' if s.spec.tools else 'off'} | {s.passed} | {s.total} | "
+            f"{'on' if s.spec.tools else 'off'} | {s.spec.vision} | {s.passed} | {s.total} | "
             f"**{_pct(s.accuracy)}** |"
         )
     lines.append("")
@@ -322,8 +339,12 @@ async def run_comparison(
     *,
     judge_provider: str | None = None,
     judge_model: str | None = None,
+    rendering_mode: str = "expanded",
 ) -> ComparisonReport:
-    """Run every spec over the shared case set and aggregate the outcomes."""
+    """Run every spec over the shared case set and aggregate the outcomes.
+
+    Specs with ``vision`` on render UI tool results at ``rendering_mode``.
+    """
     # Resolve every judge up front so a self-grading config fails before any spend.
     judges = [build_judge(spec, judge_provider, judge_model) for spec in specs]
     spec_results: list[SpecResult] = []
@@ -334,7 +355,8 @@ async def run_comparison(
             router=build_router(spec),
             judge=judge,
             output_dir=output_dir / spec.slug,
-            no_vision=True,
+            vision_mode=spec.vision,
+            rendering_mode=rendering_mode if spec.vision != VISION_OFF else None,
             # Both arms are graded on the answer only. Tool selection would auto-fail
             # every tools_expected case in the tools-off arm (it has no tools to call)
             # and bias the lift; the lift must measure answer quality.
@@ -344,14 +366,27 @@ async def run_comparison(
     return ComparisonReport(spec_results)
 
 
-def _default_specs(provider: str, models: list[str]) -> list[RunSpec]:
-    """Build tools-on + tools-off specs for each model (the ablation grid)."""
+def _default_specs(provider: str, models: list[str], vision: str = VISION_OFF) -> list[RunSpec]:
+    """Build tools-on + tools-off specs for each model (the ablation grid).
+
+    With ``vision`` on, each model also gets a tools-on spec in that vision mode (the
+    tools-off arm has no tool results to render, so it stays text-only).
+    """
     specs: list[RunSpec] = []
     for model in models:
-        short = model if provider == "mock" else model
-        specs.append(RunSpec(label=f"{short} (tools)", provider=provider, model=model, tools=True))
+        specs.append(RunSpec(label=f"{model} (tools)", provider=provider, model=model, tools=True))
+        if vision != VISION_OFF:
+            specs.append(
+                RunSpec(
+                    label=f"{model} (tools, vision {vision})",
+                    provider=provider,
+                    model=model,
+                    tools=True,
+                    vision=vision,
+                )
+            )
         specs.append(
-            RunSpec(label=f"{short} (no tools)", provider=provider, model=model, tools=False)
+            RunSpec(label=f"{model} (no tools)", provider=provider, model=model, tools=False)
         )
     return specs
 
@@ -372,6 +407,21 @@ def main(argv: list[str] | None = None) -> int:
         nargs="+",
         default=["claude-opus-4-8", "claude-sonnet-4-5"],
         help="Models to compare (each run with and without tools).",
+    )
+    p.add_argument(
+        "--vision",
+        default=VISION_OFF,
+        choices=list(VISION_MODES),
+        help=(
+            "Add a vision arm per model: 'text+image' sends UI tool text plus the rendered "
+            "viewer, 'image-only' sends the render alone. Default: off."
+        ),
+    )
+    p.add_argument(
+        "--rendering-mode",
+        default="expanded",
+        choices=["squished", "compact", "expanded", "dv-strips", "dv-composite"],
+        help="Viewer display mode for the vision arm.",
     )
     p.add_argument("--test-cases", default="tests/eval/test_cases.yaml")
     p.add_argument("--output-dir", default=".eval-results/comparison")
@@ -400,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"No cases selected (subset {subset} of {len(all_cases)}).", file=sys.stderr)
         return 2
 
-    specs = _default_specs(args.provider, args.models)
+    specs = _default_specs(args.provider, args.models, args.vision)
     output_dir = Path(args.output_dir)
     report = asyncio.run(
         run_comparison(
@@ -409,6 +459,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir,
             judge_provider=args.judge_provider,
             judge_model=args.judge_model,
+            rendering_mode=args.rendering_mode,
         )
     )
 

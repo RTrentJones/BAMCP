@@ -21,7 +21,7 @@ from bamcp.eval.compare import (
     realistic_mock,
     run_comparison,
 )
-from bamcp.eval.schema import EvalResult, GraderVerdict, load_cases
+from bamcp.eval.schema import EvalCase, EvalResult, GraderVerdict, load_cases
 
 pytestmark = pytest.mark.unit
 
@@ -225,3 +225,89 @@ def test_build_judge_is_shared_and_separate():
     j1 = build_judge(RunSpec("a", "anthropic", "claude-opus-4-8"))
     j2 = build_judge(RunSpec("b", "anthropic", "claude-sonnet-4-5"))
     assert j1.model == j2.model == DEFAULT_JUDGE_MODEL
+
+
+# ── --vision modes ─────────────────────────────────────────────────────────
+
+
+def test_runspec_rejects_unknown_vision():
+    with pytest.raises(ValueError, match="vision"):
+        RunSpec("x", "mock", "m", vision="pictures")
+
+
+def test_default_specs_vision_arm():
+    from bamcp.eval.compare import _default_specs
+
+    off = _default_specs("mock", ["m"])
+    assert [s.vision for s in off] == ["off", "off"]
+    on = _default_specs("mock", ["m"], "image-only")
+    assert [(s.tools, s.vision) for s in on] == [
+        (True, "off"),
+        (True, "image-only"),
+        (False, "off"),
+    ]
+    assert len({s.slug for s in on}) == 3
+
+
+def test_vision_arm_excluded_from_tool_ablation():
+    from bamcp.eval.compare import _default_specs
+
+    report = ComparisonReport(
+        [aggregate(s, []) for s in _default_specs("mock", ["m"], "text+image")]
+    )
+    pairs = report.ablation_pairs()
+    assert len(pairs) == 1
+    _model, on, off = pairs[0]
+    assert on.spec.vision == "off" and off.spec.tools is False
+    assert "| text+image |" in format_markdown(report)
+
+
+async def test_run_comparison_threads_vision_mode(tmp_path, monkeypatch):
+    from bamcp.eval import compare as compare_mod
+
+    seen: list[dict] = []
+
+    async def fake_run_cases(**kw):
+        seen.append(kw)
+        return []
+
+    monkeypatch.setattr(compare_mod, "run_cases", fake_run_cases)
+    specs = [
+        RunSpec("m (tools)", "mock", "m"),
+        RunSpec("m (tools, vision image-only)", "mock", "m", vision="image-only"),
+    ]
+    await run_comparison(specs, [], tmp_path, rendering_mode="dv-strips")
+    assert [(k["vision_mode"], k["rendering_mode"]) for k in seen] == [
+        ("off", None),
+        ("image-only", "dv-strips"),
+    ]
+
+
+@pytest.mark.parametrize("mode", ["off", "text+image", "image-only"])
+def test_cli_vision_flag(monkeypatch, tmp_path, mode):
+    from bamcp.eval import compare as compare_mod
+
+    captured: dict = {}
+
+    async def fake_run_comparison(specs, cases, output_dir, **kw):
+        captured["specs"] = specs
+        captured["kw"] = kw
+        return ComparisonReport([])
+
+    monkeypatch.setattr(compare_mod, "run_comparison", fake_run_comparison)
+    monkeypatch.setattr(
+        compare_mod, "load_cases", lambda p: [EvalCase(name="c", input="i", expected="e")]
+    )
+    rc = compare_mod.main(
+        ["--provider", "mock", "--models", "m", "--vision", mode, "--output-dir", str(tmp_path)]
+    )
+    assert rc == 0
+    assert {s.vision for s in captured["specs"]} == ({"off"} | {mode})
+    assert captured["kw"]["rendering_mode"] == "expanded"
+
+
+def test_cli_rejects_unknown_vision(tmp_path):
+    from bamcp.eval import compare as compare_mod
+
+    with pytest.raises(SystemExit):
+        compare_mod.main(["--provider", "mock", "--vision", "pictures"])

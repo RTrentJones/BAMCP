@@ -558,3 +558,30 @@ async def test_bam_build_routes_lookups_to_the_bams_assembly(monkeypatch):
     monkeypatch.setattr(tools, "get_clinvar_client", lambda config: _Client())
     await fusion._lookup_clinvar_safe(cfg, "17", 7579472, "G", "C", "GRCh37")
     assert seen["build"] == "GRCh37"
+
+
+@pytest.mark.unit
+def test_gnomad_caution_is_direction_neutral_and_not_repeated():
+    from bamcp.analysis.acmg import _benign_frequency_caveat, _format_classify_text
+
+    pop = {
+        "global_af": 0.207,
+        "max_pop_af": 0.235,
+        "filters": ["joint:discrepant_frequencies"],
+        "frequency_reliable": False,
+        "warnings": ["site fails gnomAD QC filters in joint (['joint:discrepant_frequencies'])"],
+    }
+    ev = {
+        "variant": {"location": "chr17:43099914", "change": "G>A"},
+        "observation": {"status": "observed", "detected": True},
+        "clinvar": None,
+        "population_frequency": pop,
+    }
+    text = _format_classify_text(ev, build_acmg_scaffold(ev))
+    caution = next(line for line in text.splitlines() if "CAUTION" in line)
+    # A common (AF 0.2) site must not be cautioned about "rarity".
+    assert "NOT evidence of rarity" not in caution
+    assert "unreliable in either direction" in caution
+    # The failed-QC reason appears once, not restated by gnomAD's own warning.
+    assert caution.count("discrepant_frequencies") == 1
+    assert _benign_frequency_caveat(pop).count("discrepant_frequencies") == 1

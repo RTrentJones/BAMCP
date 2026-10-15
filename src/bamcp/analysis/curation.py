@@ -18,7 +18,7 @@ from ..constants import (
     HIGH_CONFIDENCE_MIN_DEPTH,
     LOW_CONFIDENCE_MAX_STRAND_BIAS,
 )
-from ..core.validation import validate_path, validate_reference_path, validate_variant_input
+from ..core.validation import validate_path, validate_variant_input
 from ..middleware.telemetry import telemetry_wrapper
 from .evidence import (
     build_indel_index,
@@ -320,7 +320,7 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
       deterministic grading.
     """
     # Import here to avoid circular dependency (tools imports from this module's siblings)
-    from ..core.tools import _applied_filters, _fetch_region_with_timeout
+    from ..core.tools import _applied_filters, _fetch_region_with_timeout, _resolve_reference
 
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
@@ -329,12 +329,10 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     ref = args["ref"]
     alt = args["alt"]
     window = args.get("window", 50)
-    # Validate only a caller-supplied reference (untrusted SSRF vector); a trusted config default
-    # is used as-is. See the same pattern in core/tools.py handlers.
-    explicit_reference = args.get("reference")
-    if explicit_reference:
-        await asyncio.to_thread(validate_reference_path, explicit_reference, config)
-    reference = explicit_reference or config.reference
+    # Same resolution as every other tool: a caller-supplied reference is validated (the
+    # untrusted SSRF vector), then the operator default, then the public FASTA matching the
+    # BAM's build and contig style — so a bare demo/remote BAM still gets SNV evidence.
+    _, reference = await _resolve_reference(args, config)
     output_format = args.get("format", "text")
     if output_format not in _VALID_FORMATS:
         output_format = "text"

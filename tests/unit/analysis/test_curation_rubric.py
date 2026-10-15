@@ -302,3 +302,33 @@ class TestCurationReferenceSSRF:
                     },
                     config,
                 )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_curation_auto_resolves_reference(
+    monkeypatch, comprehensive_bam_path, comprehensive_ref_fasta_path
+):
+    """With no caller/config reference, curation uses the same auto-reference as the other
+    tools (a bare demo BAM must still get SNV evidence, not "variant not found")."""
+    import bamcp.core.tools as tools
+    from bamcp.config import BAMCPConfig
+
+    async def fake_auto(file_path, config):
+        return comprehensive_ref_fasta_path, None
+
+    monkeypatch.setattr(tools, "_auto_reference", fake_auto)
+    config = BAMCPConfig(reference=None, allow_remote_files=True)
+    result = await handle_get_variant_curation_summary(
+        {
+            "file_path": comprehensive_bam_path,
+            "chrom": "chr1",
+            "pos": 1151,
+            "ref": "A",
+            "alt": "G",
+            "format": "rubric",
+        },
+        config,
+    )
+    payload = json.loads(result["content"][0]["text"])
+    assert "error" not in payload, payload

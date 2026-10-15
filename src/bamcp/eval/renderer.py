@@ -19,6 +19,7 @@ page so successive calls do not share state.
 
 from __future__ import annotations
 
+import os
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -82,9 +83,15 @@ class ViewerRenderer:
 
         self._stack = AsyncExitStack()
         playwright = await self._stack.enter_async_context(async_playwright())
-        self._browser = await playwright.chromium.launch(
-            headless=self.headless, args=["--no-sandbox"]
+        # A sandbox may ship a Chromium whose revision differs from the pinned playwright's;
+        # point at it explicitly instead of requiring `playwright install` (unset: no-op).
+        executable = os.environ.get("BAMCP_CHROMIUM_EXECUTABLE") or os.environ.get(
+            "PLAYWRIGHT_CHROMIUM_EXECUTABLE"
         )
+        launch_kwargs: dict[str, Any] = {"headless": self.headless, "args": ["--no-sandbox"]}
+        if executable:
+            launch_kwargs["executable_path"] = executable
+        self._browser = await playwright.chromium.launch(**launch_kwargs)
         self._html = get_viewer_html()
         return self
 

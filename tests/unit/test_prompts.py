@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
@@ -126,7 +127,8 @@ async def test_demo_alias_resolves_before_validation():
     async with _client(config) as client:
         result = await client.call_tool("list_contigs", {"file_path": "demo:HG002"})
     assert result.isError
-    assert "ftp-trace.ncbi.nlm.nih.gov" in result.content[0].text
+    named_hosts = set(re.findall(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", result.content[0].text))
+    assert {"ftp-trace.ncbi.nlm.nih.gov"} <= named_hosts
 
 
 @pytest.mark.network

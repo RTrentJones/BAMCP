@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 
 import pysam
 import pytest
@@ -535,8 +536,8 @@ def test_disallowed_host_error_lists_allowed_hosts():
     with pytest.raises(ValueError) as exc:
         validate_remote_url("https://evil.example/x.bam", cfg)
     msg = str(exc.value)
-    assert "evil.example" in msg
-    assert "ftp.ensembl.org" in msg and "ftp.ncbi.nlm.nih.gov" in msg
+    named_hosts = set(re.findall(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", msg))
+    assert {"evil.example", "ftp.ensembl.org", "ftp.ncbi.nlm.nih.gov"} <= named_hosts
 
 
 # -- Compact viewer text (P1-8) ------------------------------------------------

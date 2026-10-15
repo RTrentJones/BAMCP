@@ -1751,6 +1751,18 @@ async def probe_site(
     from ..analysis.evidence import build_indel_index, compute_indel_evidence
 
     contig = data.contig
+    # The probe counts reads carrying ALT, so a REF that isn't the reference base would turn
+    # every ordinary read into "support" for a variant that doesn't exist. Verify it first.
+    ref_seq = data.reference_sequence
+    offset = pos0 - data.start
+    if ref_seq and offset >= 0 and offset + len(ref) <= len(ref_seq):
+        actual = ref_seq[offset : offset + len(ref)].upper()
+        if actual != ref.upper():
+            raise ToolInputError(
+                f"REF '{ref}' does not match the reference at {contig}:{pos0 + 1} "
+                f"(the reference has '{actual}'). Check the allele, the position (1-based) "
+                "and the genome build."
+            )
     if len(ref) == 1 == len(alt):
         # Both pileups at once (each is a remote open + seek; they share nothing).
         loose, strict = await asyncio.gather(
@@ -2645,7 +2657,11 @@ def _scan_chunk(
         quality_threshold=min_baseq,
         read_callback=lambda r: read_passes_filters(r, min_mapq),
     )
-    variants = detect_variants(counts, ref_seq, contig, chunk_start, min_vaf, min_depth)
+    # Apply the alt-read floor up front: one- and two-read noise would otherwise each cost a
+    # Python deletion pileup below before being discarded, eating the scan's time budget.
+    variants = detect_variants(
+        counts, ref_seq, contig, chunk_start, min_vaf, min_depth, min_alt_count=min_alt_count or 1
+    )
     if variants:
         gaps = _deletion_depth_at(
             samfile, contig, sorted({v["position"] for v in variants}), min_mapq

@@ -332,3 +332,30 @@ async def test_curation_auto_resolves_reference(
     )
     payload = json.loads(result["content"][0]["text"])
     assert "error" not in payload, payload
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_curation_rejects_ref_that_is_not_the_reference_base(
+    comprehensive_bam_path, comprehensive_ref_fasta_path
+):
+    """A mistyped REF must not turn ordinary reads into 'alt support' via the site probe."""
+    from bamcp.config import BAMCPConfig
+
+    config = BAMCPConfig(reference=comprehensive_ref_fasta_path)
+    # chr1:1151 is A in the reference (a real A>G het); claim the reference base is G and
+    # the alt is A — every reference read would otherwise count as alt support.
+    result = await handle_get_variant_curation_summary(
+        {
+            "file_path": comprehensive_bam_path,
+            "chrom": "chr1",
+            "pos": 1151,
+            "ref": "G",
+            "alt": "A",
+            "format": "rubric",
+        },
+        config,
+    )
+    payload = json.loads(result["content"][0]["text"])
+    assert "error" in payload
+    assert "does not match the reference" in payload["error"]

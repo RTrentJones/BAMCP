@@ -18,6 +18,7 @@ from ..constants import (
     HIGH_CONFIDENCE_MIN_DEPTH,
     LOW_CONFIDENCE_MAX_STRAND_BIAS,
 )
+from ..core.errors import ToolInputError
 from ..core.validation import validate_path, validate_variant_input
 from ..middleware.telemetry import telemetry_wrapper
 from .evidence import (
@@ -447,6 +448,8 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
             probed = await probe_site(file_path, data, pos - 1, ref, alt, reference, config)
         except (asyncio.TimeoutError, TimeoutError):
             return _error_response("Timeout fetching region data", output_format)
+        except ToolInputError as e:  # e.g. REF doesn't match the reference base
+            return _error_response(str(e), output_format, applied_filters=applied_filters)
         if probed is None:
             return _error_response(
                 f"Variant {chrom}:{pos} {ref}>{alt} not found in region: no read supports the alt "

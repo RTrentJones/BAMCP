@@ -211,3 +211,23 @@ async def test_max_region_cap_is_reported_with_continuation(
     assert payload["scanned_region"] == "chr1:1-300"
     assert payload["next_region"] == f"chr1:301-{contig_length}"
     assert "at most 300 bp" in payload["truncation_reason"]
+
+
+async def test_alt_count_floor_applied_before_deletion_pileups(
+    small_bam_path, ref_config, monkeypatch
+):
+    """Candidates under min_alt_count must never reach the (slow) deletion-depth pileup."""
+    from bamcp.core import parsers
+
+    seen: list[int] = []
+    real = parsers._deletion_depth_at
+
+    def spy(samfile, contig, positions, min_mapq):
+        seen.extend(positions)
+        return real(samfile, contig, positions, min_mapq)
+
+    monkeypatch.setattr(parsers, "_deletion_depth_at", spy)
+    await tools.handle_scan_variants(
+        {"file_path": small_bam_path, "contig": "chr1", "min_alt_count": 10_000}, ref_config
+    )
+    assert seen == []

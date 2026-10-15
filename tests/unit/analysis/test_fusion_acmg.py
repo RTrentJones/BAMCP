@@ -33,9 +33,20 @@ async def test_assemble_evidence_detects_fixture_variant(offline_cfg, comprehens
 
 @pytest.mark.unit
 async def test_assemble_evidence_absent_variant_not_detected(offline_cfg, comprehensive_bam_path):
-    # A position with no planted variant should report not-detected, no crash.
-    ev = await assemble_evidence("chr1", 1500, "A", "G", comprehensive_bam_path, offline_cfg)
+    # A position with no planted variant should report not-detected, no crash. REF is the
+    # real reference base there (C): a wrong REF is rejected, see the test below.
+    ev = await assemble_evidence("chr1", 1500, "C", "G", comprehensive_bam_path, offline_cfg)
     assert ev["observation"]["detected"] is False
+
+
+@pytest.mark.unit
+async def test_assemble_evidence_rejects_ref_mismatch(offline_cfg, comprehensive_bam_path):
+    # A REF that isn't the reference base would make the site probe count ordinary reads as
+    # alt support (and the ClinVar/gnomAD lookups would query the wrong allele): caller error.
+    from bamcp.core.errors import ToolInputError
+
+    with pytest.raises(ToolInputError, match="does not match the reference"):
+        await assemble_evidence("chr1", 1500, "A", "G", comprehensive_bam_path, offline_cfg)
 
 
 @pytest.mark.unit

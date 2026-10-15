@@ -38,7 +38,7 @@ if [[ "${VERIFY_SKIP_VIEWER:-0}" != "1" ]]; then
     npm test
     npm run build
   )
-  python scripts/render_viewer.py --record-build-hash
+  python -m bamcp.viewer_build
 elif [[ ! -f src/bamcp/static/dist/viewer.html ]]; then
   echo "VERIFY_SKIP_VIEWER=1 but dist/viewer.html is missing; test_resources will fail" >&2
 fi

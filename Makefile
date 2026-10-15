@@ -6,7 +6,7 @@ verify:
 
 build-viewer:
 	cd src/bamcp/static && npm install && npm run build
-	PYTHONPATH=src python scripts/render_viewer.py --record-build-hash
+	PYTHONPATH=src python -m bamcp.viewer_build
 
 install: build-viewer
 	pip install -e ".[dev]"

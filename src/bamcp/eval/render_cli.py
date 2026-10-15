@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import re
 import sys
@@ -28,58 +27,17 @@ _DEFAULT_HEIGHT = 800
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
-# Written next to dist/viewer.html after a build (``--record-build-hash``): the content hash
-# of the sources that produced it, plus the dist hash so a later un-stamped rebuild is detected.
-BUILD_STAMP_NAME = ".viewer-sources.json"
-
-
-def _viewer_source_files(static_dir: Path) -> list[Path]:
-    """The files whose content determines dist/viewer.html (tests excluded)."""
-    files = [f for f in static_dir.glob("*.ts") if not f.name.endswith(".test.ts")]
-    files += [static_dir / "viewer.html", static_dir / "package-lock.json"]
-    return sorted((f for f in files if f.is_file()), key=lambda f: f.name)
-
-
-def _sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def viewer_source_hash(static_dir: Path | None = None) -> str:
-    """Content hash of the viewer sources (names + bytes) — independent of mtimes."""
-    static_dir = static_dir or _STATIC_DIR
-    h = hashlib.sha256()
-    for f in _viewer_source_files(static_dir):
-        h.update(f.name.encode("utf-8") + b"\0")
-        h.update(f.read_bytes())
-        h.update(b"\0")
-    return h.hexdigest()
-
-
-def record_build_hash(static_dir: Path | None = None) -> Path:
-    """Stamp dist/ with the source + dist hashes. Run right after ``npm run build``."""
-    static_dir = static_dir or _STATIC_DIR
-    dist = static_dir / "dist" / "viewer.html"
-    if not dist.exists():
-        raise SystemExit(f"{dist} does not exist; build the viewer before recording its hash.")
-    stamp = static_dir / "dist" / BUILD_STAMP_NAME
-    stamp.write_text(
-        json.dumps({"sources": viewer_source_hash(static_dir), "dist": _sha256_file(dist)}) + "\n",
-        encoding="utf-8",
-    )
-    return stamp
-
-
-def _read_stamp(static_dir: Path, dist: Path) -> str | None:
-    """The recorded source hash, or None when there is no stamp matching this dist build."""
-    stamp = static_dir / "dist" / BUILD_STAMP_NAME
-    try:
-        data = json.loads(stamp.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict) or data.get("dist") != _sha256_file(dist):
-        return None  # dist was rebuilt after the stamp was written — the stamp says nothing.
-    sources = data.get("sources")
-    return sources if isinstance(sources, str) else None
+# Re-exported: the stamp logic lives in the stdlib-only bamcp.viewer_build (it runs before
+# the package's dependencies are installed).
+from ..viewer_build import (  # noqa: E402
+    BUILD_STAMP_NAME as BUILD_STAMP_NAME,
+)
+from ..viewer_build import (  # noqa: E402
+    _read_stamp,
+    _viewer_source_files,
+    record_build_hash,
+    viewer_source_hash,
+)
 
 
 def _check_rebuild_needed() -> str | None:

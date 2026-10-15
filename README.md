@@ -16,8 +16,66 @@ BAMCP brings IGV-style alignment visualization directly into your AI conversatio
 
 ---
 
+## Try this in 2 minutes
+
+No install, no data of your own. The hosted demo server is **`https://bamcp.rtrentjones.dev/mcp`**.
+
+1. In claude.ai, open **Settings → Connectors → Add custom connector**, paste
+   `https://bamcp.rtrentjones.dev/mcp`, and connect (sign-in is automatic — it is an open demo).
+2. In a new chat, enable the BAMCP connector and paste any of these:
+
+   ```text
+   Use BAMCP on demo:HG002. Call list_contigs first, then show me the reads at
+   chr17:43099864-43099964 and tell me whether the variant at chr17:43099914 looks real.
+   ```
+
+   ```text
+   On demo:HG002, compare chr17:43099914 with the cluster around chr17:43096151.
+   Which one looks like a sequencing artifact, and why? Explain it like I'm new to genomics.
+   ```
+
+   ```text
+   Look up chr17:43099914 G>A in ClinVar and gnomAD (build GRCh38). How common is it,
+   and what can and can't I conclude from that?
+   ```
+
+   ```text
+   Use the explore_demo prompt on demo:HG00096 (a GRCh37 sample whose contigs are named
+   "13", not "chr13") and walk me through the BRCA2 locus.
+   ```
+
+**What you'll see:** an interactive pileup of real reads from the public
+[Genome in a Bottle](https://www.nist.gov/programs-projects/genome-bottle) sample HG002
+(about 60 reads deep), a clean heterozygous SNV where roughly half the reads carry the
+alternative base on both strands, an artifact cluster of low-quality one-strand mismatches next
+to it, and ClinVar/gnomAD context showing both curated SNVs are common, benign polymorphisms.
+
+**Demo aliases** (usable as `file_path` in every tool): `demo:HG002` (GIAB HG002, GRCh38,
+`chr17`-style) and `demo:HG00096` (1000 Genomes, GRCh37, `17`-style). The curated loci live in
+the `bamcp://demos` resource; the server also ships `explore_demo`, `check_variant`, and
+`explain_terms` prompts.
+
+**Your own files:** the hosted server only fetches public, indexed BAM/CRAM files from an
+allow-list of genomics hosts — `ftp-trace.ncbi.nlm.nih.gov`, `ftp.ncbi.nlm.nih.gov`,
+`ftp.1000genomes.ebi.ac.uk`, `1000genomes.s3.amazonaws.com`, `ftp.ensembl.org`,
+`hgdownload.soe.ucsc.edu`. For anything else (or private data), run BAMCP locally
+([Installation](#installation)).
+
+**Default filters** for candidate variants:
+<!-- defaults: confirm at merge -->
+`min_mapq 20`, `min_baseq 13`, `min_vaf 0.10`, `min_alt_count 3` — every response echoes them
+in `applied_filters`, so a missing variant may simply have been filtered out.
+
+**Interpreting results:** read the `bamcp://glossary` resource (VAF, depth, MAPQ, strand bias,
+artifact risk, ClinVar stars, gnomAD reliability…), each with what you *can* and *cannot*
+conclude. BAMCP is a research and education tool, **not** a diagnostic test — see
+[SAFETY.md](SAFETY.md).
+
+---
+
 ## Table of Contents
 
+- [Try this in 2 minutes](#try-this-in-2-minutes)
 - [Why BAMCP?](#why-bamcp)
 - [Features](#features)
 - [Architecture](#architecture)
@@ -321,6 +379,22 @@ are shown) plus a `filter_note`. This makes a variant's **absence** interpretabl
 at a site may reflect an aggressive `min_vaf`/`min_depth` rather than a true reference call. Loosen
 the thresholds (per-call `min_vaf`/`min_depth`, or the server defaults) to widen the net.
 
+### Demo datasets, resources & prompts
+
+Any `file_path` argument also accepts a demo alias — `demo:HG002` (GIAB HG002, GRCh38, chr-style)
+or `demo:HG00096` (1000 Genomes, GRCh37, no `chr`). The alias is swapped for the dataset's public
+URL before validation, so the normal remote-URL checks still apply; an unknown `demo:` name is an
+error that lists the available demos. No tools are added for this — discovery is via MCP:
+
+| Kind | Name | What it is |
+|------|------|-----------|
+| Resource | `bamcp://demos` | Demo datasets (JSON): alias, URL, build, contig style, matching reference URL, curated 1-based loci |
+| Resource | `bamcp://glossary` | Plain-language glossary with "can / cannot conclude" for each term |
+| Resource | `bamcp://guide` | Four-step newcomer guide |
+| Prompt | `explore_demo(dataset)` | Guided tour: real het SNV vs. artifact cluster, ClinVar/gnomAD context |
+| Prompt | `check_variant(file_path, region)` | Check the read evidence at a position or region |
+| Prompt | `explain_terms(terms)` | Explain output terms (comma-separated, or all) |
+
 ### Region Format
 
 Regions can be specified as:
@@ -334,15 +408,17 @@ Regions can be specified as:
 
 ### Core Settings
 
+<!-- defaults: confirm at merge -->
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
 | `BAMCP_REFERENCE` | Path to reference FASTA (required for CRAM) | None |
 | `BAMCP_MAX_READS` | Maximum reads to fetch per region | `10000` |
 | `BAMCP_DEFAULT_WINDOW` | Default viewing window size (bp) | `500` |
-| `BAMCP_MIN_VAF` | Minimum allele fraction for candidate variants | `0.02` |
+| `BAMCP_MIN_VAF` | Minimum allele fraction for candidate variants | `0.10` |
 | `BAMCP_MIN_DEPTH` | Minimum depth for candidate variants | `2` |
-| `BAMCP_MIN_MAPQ` | Minimum mapping quality filter | `0` |
-| `BAMCP_MIN_BASEQ` | Minimum base quality for coverage and candidate variant counts | `0` |
+| `BAMCP_MIN_ALT_COUNT` | Minimum reads supporting the alternative allele | `3` |
+| `BAMCP_MIN_MAPQ` | Minimum mapping quality filter | `20` |
+| `BAMCP_MIN_BASEQ` | Minimum base quality for coverage and candidate variant counts | `13` |
 | `BAMCP_MAX_REMOTE_INDEX_BYTES` | Maximum remote BAM/CRAM index download size | `67108864` |
 
 ### Transport Settings

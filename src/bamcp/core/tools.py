@@ -2613,6 +2613,9 @@ class _ScanProgress:
     scan_start: int = 0
     scanned_end: int = 0
     scan_end: int = 0
+    # Where the caller asked the scan to stop (contig end or region end) — scan_end may be
+    # earlier when max_region caps it; the gap is reported as truncation, never as "clean".
+    requested_end: int = 0
     contig_length: int | None = None
     deadline_hit: bool = False
     stop: threading.Event = field(default_factory=threading.Event)
@@ -2696,12 +2699,19 @@ def _scan_contig_progressive(
         if contig_length is None:
             raise ValueError(f"Contig '{contig}' not found in the alignment header")
         stop = contig_length if scan_stop is None else min(scan_stop, contig_length)
+        if scan_start >= stop:
+            # A start past the contig end would scan nothing and read as "no variants".
+            raise ValueError(
+                f"Region start {scan_start + 1:,} is beyond the end of {contig} "
+                f"(length {contig_length:,} bp)"
+            )
         scan_end = min(stop, scan_start + max_region)
         with progress.lock:
             progress.contig_length = contig_length
             progress.scan_start = scan_start
             progress.scanned_end = scan_start
             progress.scan_end = scan_end
+            progress.requested_end = stop
         # Adaptive chunking: start small, double while chunks are fast, halve when slow.
         size = min(SCAN_VARIANTS_MIN_CHUNK_SIZE, chunk_size)
         chunk_start = scan_start
@@ -2819,6 +2829,7 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
         scan_start = progress.scan_start
         scanned_end = progress.scanned_end
         scan_end = progress.scan_end
+        requested_end = progress.requested_end
         contig_length = progress.contig_length
         deadline_hit = progress.deadline_hit
 
@@ -2830,21 +2841,33 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
             "get_variants on a narrower region."
         )
 
-    truncated = hard_timeout or deadline_hit or scanned_end < scan_end
+    truncated_by_deadline = hard_timeout or deadline_hit or scanned_end < scan_end
+    # max_region caps a single call; the uncapped remainder is unscanned, not variant-free.
+    truncated_by_max_region = scan_end < requested_end
+    truncated = truncated_by_deadline or truncated_by_max_region
     truncation_reason = None
-    # The exact unscanned remainder (1-based inclusive), to pass back as `region`.
-    next_region = format_region(contig, scanned_end, scan_end) if scanned_end < scan_end else None
+    # The exact unscanned remainder (1-based inclusive) through the caller's requested stop.
+    next_region = (
+        format_region(contig, scanned_end, requested_end) if scanned_end < requested_end else None
+    )
     if truncated:
-        budget = SCAN_VARIANTS_TIMEOUT_SECONDS if hard_timeout else SCAN_VARIANTS_DEADLINE_SECONDS
-        truncation_reason = (
-            f"time budget of {budget:g}s reached after scanning {scanned_end - scan_start:,} "
-            f"of {scan_end - scan_start:,} bp; candidates beyond scanned_region were NOT "
-            + (
-                f"examined — call scan_variants again with region='{next_region}' to scan the "
-                "remainder"
-                if next_region
-                else "examined"
+        if truncated_by_deadline:
+            budget = (
+                SCAN_VARIANTS_TIMEOUT_SECONDS if hard_timeout else SCAN_VARIANTS_DEADLINE_SECONDS
             )
+            cause = (
+                f"time budget of {budget:g}s reached after scanning {scanned_end - scan_start:,} "
+                f"of {requested_end - scan_start:,} bp"
+            )
+        else:
+            cause = (
+                f"one call scans at most {SCAN_VARIANTS_MAX_REGION:,} bp; scanned "
+                f"{scanned_end - scan_start:,} of {requested_end - scan_start:,} bp"
+            )
+        truncation_reason = f"{cause}; candidates beyond scanned_region were NOT " + (
+            f"examined — call scan_variants again with region='{next_region}' to scan the remainder"
+            if next_region
+            else "examined"
         )
 
     # When capped, keep the highest-VAF candidates; report them in genomic order.
@@ -2871,12 +2894,11 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
             "smaller region to detect indels",
             "scanned_region": scanned_region,
             "contig_length": contig_length,
-            "truncated_by_max_region": scan_end < (scan_stop or contig_length)
-            and scan_end < contig_length,
+            "truncated_by_max_region": truncated_by_max_region,
             "per_site_evidence": "not computed by scan_variants (coverage-based scan); run "
             "get_variants on a small window around a candidate for artifact_risk/confidence",
             "max_region": SCAN_VARIANTS_MAX_REGION,
-            "truncated_by_deadline": truncated,
+            "truncated_by_deadline": truncated_by_deadline,
             "total_candidates": len(all_variants),
             "results_capped": len(all_variants) > SCAN_VARIANTS_MAX_RESULTS,
             "max_results": SCAN_VARIANTS_MAX_RESULTS,

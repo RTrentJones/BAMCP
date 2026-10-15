@@ -177,3 +177,37 @@ async def test_min_alt_count_is_honored_and_echoed(small_bam_path, ref_config):
     assert payload["variants"] == []
     assert payload["applied_filters"]["min_alt_count"] == 10_000
     assert payload["truncated"] is False
+
+
+async def test_region_start_beyond_contig_is_an_error(small_bam_path, ref_config):
+    """A start past the contig end must not read as a successful, variant-free scan."""
+    full = _payload(
+        await tools.handle_scan_variants(
+            {"file_path": small_bam_path, "contig": "chr1"}, ref_config
+        )
+    )
+    past = full["applied_filters"]["contig_length"] + 100
+    with pytest.raises(ToolInputError, match="beyond the end of chr1"):
+        await tools.handle_scan_variants(
+            {"file_path": small_bam_path, "region": f"chr1:{past}-{past + 50}"}, ref_config
+        )
+
+
+async def test_max_region_cap_is_reported_with_continuation(
+    small_bam_path, ref_config, monkeypatch
+):
+    """A scan capped by SCAN_VARIANTS_MAX_REGION is truncated, with a next_region through the
+    caller's requested stop — never truncated:false over an unscanned remainder."""
+    monkeypatch.setattr(tools, "SCAN_VARIANTS_MAX_REGION", 300)
+    payload = _payload(
+        await tools.handle_scan_variants(
+            {"file_path": small_bam_path, "contig": "chr1"}, ref_config
+        )
+    )
+    contig_length = payload["applied_filters"]["contig_length"]
+    assert payload["truncated"] is True
+    assert payload["applied_filters"]["truncated_by_max_region"] is True
+    assert payload["applied_filters"]["truncated_by_deadline"] is False
+    assert payload["scanned_region"] == "chr1:1-300"
+    assert payload["next_region"] == f"chr1:301-{contig_length}"
+    assert "at most 300 bp" in payload["truncation_reason"]

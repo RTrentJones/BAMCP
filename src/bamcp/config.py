@@ -16,6 +16,7 @@ from .constants import (
     DEFAULT_MAX_INDEX_CACHE_BYTES,
     DEFAULT_MAX_READS,
     DEFAULT_MAX_REMOTE_INDEX_BYTES,
+    DEFAULT_MIN_ALT_COUNT,
     DEFAULT_MIN_BASEQ,
     DEFAULT_MIN_DEPTH,
     DEFAULT_MIN_MAPQ,
@@ -127,6 +128,7 @@ class BAMCPConfig:
     min_depth: int = DEFAULT_MIN_DEPTH
     min_mapq: int = DEFAULT_MIN_MAPQ
     min_baseq: int = DEFAULT_MIN_BASEQ
+    min_alt_count: int = DEFAULT_MIN_ALT_COUNT
 
     # Transport settings
     transport: str = DEFAULT_TRANSPORT
@@ -201,6 +203,9 @@ class BAMCPConfig:
 
         if not 0 <= self.min_baseq <= 255:
             raise ValueError(f"min_baseq must be between 0 and 255, got {self.min_baseq}")
+
+        if self.min_alt_count < 1:
+            raise ValueError(f"min_alt_count must be at least 1, got {self.min_alt_count}")
 
         if self.default_window < 1:
             raise ValueError(f"default_window must be at least 1, got {self.default_window}")
@@ -277,6 +282,7 @@ class BAMCPConfig:
             min_depth=_env_int("BAMCP_MIN_DEPTH", DEFAULT_MIN_DEPTH),
             min_mapq=_env_int("BAMCP_MIN_MAPQ", DEFAULT_MIN_MAPQ),
             min_baseq=_env_int("BAMCP_MIN_BASEQ", DEFAULT_MIN_BASEQ),
+            min_alt_count=_env_int("BAMCP_MIN_ALT_COUNT", DEFAULT_MIN_ALT_COUNT),
             transport=env.get("BAMCP_TRANSPORT", DEFAULT_TRANSPORT),
             host=env.get("BAMCP_HOST", DEFAULT_HOST),
             port=_env_int("BAMCP_PORT", DEFAULT_PORT),

@@ -1,5 +1,7 @@
 """BAM/CRAM file parsing using pysam."""
 
+import os
+from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -319,6 +321,33 @@ def _open_alignment(
     )
 
 
+# Locally cached .fai/.gzi for remote reference FASTAs (url -> (fai, gzi)), registered by
+# core.tools._ensure_reference_indexes. Without them every FastaFile open of a remote bgzip FASTA
+# re-downloads its .fai and .gzi (seconds per call on the public 1000 Genomes server). Bounded LRU.
+_REFERENCE_INDEXES: OrderedDict[str, tuple[str, str | None]] = OrderedDict()
+_REFERENCE_INDEXES_MAX = 32
+
+
+def register_reference_index(reference_url: str, fai: str, gzi: str | None) -> None:
+    """Record local index files for a remote reference (see :func:`open_fasta`)."""
+    _REFERENCE_INDEXES[reference_url] = (fai, gzi)
+    _REFERENCE_INDEXES.move_to_end(reference_url)
+    while len(_REFERENCE_INDEXES) > _REFERENCE_INDEXES_MAX:
+        _REFERENCE_INDEXES.popitem(last=False)
+
+
+def open_fasta(reference_path: str) -> pysam.FastaFile:
+    """Open a reference FASTA, using locally cached .fai/.gzi for a remote one when present."""
+    cached = _REFERENCE_INDEXES.get(reference_path)
+    if cached is not None:
+        fai, gzi = cached
+        if os.path.exists(fai) and (gzi is None or os.path.exists(gzi)):
+            return pysam.FastaFile(
+                reference_path, filepath_index=fai, filepath_index_compressed=gzi
+            )
+    return pysam.FastaFile(reference_path)
+
+
 def fetch_reference_sequence(reference_path: str, region: str) -> str:
     """Fetch the reference sequence for a 1-based inclusive region string.
 
@@ -326,7 +355,7 @@ def fetch_reference_sequence(reference_path: str, region: str) -> str:
     a slice that runs past the contig end, matching the alignment-side clamp.
     """
     contig, start, end = parse_region(region)
-    with pysam.FastaFile(reference_path) as fasta:
+    with open_fasta(reference_path) as fasta:
         return fasta.fetch(contig, start, end)
 
 
@@ -385,7 +414,7 @@ def fetch_candidate_variants_only(
     )
     cov_A, cov_C, cov_G, cov_T = counts
     coverage = (np.array(cov_A) + np.array(cov_C) + np.array(cov_G) + np.array(cov_T)).tolist()
-    with pysam.FastaFile(reference_path) as fasta:
+    with open_fasta(reference_path) as fasta:
         ref_seq = fasta.fetch(contig, start, end)
     indels, gap_depth = _detect_indels_if_small(
         bam_path,
@@ -765,7 +794,7 @@ def fetch_region(
 
         ref_seq: str | None = None
         if reference_path:
-            with pysam.FastaFile(reference_path) as fasta:
+            with open_fasta(reference_path) as fasta:
                 ref_seq = fasta.fetch(contig, start, end)
 
         read_count = 0
@@ -1252,7 +1281,7 @@ def scan_contig(
 
         scan_end = min(contig_length, max_region)
 
-        with pysam.FastaFile(reference_path) as fasta:
+        with open_fasta(reference_path) as fasta:
             for chunk_start in range(0, scan_end, chunk_size):
                 chunk_end = min(chunk_start + chunk_size, scan_end)
 

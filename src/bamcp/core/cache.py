@@ -77,6 +77,20 @@ class BAMIndexCache:
         suffix = ".crai" if is_cram(bam_path) else ".bai"
         return str(self.cache_dir / f"{hash_prefix}_{basename}{suffix}")
 
+    def get_reference_index_paths(self, reference_url: str) -> tuple[str, str | None] | None:
+        """Cache paths for a remote FASTA's ``.fai`` (and ``.gzi`` when bgzip-compressed).
+
+        Returns None for local references (htslib reads their index in place).
+        """
+        if not reference_url.startswith(REMOTE_FILE_SCHEMES):
+            return None
+        hash_prefix = hashlib.md5(reference_url.encode()).hexdigest()[:8]  # noqa: S324
+        url_path = urlparse(reference_url).path
+        basename = (Path(url_path).name or "reference")[:_MAX_BASENAME_CHARS]
+        stem = str(self.cache_dir / f"{hash_prefix}_{basename}")
+        gzi = f"{stem}.gzi" if url_path.lower().endswith((".gz", ".bgz")) else None
+        return f"{stem}.fai", gzi
+
     def is_valid(self, cache_path: str) -> bool:
         """Check if cached index exists and hasn't expired.
 

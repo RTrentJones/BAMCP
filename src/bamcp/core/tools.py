@@ -70,7 +70,9 @@ from .parsers import (
     fetch_region,
     format_region,
     load_vcf_variants,
+    open_fasta,
     parse_region,
+    register_reference_index,
 )
 from .serialization import build_enhanced_variants, serialize_region_data
 from .validation import (
@@ -793,7 +795,7 @@ def _open_remote_inputs_sync(
     from .parsers import _open_alignment
 
     if reference:
-        with pysam.FastaFile(reference) as fasta:
+        with open_fasta(reference) as fasta:
             if fasta.references:
                 fasta.fetch(fasta.references[0], 0, 1)
     if file_path:
@@ -801,8 +803,46 @@ def _open_remote_inputs_sync(
             _ = samfile.references
 
 
+async def _ensure_reference_indexes(reference: str | None, config: BAMCPConfig) -> None:
+    """Cache a remote reference FASTA's .fai (+ .gzi for bgzip) and register them for open_fasta.
+
+    Best effort: a failed download leaves htslib to fetch the index remotely as before.
+    """
+    if reference is None or not _is_remote(reference) or not config.allow_remote_files:
+        return
+    services = get_services(config)
+    paths = services.cache.get_reference_index_paths(reference)
+    if paths is None:
+        return
+    fai, gzi = paths
+    wanted = [(fai, reference + ".fai")] + ([(gzi, reference + ".gzi")] if gzi else [])
+    locks = services.index_download_locks
+    lock = locks.setdefault(fai, asyncio.Lock())
+    try:
+        async with lock:
+            missing = [(p, u) for p, u in wanted if not services.cache.is_valid(p)]
+            if missing:
+                async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+                    for path, url in missing:
+                        try:
+                            got = await _download_index_streaming(client, url, path, config)
+                        except (httpx.RequestError, OSError, ValueError) as e:
+                            logger.warning("Reference index download error for %s: %s", url, e)
+                            return
+                        if not got:
+                            return
+                        services.cache.enforce_budget(keep=got)
+            register_reference_index(reference, fai, gzi)
+    finally:
+        if not lock.locked() and locks.get(fai) is lock:
+            del locks[fai]
+
+
 async def _warm_remote_inputs(
-    file_path: str, reference: str | None, index_path: str | None
+    file_path: str,
+    reference: str | None,
+    index_path: str | None,
+    config: BAMCPConfig | None = None,
 ) -> None:
     """Give a cold remote BAM/CRAM or reference its one-off open under the cold-start budget.
 
@@ -811,6 +851,8 @@ async def _warm_remote_inputs(
     ``TimeoutError``; any other failure is left for the real parse to report with its own
     message (the input simply stays cold).
     """
+    if config is not None:
+        await _ensure_reference_indexes(reference, config)
     cold_file = file_path if _is_remote(file_path) and file_path not in _warm_inputs else None
     cold_ref = reference if _is_remote(reference) and reference not in _warm_inputs else None
     if not cold_file and not cold_ref:
@@ -1046,7 +1088,7 @@ async def _fetch_region_with_timeout(
     # runs warm under the normal BAM_PARSE_TIMEOUT_SECONDS.
     if _is_remote(file_path) or _is_remote(reference):
         index_path = await _ensure_cached_index(file_path, config)
-        await _warm_remote_inputs(file_path, reference, index_path)
+        await _warm_remote_inputs(file_path, reference, index_path, config)
     try:
         return await _fetch_region_data(
             file_path,
@@ -1330,7 +1372,7 @@ async def _bam_contigs(file_path: str, config: BAMCPConfig) -> list[dict]:
         return cached
     index_path = await _ensure_cached_index(file_path, config)
     # A cold remote BAM's first open gets the cold-start budget, not the parse timeout.
-    await _warm_remote_inputs(file_path, None, index_path)
+    await _warm_remote_inputs(file_path, None, index_path, config)
     contigs = await asyncio.wait_for(
         _run_in_parse_pool(_read_contigs_sync, file_path, config.reference, index_path),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
@@ -1936,7 +1978,7 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
 
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
-    await _warm_remote_inputs(file_path, reference, index_path)
+    await _warm_remote_inputs(file_path, reference, index_path, config)
     contigs = await asyncio.wait_for(
         _run_in_parse_pool(_read_contigs_sync, file_path, reference, index_path),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
@@ -2174,7 +2216,7 @@ async def _first_contig(file_path: str, reference: str | None, config: BAMCPConf
     the default from the file itself.
     """
     index_path = await _ensure_cached_index(file_path, config)
-    await _warm_remote_inputs(file_path, reference, index_path)
+    await _warm_remote_inputs(file_path, reference, index_path, config)
     contigs = await asyncio.wait_for(
         _run_in_parse_pool(_read_contigs_sync, file_path, reference, index_path),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
@@ -2643,7 +2685,7 @@ def _scan_contig_progressive(
         # Adaptive chunking: start small, double while chunks are fast, halve when slow.
         size = min(SCAN_VARIANTS_MIN_CHUNK_SIZE, chunk_size)
         chunk_start = 0
-        with pysam.FastaFile(reference_path) as fasta:
+        with open_fasta(reference_path) as fasta:
             while chunk_start < scan_end:
                 if progress.stop.is_set() or time.monotonic() >= deadline:
                     with progress.lock:
@@ -2700,7 +2742,7 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
 
     index_path = await _ensure_cached_index(file_path, config)
     # Cold remote inputs get their one-off open under the cold budget, not the scan deadline.
-    await _warm_remote_inputs(file_path, reference, index_path)
+    await _warm_remote_inputs(file_path, reference, index_path, config)
     contig = args.get("contig") or await _first_contig(file_path, reference, config)
 
     progress = _ScanProgress()

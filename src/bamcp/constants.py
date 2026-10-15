@@ -97,10 +97,29 @@ DEFAULT_MAX_INDEX_CACHE_BYTES = 512 * 1024 * 1024
 
 # Timeout for BAM/CRAM parsing operations (seconds)
 BAM_PARSE_TIMEOUT_SECONDS = 30.0
+# First use of a not-yet-seen remote BAM/CRAM or reference FASTA: opening it fetches the remote
+# header and the FASTA's .fai/.gzi, which on a cold server can by itself exceed the parse budget.
+# That one-off open runs under this separate, larger budget; once it succeeds the input is
+# "warm" and later calls get the normal BAM_PARSE_TIMEOUT_SECONDS. Index (.bai/.crai) downloads
+# never count against either budget.
+COLD_START_TIMEOUT_SECONDS = 90.0
+# How many warm remote inputs to remember (bounded: the prod server is an open demo).
+WARM_INPUTS_MAX_ENTRIES = 1024
 
-# Whole-contig variant scanning
-SCAN_VARIANTS_TIMEOUT_SECONDS = 120.0
-SCAN_VARIANTS_CHUNK_SIZE = 50_000
+# Whole-contig variant scanning. The scan runs chunk by chunk against a soft deadline; when it
+# hits, the chunks completed so far are returned with ``truncated: true`` (and the region that
+# was actually scanned) instead of a timeout error. The deadline sits under common MCP client
+# request timeouts (~60s) so the partial answer reaches the caller. The hard timeout is the
+# backstop for a single hung chunk (a C call the soft deadline can't interrupt).
+SCAN_VARIANTS_DEADLINE_SECONDS = 40.0
+SCAN_VARIANTS_TIMEOUT_SECONDS = 50.0
+SCAN_VARIANTS_CHUNK_SIZE = 50_000  # largest chunk
+# Chunks start small and grow (doubling, up to SCAN_VARIANTS_CHUNK_SIZE) while each one finishes
+# under SCAN_VARIANTS_CHUNK_TARGET_SECONDS, shrinking again when one is slow. A remote,
+# very-deep contig (chrM at thousands-x) then still completes chunks before the deadline instead
+# of spending the whole budget inside one 50 kb chunk and returning nothing.
+SCAN_VARIANTS_MIN_CHUNK_SIZE = 1_000
+SCAN_VARIANTS_CHUNK_TARGET_SECONDS = 2.0
 SCAN_VARIANTS_MAX_REGION = 250_000_000
 SCAN_VARIANTS_MAX_RESULTS = 500
 

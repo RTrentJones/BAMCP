@@ -1983,16 +1983,14 @@ class TestHandleScanVariants:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_variants_sorted_by_vaf(self, small_bam_path, config_with_ref):
-        """Returned variants should be sorted by VAF descending."""
+    async def test_variants_sorted_by_position(self, small_bam_path, config_with_ref):
+        """Returned variants are in genomic order (the cap keeps the highest-VAF ones)."""
         result = await handle_scan_variants(
             {"file_path": small_bam_path, "contig": "chr1"}, config_with_ref
         )
         payload = json.loads(result["content"][0]["text"])
-        variants = payload["variants"]
-        if len(variants) >= 2:
-            for i in range(len(variants) - 1):
-                assert variants[i]["vaf"] >= variants[i + 1]["vaf"]
+        positions = [v["position"] for v in payload["variants"]]
+        assert positions == sorted(positions)
 
     @pytest.mark.unit
     @pytest.mark.asyncio

@@ -409,15 +409,19 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     @mcp.tool(
         description=(
-            "Scan an entire contig for candidate variants using fast coverage-based detection. "
-            "Requires a reference genome (" + AUTO_REFERENCE_NOTE + ") Returns up to 500 "
-            "candidate variants ranked by VAF. If contig is omitted, the BAM's first contig is "
-            "scanned. " + DETECTION_DEFAULTS_NOTE
+            "Scan a contig (or a 1-based region 'contig:start-end') for candidate SNVs using "
+            "fast coverage-based detection. Requires a reference genome ("
+            + AUTO_REFERENCE_NOTE
+            + ") Returns up to 500 candidates (the highest-VAF ones when capped) sorted by "
+            "position. A scan that hits its time budget returns partial results with "
+            "truncated=true and next_region: pass that as region to continue. If contig and "
+            "region are omitted, the BAM's first contig is scanned. " + DETECTION_DEFAULTS_NOTE
         ),
     )
     async def scan_variants(
         file_path: str,
         contig: str | None = None,
+        region: str | None = None,
         reference: str | None = None,
         min_vaf: float | None = None,
         min_depth: int | None = None,
@@ -426,6 +430,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         args = _args(
             file_path=file_path,
             contig=contig,
+            region=region,
             reference=reference,
             min_vaf=min_vaf,
             min_depth=min_depth,

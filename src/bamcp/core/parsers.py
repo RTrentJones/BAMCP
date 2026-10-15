@@ -202,7 +202,7 @@ def extract_soft_clips(read: pysam.AlignedSegment) -> list[SoftClip]:
     return clips
 
 
-def parse_region(region: str) -> tuple[str, int, int]:
+def parse_region(region: str, max_size: int | None = MAX_REGION_SIZE) -> tuple[str, int, int]:
     """
     Parse a 1-based, inclusive (samtools-style) region string into internal coordinates.
 
@@ -226,8 +226,11 @@ def parse_region(region: str) -> tuple[str, int, int]:
     Returns:
         Tuple of (contig, start0, end) — 0-based half-open.
 
+    ``max_size`` caps the span (default MAX_REGION_SIZE; None for no cap — scan_variants
+    bounds its own work by time instead).
+
     Raises:
-        ValueError: If region format is invalid or exceeds MAX_REGION_SIZE.
+        ValueError: If region format is invalid or exceeds ``max_size``.
     """
     region = region.replace(",", "")
     try:
@@ -253,9 +256,9 @@ def parse_region(region: str) -> tuple[str, int, int]:
 
     start = start1 - 1
     region_size = end - start
-    if region_size > MAX_REGION_SIZE:
+    if max_size is not None and region_size > max_size:
         raise ValueError(
-            f"Region size {region_size:,}bp exceeds maximum allowed {MAX_REGION_SIZE:,}bp. "
+            f"Region size {region_size:,}bp exceeds maximum allowed {max_size:,}bp. "
             f"Please request a smaller region."
         )
 

@@ -1599,10 +1599,17 @@ async def _score_candidates(
             out.append(
                 _unscored(v, _UNSCORED_TIMEOUT_NOTE if timed_out else _UNSCORED_CAP_NOTE, data)
             )
+    bamcp_candidates = sum(1 for v in variants if v.get("source") == "bamcp")
+    unscored_indels = sum(
+        1 for v in variants if v.get("source") == "bamcp" and len(v["ref"]) != len(v["alt"])
+    )
     summary = {
+        "candidates": bamcp_candidates,
         "scored_sites": len(scored_ids),
         "max_sites": GET_VARIANTS_EVIDENCE_MAX_SITES,
         "capped": len(snvs) > GET_VARIANTS_EVIDENCE_MAX_SITES,
+        "unscored_capped": max(0, len(snvs) - GET_VARIANTS_EVIDENCE_MAX_SITES),
+        "unscored_indels": unscored_indels,
         "timed_out": timed_out,
     }
     return out, summary
@@ -1850,7 +1857,10 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     scored, evidence_summary = await _score_candidates(
         file_path, region, reference, kept, data, config
     )
-    variants = [annotate_interpretation(_one_based(v)) for v in scored]
+    variants = sorted(
+        (annotate_interpretation(_one_based(v)) for v in scored),
+        key=lambda v: (v["position"], v["ref"], v["alt"]),
+    )
 
     filters = _applied_filters(
         config,
@@ -2599,6 +2609,7 @@ class _ScanProgress:
     """
 
     variants: list[dict] = field(default_factory=list)
+    scan_start: int = 0
     scanned_end: int = 0
     scan_end: int = 0
     contig_length: int | None = None
@@ -2662,8 +2673,13 @@ def _scan_contig_progressive(
     max_region: int,
     index_filename: str | None,
     min_alt_count: int | None = None,
+    scan_start: int = 0,
+    scan_stop: int | None = None,
 ) -> None:
     """Scan ``contig`` chunk by chunk into ``progress``, stopping at ``deadline`` (monotonic).
+
+    ``[scan_start, scan_stop)`` (0-based half-open; stop defaults to the contig end) bounds the
+    scan, capped at ``max_region`` bases.
 
     Runs in the parse pool. Checks the deadline (and the handler's ``stop`` flag, set when the
     hard timeout abandons it) before every chunk, so a slow remote scan ends cleanly with the
@@ -2678,13 +2694,16 @@ def _scan_contig_progressive(
         contig_length = _header_lengths(samfile).get(contig)
         if contig_length is None:
             raise ValueError(f"Contig '{contig}' not found in the alignment header")
-        scan_end = min(contig_length, max_region)
+        stop = contig_length if scan_stop is None else min(scan_stop, contig_length)
+        scan_end = min(stop, scan_start + max_region)
         with progress.lock:
             progress.contig_length = contig_length
+            progress.scan_start = scan_start
+            progress.scanned_end = scan_start
             progress.scan_end = scan_end
         # Adaptive chunking: start small, double while chunks are fast, halve when slow.
         size = min(SCAN_VARIANTS_MIN_CHUNK_SIZE, chunk_size)
-        chunk_start = 0
+        chunk_start = scan_start
         with open_fasta(reference_path) as fasta:
             while chunk_start < scan_end:
                 if progress.stop.is_set() or time.monotonic() >= deadline:
@@ -2725,6 +2744,10 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
     ``truncation_reason`` — a partial answer, never a bare timeout. Failures (no reference,
     unknown contig, nothing scanned at all) raise :class:`ToolInputError` so they reach the
     client as an MCP error result. With no ``contig``, the BAM's first contig is scanned.
+
+    ``region`` (1-based ``contig:start-end``, no size cap) scans just that stretch — how a
+    truncated scan is resumed: the truncation text and ``next_region`` give the exact remainder.
+    Output is sorted by position (when capped, the highest-VAF candidates are the ones kept).
     """
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
@@ -2743,7 +2766,18 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
     index_path = await _ensure_cached_index(file_path, config)
     # Cold remote inputs get their one-off open under the cold budget, not the scan deadline.
     await _warm_remote_inputs(file_path, reference, index_path, config)
-    contig = args.get("contig") or await _first_contig(file_path, reference, config)
+    scan_start, scan_stop = 0, None
+    if args.get("region"):
+        validate_region(args["region"])
+        region_contig, scan_start, scan_stop = parse_region(args["region"], max_size=None)
+        if args.get("contig") and args["contig"] != region_contig:
+            raise ToolInputError(
+                f"contig '{args['contig']}' does not match region '{args['region']}'; "
+                "pass one or the other."
+            )
+        contig = region_contig
+    else:
+        contig = args.get("contig") or await _first_contig(file_path, reference, config)
 
     progress = _ScanProgress()
     deadline = time.monotonic() + SCAN_VARIANTS_DEADLINE_SECONDS
@@ -2765,6 +2799,8 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
                 max_region=SCAN_VARIANTS_MAX_REGION,
                 index_filename=index_path,
                 min_alt_count=min_alt_count,
+                scan_start=scan_start,
+                scan_stop=scan_stop,
             ),
             timeout=SCAN_VARIANTS_TIMEOUT_SECONDS,
         )
@@ -2779,6 +2815,7 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
 
     with progress.lock:
         all_variants = list(progress.variants)
+        scan_start = progress.scan_start
         scanned_end = progress.scanned_end
         scan_end = progress.scan_end
         contig_length = progress.contig_length
@@ -2794,18 +2831,28 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
 
     truncated = hard_timeout or deadline_hit or scanned_end < scan_end
     truncation_reason = None
+    # The exact unscanned remainder (1-based inclusive), to pass back as `region`.
+    next_region = format_region(contig, scanned_end, scan_end) if scanned_end < scan_end else None
     if truncated:
         budget = SCAN_VARIANTS_TIMEOUT_SECONDS if hard_timeout else SCAN_VARIANTS_DEADLINE_SECONDS
         truncation_reason = (
-            f"time budget of {budget:g}s reached after scanning {scanned_end:,} of "
-            f"{scan_end:,} bp; candidates beyond scanned_region were NOT examined — use "
-            "get_variants (or scan again) on the unscanned remainder"
+            f"time budget of {budget:g}s reached after scanning {scanned_end - scan_start:,} "
+            f"of {scan_end - scan_start:,} bp; candidates beyond scanned_region were NOT "
+            + (
+                f"examined — call scan_variants again with region='{next_region}' to scan the "
+                "remainder"
+                if next_region
+                else "examined"
+            )
         )
 
+    # When capped, keep the highest-VAF candidates; report them in genomic order.
     all_variants.sort(key=lambda v: v["vaf"], reverse=True)
-    variants = all_variants[:SCAN_VARIANTS_MAX_RESULTS]
+    variants = sorted(all_variants[:SCAN_VARIANTS_MAX_RESULTS], key=lambda v: v["position"])
     # 1-based inclusive; None when not a single chunk completed.
-    scanned_region = format_region(contig, 0, scanned_end) if scanned_end > 0 else None
+    scanned_region = (
+        format_region(contig, scan_start, scanned_end) if scanned_end > scan_start else None
+    )
 
     filters = _applied_filters(
         config,
@@ -2823,7 +2870,10 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
             "smaller region to detect indels",
             "scanned_region": scanned_region,
             "contig_length": contig_length,
-            "truncated_by_max_region": scan_end < contig_length,
+            "truncated_by_max_region": scan_end < (scan_stop or contig_length)
+            and scan_end < contig_length,
+            "per_site_evidence": "not computed by scan_variants (coverage-based scan); run "
+            "get_variants on a small window around a candidate for artifact_risk/confidence",
             "max_region": SCAN_VARIANTS_MAX_REGION,
             "truncated_by_deadline": truncated,
             "total_candidates": len(all_variants),
@@ -2836,13 +2886,15 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
 
     payload: dict[str, Any] = {
         "contig": contig,
-        "variants": [_one_based(v) for v in variants],
+        "variants": [annotate_interpretation(_one_based(v)) for v in variants],
         "count": len(variants),
         "truncated": truncated,
         "scanned_region": scanned_region,
     }
     if truncation_reason:
         payload["truncation_reason"] = truncation_reason
+    if truncated and next_region:
+        payload["next_region"] = next_region
     payload.update(
         {
             "coordinate_system": _LLM_COORDINATE_SYSTEM,

@@ -197,14 +197,22 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         ),
     },
     "scan_variants": {
-        "description": "Scan an entire contig for variants using fast coverage-based detection. "
-        "Requires a reference genome (" + AUTO_REFERENCE_NOTE + ") Returns up to 500 variants "
-        "ranked by VAF. If contig is omitted, the BAM's first contig is scanned. "
-        + DETECTION_DEFAULTS_NOTE,
+        "description": "Scan a contig (or a 1-based region 'contig:start-end') for candidate "
+        "SNVs using fast coverage-based detection. Requires a reference genome ("
+        + AUTO_REFERENCE_NOTE
+        + ") Returns up to 500 candidates (the highest-VAF ones when capped) sorted by "
+        "position. A scan that hits its time budget returns partial results with "
+        "truncated=true and next_region: pass that as region to continue. If contig and region "
+        "are omitted, the BAM's first contig is scanned. " + DETECTION_DEFAULTS_NOTE,
         "input_schema": _obj(
             {
                 "file_path": _STR,
                 "contig": _STR,
+                "region": {
+                    **_STR,
+                    "description": "1-based inclusive 'contig:start-end' to scan (e.g. a "
+                    "truncated scan's next_region); no size cap",
+                },
                 "reference": _STR,
                 "min_vaf": _NUM,
                 "min_depth": _INT,

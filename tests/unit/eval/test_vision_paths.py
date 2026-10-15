@@ -498,6 +498,33 @@ class TestSchemaVisionRequired:
             assert c.vision_required is True
             assert c.rendering_modes, f"{c.name}: should declare rendering_modes"
 
+    @pytest.mark.unit
+    def test_seed_vision_prompts_do_not_state_answers(self):
+        """Prompts must not hand the model the answer the image is meant to provide."""
+        import re
+
+        from bamcp.eval.schema import load_cases
+
+        path = Path(__file__).parent.parent.parent / "eval" / "vision_cases.yaml"
+        leaks = [
+            re.compile(r"\b[ACGT]\s*>\s*[ACGT]\b"),  # an allele change
+            re.compile(r"\w+\s*=\s*[ACGT]\b"),  # a colour→base decoding ("orange=G")
+            re.compile(r"~\s*\d+|\d+\s+alt\b", re.IGNORECASE),  # a count of alt reads
+        ]
+        for c in load_cases(path):
+            for pat in leaks:
+                assert not pat.search(c.input), f"{c.name}: prompt leaks {pat.pattern!r}"
+
+    @pytest.mark.unit
+    def test_seed_vision_cases_use_one_based_positions(self):
+        """The fixture's sites are chr1:1051/1101/1151/1201 1-based; 0-based ones are wrong."""
+        import re
+
+        text = (Path(__file__).parent.parent.parent / "eval" / "vision_cases.yaml").read_text()
+        positions = {int(p) for p in re.findall(r"chr1:(\d+)(?![\d-])", text)}
+        assert positions, "expected site positions in the vision cases"
+        assert not positions & {1050, 1100, 1150, 1200}, positions
+
 
 # ---------------------------------------------------------------------------
 # CLI: --no-vision and --vision-screenshot-dir flags

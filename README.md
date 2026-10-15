@@ -423,6 +423,7 @@ Regions can be specified as:
 | `BAMCP_MIN_ALT_COUNT` | Minimum reads supporting the alternative allele | `3` |
 | `BAMCP_MIN_MAPQ` | Minimum mapping quality filter | `20` |
 | `BAMCP_MIN_BASEQ` | Minimum base quality for coverage and candidate variant counts | `13` |
+| `BAMCP_NCBI_API_KEY` | Optional NCBI E-utilities API key (10 req/s instead of 3); ClinVar/gene lookups retry NCBI 429s with bounded backoff either way | None |
 | `BAMCP_MAX_REMOTE_INDEX_BYTES` | Maximum remote BAM/CRAM index download size | `67108864` |
 
 ### Transport Settings

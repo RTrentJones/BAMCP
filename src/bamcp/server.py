@@ -171,15 +171,15 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     @mcp.tool(
         description=(
             "Jump to a specific genomic position and view surrounding reads. "
-            "position is 1-based (VCF/samtools convention). If contig is omitted, the "
-            "BAM's first contig is used."
+            "contig and position are both required; position is 1-based (VCF/samtools "
+            "convention). Contig names follow the BAM (call list_contigs: 'chr17' vs '17')."
         ),
         meta=_VIEWER_META,
     )
     async def jump_to(
         file_path: str,
+        contig: str,
         position: int,
-        contig: str | None = None,
         window: int | None = None,
         reference: str | None = None,
         vcf_path: str | None = None,

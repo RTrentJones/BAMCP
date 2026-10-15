@@ -58,10 +58,11 @@ async def test_jump_to_validates_region_like_visualize_region():
 
 
 @pytest.mark.integration
-async def test_jump_to_defaults_to_first_bam_contig():
+async def test_jump_to_requires_contig():
+    # A bare position must not silently land on the first contig (chr1 for a chr17 locus).
     result = await _call(BAMCPConfig(), "jump_to", {"file_path": SMALL_BAM, "position": 100})
-    assert not result.isError
-    assert result.structuredContent["contig"] == "chr1"
+    assert result.isError
+    assert "contig" in _text(result)
 
 
 @pytest.mark.integration

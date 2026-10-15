@@ -216,6 +216,7 @@ def parse_region(region: str) -> tuple[str, int, int]:
         - chr1:1,000-2,000
         - 1:1000-2000
         - HLA-A*01:01:01:01:100-200 (contig names containing ':' split on the last ':')
+        - chr1:1000 (a single 1-based base, the same as chr1:1000-1000)
 
     The end is NOT clamped here (no header is available); the fetchers clamp it to
     the contig length once the file is open (see :func:`_clamp_end`).
@@ -229,13 +230,14 @@ def parse_region(region: str) -> tuple[str, int, int]:
     region = region.replace(",", "")
     try:
         contig, coords = region.rsplit(":", 1)
-        start_str, end_str = coords.split("-")
+        # A bare position ("chr17:43099914") is the single base N-N, as samtools reads it.
+        start_str, end_str = coords.split("-") if "-" in coords else (coords, coords)
         start1 = int(start_str)
         end = int(end_str)
     except (ValueError, AttributeError) as e:
         raise ValueError(
             f"Invalid region format: '{region}'. Expected 1-based inclusive "
-            f"'chr1:1000-2000' (samtools-style)"
+            f"'chr1:1000-2000' (samtools-style) or a single base 'chr1:1000'"
         ) from e
     if not contig:
         raise ValueError(f"Invalid region format: '{region}'. Missing contig name")

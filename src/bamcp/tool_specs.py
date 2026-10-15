@@ -32,7 +32,7 @@ _VARIANT_SOURCE = {
 # The region-string contract every region-taking tool shares (parse_region converts it).
 REGION_FORMAT_NOTE = (
     "region is 1-based and inclusive, samtools-style ('chr1:1000-2000' covers bases "
-    "1000..2000; 'chr1:1051-1051' is the single base 1051)."
+    "1000..2000; 'chr1:1051-1051' or just 'chr1:1051' is the single base 1051)."
 )
 _REGION = {**_STR, "description": "1-based inclusive, samtools-style, e.g. chr1:1000-2000"}
 
@@ -111,8 +111,8 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "jump_to": {
         "description": "Jump to a specific genomic position and view the surrounding reads in "
-        "the interactive viewer. position is 1-based (VCF/samtools convention). If "
-        "contig is omitted, the BAM's first contig is used.",
+        "the interactive viewer. contig and position are both required; position is 1-based "
+        "(VCF/samtools convention). Contig names follow the BAM (list_contigs: 'chr17' vs '17').",
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -123,7 +123,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "vcf_path": _VCF_PATH,
                 "variant_source": _VARIANT_SOURCE,
             },
-            ["file_path", "position"],
+            ["file_path", "contig", "position"],
         ),
     },
     "visualize_region": {

@@ -349,7 +349,6 @@ _LOOKUP_FOUND = "found"
 _LOOKUP_NOT_FOUND = "not_found"
 _LOOKUP_UNAVAILABLE = "unavailable"
 _LOOKUP_DISABLED = "disabled"
-_LOOKUP_INVALID = "invalid_input"
 
 
 def _lookup_result(payload: dict[str, Any], *, status: str, disclaimer: str) -> dict:
@@ -371,6 +370,22 @@ def _lookup_build(args: dict[str, Any], config: BAMCPConfig) -> tuple[str | None
     if args.get("build"):
         return normalize_genome_build(args["build"]), "explicit"
     return normalize_genome_build(config.genome_build), "server-default"
+
+
+def _validate_lookup_input(args: dict[str, Any], config: BAMCPConfig) -> tuple[str, str]:
+    """Validate a variant lookup's chrom/pos/ref/alt/build; raise ToolInputError if invalid.
+
+    Returns the resolved ``(build, build_source)``.
+    """
+    error = validate_variant_input(args["chrom"], args["pos"], args["ref"], args["alt"])
+    if error:
+        raise ToolInputError(error)
+    build, build_source = _lookup_build(args, config)
+    if build is None:
+        raise ToolInputError(
+            f"Unrecognized build {args.get('build')!r}; use GRCh37/hg19 or GRCh38/hg38"
+        )
+    return build, build_source
 
 
 _CANDIDATE_VARIANT_DISCLAIMER = (
@@ -1798,12 +1813,14 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
 
     symbol = args.get("symbol", "")
     if not symbol:
-        return _err("search_gene requires 'symbol'")
+        raise ToolInputError("search_gene requires 'symbol'")
 
     file_path = args.get("file_path")
     requested = normalize_build_name(args["build"]) if args.get("build") else None
     if args.get("build") and requested is None:
-        return _err(f"Unrecognized build {args['build']!r}; use GRCh37/hg19 or GRCh38/hg38")
+        raise ToolInputError(
+            f"Unrecognized build {args['build']!r}; use GRCh37/hg19 or GRCh38/hg38"
+        )
 
     warnings: list[str] = []
     detected_build: str | None = None
@@ -1813,7 +1830,7 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
         except (ValueError, FileNotFoundError) as e:
             # A bad / disallowed / missing file_path is a caller error — never silently fall
             # back to the server default as if no BAM had been named.
-            return _err(f"Invalid file_path: {e}", status=_LOOKUP_INVALID)
+            raise ToolInputError(f"Invalid file_path: {e}") from e
         except Exception as e:  # noqa: BLE001 — unreadable header: reconciliation impossible
             if requested is None:
                 return _err(
@@ -2067,16 +2084,23 @@ async def _viewer_response(
 async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Handle jump_to tool call.
 
-    Centers the viewer on a specific genomic position with a configurable window. With no
-    ``contig``, the BAM's first contig is used. The constructed region goes through the same
-    ``validate_region`` as visualize_region, so both tools accept exactly the same contigs.
+    Centers the viewer on a specific genomic position with a configurable window.
+    ``contig`` is required: a position alone is ambiguous, and silently defaulting to the
+    BAM's first contig showed chr1 reads for a chr17 position. The constructed region goes
+    through the same ``validate_region`` as visualize_region, so both tools accept exactly
+    the same contigs.
     """
     file_path = args["file_path"]
+    contig = args.get("contig")
+    if not contig:
+        raise ToolInputError(
+            "jump_to needs a contig as well as a position (e.g. contig='chr17' or '17' — "
+            "call list_contigs for this file's naming)."
+        )
     await asyncio.to_thread(validate_path, file_path, config)
     position = args["position"]
     window = args.get("window", config.default_window)
     resolved = await _resolve_reference_info(args, config)
-    contig = args.get("contig") or await _first_contig(file_path, resolved.effective, config)
 
     # ``position`` is 1-based; build a 1-based inclusive window of ``window`` bases
     # centred on it (start clamped at base 1).
@@ -2186,25 +2210,14 @@ async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> di
     ref = args["ref"]
     alt = args["alt"]
 
+    # Invalid input is a tool ERROR (isError), not an answer; not_found/unavailable/disabled
+    # stay answers. Validate before the enabled check so bad input fails the same either way.
+    build, build_source = _validate_lookup_input(args, config)
+
     if not config.clinvar_enabled:
         return _lookup_result(
             {"error": "ClinVar lookup is disabled"},
             status=_LOOKUP_DISABLED,
-            disclaimer=_CLINVAR_DISCLAIMER,
-        )
-
-    # Validate input parameters
-    validation_error = validate_variant_input(chrom, pos, ref, alt)
-    if validation_error:
-        return _lookup_result(
-            {"error": validation_error}, status=_LOOKUP_INVALID, disclaimer=_CLINVAR_DISCLAIMER
-        )
-
-    build, build_source = _lookup_build(args, config)
-    if build is None:
-        return _lookup_result(
-            {"error": f"Unrecognized build {args.get('build')!r}; use GRCh37/hg19 or GRCh38/hg38"},
-            status=_LOOKUP_INVALID,
             disclaimer=_CLINVAR_DISCLAIMER,
         )
     build_info = {"genome_build": build, "build_source": build_source}
@@ -2265,25 +2278,14 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
     ref = args["ref"]
     alt = args["alt"]
 
+    # Invalid input is a tool ERROR (isError), not an answer; not_found/unavailable/disabled
+    # stay answers. Validate before the enabled check so bad input fails the same either way.
+    build, build_source = _validate_lookup_input(args, config)
+
     if not config.gnomad_enabled:
         return _lookup_result(
             {"error": "gnomAD lookup is disabled"},
             status=_LOOKUP_DISABLED,
-            disclaimer=_GNOMAD_DISCLAIMER,
-        )
-
-    # Validate input parameters
-    validation_error = validate_variant_input(chrom, pos, ref, alt)
-    if validation_error:
-        return _lookup_result(
-            {"error": validation_error}, status=_LOOKUP_INVALID, disclaimer=_GNOMAD_DISCLAIMER
-        )
-
-    build, build_source = _lookup_build(args, config)
-    if build is None:
-        return _lookup_result(
-            {"error": f"Unrecognized build {args.get('build')!r}; use GRCh37/hg19 or GRCh38/hg38"},
-            status=_LOOKUP_INVALID,
             disclaimer=_GNOMAD_DISCLAIMER,
         )
     build_info = {"genome_build": build, "build_source": build_source}

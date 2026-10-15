@@ -50,9 +50,9 @@ async def test_known_tool_returns_text(small_bam_path, cfg):
 async def test_search_gene_missing_symbol():
     router = InProcessRouter()
     result = await router.call("search_gene", {})
-    # search_gene now routes through handle_search_gene, which returns an error payload.
-    assert result.ok is True
-    assert "symbol" in result.text.lower()
+    # Missing input is a tool error (ToolInputError), surfaced to the model as a failure.
+    assert result.ok is False
+    assert "symbol" in (result.error or "").lower()
 
 
 @pytest.mark.unit

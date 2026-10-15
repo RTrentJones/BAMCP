@@ -395,6 +395,7 @@ async def handle_classify_variant(args: dict[str, Any], config: BAMCPConfig) -> 
     the raw evidence and scaffold so an eval harness can grade the reasoning.
     Positions are 1-based. Research-grade; not a clinical determination.
     """
+    from ..core.errors import ToolInputError
     from ..core.validation import validate_path, validate_variant_input
 
     file_path = args["file_path"]
@@ -413,7 +414,8 @@ async def handle_classify_variant(args: dict[str, Any], config: BAMCPConfig) -> 
 
     validation_error = validate_variant_input(chrom, pos, ref, alt)
     if validation_error:
-        return {"content": [{"type": "text", "text": json.dumps({"error": validation_error})}]}
+        # Invalid input is a tool error (isError via the server envelope), not an answer.
+        raise ToolInputError(validation_error)
 
     evidence = await assemble_evidence(
         chrom, pos, ref, alt, file_path, config, gene=gene, window=window, reference=reference

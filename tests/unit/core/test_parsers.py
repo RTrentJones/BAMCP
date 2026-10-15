@@ -93,9 +93,15 @@ class TestParseRegion:
             parse_region("chr1_1000_2000")
 
     @pytest.mark.unit
-    def test_invalid_format_no_dash(self):
+    def test_single_position_is_one_base(self):
+        # samtools reads "chr1:1000" as the single base 1000 (== "chr1:1000-1000").
+        assert parse_region("chr1:1000") == ("chr1", 999, 1000)
+        assert parse_region("chr17:43,099,914") == parse_region("chr17:43099914-43099914")
+
+    @pytest.mark.unit
+    def test_invalid_format_trailing_dash(self):
         with pytest.raises(ValueError, match="Invalid region format"):
-            parse_region("chr1:1000")
+            parse_region("chr1:1000-")
 
     @pytest.mark.unit
     def test_invalid_format_non_numeric(self):

@@ -91,20 +91,20 @@ async def test_handle_classify_variant_offline(offline_cfg, comprehensive_bam_pa
 
 @pytest.mark.unit
 async def test_handle_classify_variant_rejects_bad_input(offline_cfg, comprehensive_bam_path):
-    import json
+    from bamcp.core.errors import ToolInputError
 
-    result = await handle_classify_variant(
-        {
-            "file_path": comprehensive_bam_path,
-            "chrom": "chr1",
-            "pos": -5,
-            "ref": "A",
-            "alt": "T",
-        },
-        offline_cfg,
-    )
-    payload = json.loads(result["content"][0]["text"])
-    assert "error" in payload
+    # Invalid input is a tool error (isError), never a success payload carrying "error".
+    with pytest.raises(ToolInputError, match="Position must be positive"):
+        await handle_classify_variant(
+            {
+                "file_path": comprehensive_bam_path,
+                "chrom": "chr1",
+                "pos": -5,
+                "ref": "A",
+                "alt": "T",
+            },
+            offline_cfg,
+        )
 
 
 @pytest.mark.unit

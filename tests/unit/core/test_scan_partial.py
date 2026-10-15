@@ -38,6 +38,7 @@ async def test_full_scan_matches_scan_contig(small_bam_path, ref_fasta_path, ref
         min_depth=ref_config.min_depth,
         min_mapq=ref_config.min_mapq,
         min_baseq=ref_config.min_baseq,
+        min_alt_count=ref_config.min_alt_count,
     )
     got = {(v["position"], v["alt"], v["vaf"]) for v in payload["variants"]}
     want = {(v["position"] + 1, v["alt"], v["vaf"]) for v in expected.variants}

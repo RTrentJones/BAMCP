@@ -1292,6 +1292,8 @@ async def _bam_contigs(file_path: str, config: BAMCPConfig) -> list[dict]:
         cache.move_to_end(key)
         return cached
     index_path = await _ensure_cached_index(file_path, config)
+    # A cold remote BAM's first open gets the cold-start budget, not the parse timeout.
+    await _warm_remote_inputs(file_path, None, index_path)
     contigs = await asyncio.wait_for(
         _run_in_parse_pool(_read_contigs_sync, file_path, config.reference, index_path),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
@@ -1707,7 +1709,7 @@ async def handle_list_contigs(args: dict[str, Any], config: BAMCPConfig) -> dict
 
     # Download and cache index for remote files (if not already cached)
     index_path = await _ensure_cached_index(file_path, config)
-
+    await _warm_remote_inputs(file_path, reference, index_path)
     contigs = await asyncio.wait_for(
         _run_in_parse_pool(_read_contigs_sync, file_path, reference, index_path),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
@@ -1943,6 +1945,7 @@ async def _first_contig(file_path: str, reference: str | None, config: BAMCPConf
     the default from the file itself.
     """
     index_path = await _ensure_cached_index(file_path, config)
+    await _warm_remote_inputs(file_path, reference, index_path)
     contigs = await asyncio.wait_for(
         _run_in_parse_pool(_read_contigs_sync, file_path, reference, index_path),
         timeout=BAM_PARSE_TIMEOUT_SECONDS,
@@ -2469,11 +2472,11 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
     """
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
-    _, reference = await _resolve_reference(args, config)
+    resolved = await _resolve_reference_info(args, config)
+    reference = resolved.effective
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
-    # Package-A's min_alt_count (arg, else config default); tolerated if absent.
-    min_alt_count = args.get("min_alt_count", getattr(config, "min_alt_count", None))
+    min_alt_count = args.get("min_alt_count", config.min_alt_count)
 
     if not reference:
         raise ToolInputError(
@@ -2548,7 +2551,13 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
     # 1-based inclusive; None when not a single chunk completed.
     scanned_region = format_region(contig, 0, scanned_end) if scanned_end > 0 else None
 
-    filters = _applied_filters(config, args, include_max_reads=False)
+    filters = _applied_filters(
+        config,
+        args,
+        include_max_reads=False,
+        min_alt_count=min_alt_count,
+        reference_source=resolved.source,
+    )
     # Self-describing scope: what was scanned, and what this scan cannot see.
     filters.update(
         {

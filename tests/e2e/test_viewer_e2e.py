@@ -1201,131 +1201,76 @@ class TestMismatchRendering:
                 const p = ctx.getImageData(mx, 6, 1, 1).data;
                 return { r: p[0], g: p[1], b: p[2], a: p[3] };
             }""")
-        # At very low zoom, mismatch should not override — pixel should be blue read color
+        # At very low zoom, mismatch should not override — pixel should be the neutral
+        # grey read body (#d1d5db), not the red T tick (#dc2626).
         if pixel["a"] > 0:
-            assert pixel["b"] >= pixel["r"], (
-                f"At very low zoom, should be blue read color not red mismatch, "
-                f"got r={pixel['r']} b={pixel['b']}"
-            )
+            assert (
+                max(pixel["r"], pixel["g"], pixel["b"]) - min(pixel["r"], pixel["g"], pixel["b"])
+                < 30
+            ), f"At very low zoom, should be the grey read body, got {pixel}"
 
 
 class TestReadColors:
-    """E2E tests for forward/reverse read coloring."""
+    """Read bodies are neutral grey on both strands; strand is the bottom stripe.
 
-    @pytest.mark.e2e
-    def test_forward_read_is_blue(self, viewer_page: Page):
-        """Forward-strand reads should be blue (#60a5fa) at medium zoom."""
-        # Use a wider viewport (200bp) so per-base colors aren't drawn (scale < 10)
-        medium_data = {
-            **NARROW_DATA,
-            "start": 50,
-            "end": 250,
-            "coverage": [2] * 200,
-            "reference_sequence": "ACGTACGTAC" * 20,
-        }
-        send_init_data(viewer_page, medium_data)
+    Bodies used to be coloured by strand (forward blue, reverse red), which hid a
+    C mismatch on a forward read and a T mismatch on a reverse read (same colour as
+    the body) — a hom-alt C/T then looked strand-biased. See palette.ts.
+    """
 
-        pixel = viewer_page.evaluate("""() => {
-                const canvas = document.getElementById('reads-canvas');
-                const ctx = canvas.getContext('2d');
-                const vp = viewer.state.viewport;
-                const scale = canvas.width / (vp.end - vp.start);
-                // Sample a pixel in row 0, at position 110 (away from mismatch at 125)
-                const x = Math.floor((110 - viewer.state.viewport.start) * scale);
-                const p = ctx.getImageData(x, 3, 1, 1).data;
-                return { r: p[0], g: p[1], b: p[2], a: p[3] };
-            }""")
-        assert pixel["a"] > 0, "Pixel should be drawn"
-        # #60a5fa: r=96, g=165, b=250 → blue dominant
-        assert pixel["b"] > pixel["r"], (
-            f"Forward read should be blue-dominant, "
-            f"got r={pixel['r']} g={pixel['g']} b={pixel['b']}"
-        )
+    MEDIUM = {
+        **NARROW_DATA,
+        "start": 50,
+        "end": 250,
+        "coverage": [2] * 200,
+        "reference_sequence": "ACGTACGTAC" * 20,
+    }
+    # compact rows: 12px + 2px gap; strand stripe = bottom 2px (y=10..11).
+    BODY_Y = 5
+    STRIPE_Y = 10
 
-    @pytest.mark.e2e
-    def test_reverse_read_is_purple(self, viewer_page: Page):
-        """Reverse-strand reads should be red (#ef4444) at medium zoom."""
-        medium_data = {
-            **NARROW_DATA,
-            "start": 50,
-            "end": 250,
-            "coverage": [2] * 200,
-            "reference_sequence": "ACGTACGTAC" * 20,
-        }
-        send_init_data(viewer_page, medium_data)
-
-        # Find the row position of the reverse read
-        rev_row = viewer_page.evaluate("""() => {
-                // packedRows is an array of rows; find which row has the reverse read
+    def _row_of(self, page: Page, reverse: bool) -> int:
+        row = page.evaluate(
+            """(rev) => {
                 for (let r = 0; r < viewer.state.packedRows.length; r++) {
                     for (const read of viewer.state.packedRows[r]) {
-                        if (read.is_reverse) return r;
+                        if (read.is_reverse === rev) return r;
                     }
                 }
                 return -1;
-            }""")
-        assert rev_row >= 0, "Reverse read should be found in packed rows"
-        # Row height = 12px + 2px gap = 14px per row
-        row_y = rev_row * 14 + 6  # middle of that row
-
-        pixel = viewer_page.evaluate(f"""() => {{
-                const canvas = document.getElementById('reads-canvas');
-                const ctx = canvas.getContext('2d');
-                const vp = viewer.state.viewport;
-                const scale = canvas.width / (vp.end - vp.start);
-                const x = Math.floor((110 - viewer.state.viewport.start) * scale);
-                const p = ctx.getImageData(x, {row_y}, 1, 1).data;
-                return {{ r: p[0], g: p[1], b: p[2], a: p[3] }};
-            }}""")
-        assert pixel["a"] > 0, "Pixel should be drawn"
-        # #ef4444: r=239, g=68, b=68 → red dominant
-        assert pixel["r"] > pixel["b"], (
-            f"Reverse read should be red-dominant, got r={pixel['r']} b={pixel['b']}"
+            }""",
+            reverse,
         )
+        assert row >= 0
+        return row
 
     @pytest.mark.e2e
-    def test_forward_and_reverse_have_different_colors(self, viewer_page: Page):
-        """Forward and reverse reads should be visually distinct colors."""
-        medium_data = {
-            **NARROW_DATA,
-            "start": 50,
-            "end": 250,
-            "coverage": [2] * 200,
-            "reference_sequence": "ACGTACGTAC" * 20,
-        }
-        send_init_data(viewer_page, medium_data)
+    def test_read_body_is_neutral_grey_on_both_strands(self, viewer_page: Page):
+        send_init_data(viewer_page, self.MEDIUM)
+        fwd_row = self._row_of(viewer_page, False)
+        rev_row = self._row_of(viewer_page, True)
+        fwd = sample_pixel_at_genomic(viewer_page, "reads-canvas", 110, fwd_row * 14 + self.BODY_Y)
+        rev = sample_pixel_at_genomic(viewer_page, "reads-canvas", 110, rev_row * 14 + self.BODY_Y)
+        for px in (fwd, rev):
+            assert px["a"] == 255, px
+            assert max(px["r"], px["g"], px["b"]) - min(px["r"], px["g"], px["b"]) < 30, (
+                f"read body should be neutral grey, got {px}"
+            )
 
-        colors = viewer_page.evaluate("""() => {
-                const canvas = document.getElementById('reads-canvas');
-                const ctx = canvas.getContext('2d');
-                const vp = viewer.state.viewport;
-                const scale = canvas.width / (vp.end - vp.start);
-                const x = Math.floor((110 - viewer.state.viewport.start) * scale);
-                // Find y position of each read type
-                let fwdY = 3, revY = 3;
-                for (let r = 0; r < viewer.state.packedRows.length; r++) {
-                    for (const read of viewer.state.packedRows[r]) {
-                        const y = r * 14 + 3;
-                        if (!read.is_reverse) fwdY = y;
-                        else revY = y;
-                    }
-                }
-                const fwd = ctx.getImageData(x, fwdY, 1, 1).data;
-                const rev = ctx.getImageData(x, revY, 1, 1).data;
-                return {
-                    fwd: { r: fwd[0], g: fwd[1], b: fwd[2] },
-                    rev: { r: rev[0], g: rev[1], b: rev[2] },
-                };
-            }""")
-        # Colors should differ
-        assert (
-            colors["fwd"]["r"] != colors["rev"]["r"]
-            or colors["fwd"]["g"] != colors["rev"]["g"]
-            or colors["fwd"]["b"] != colors["rev"]["b"]
-        ), (
-            f"Forward and reverse should have different colors: "
-            f"fwd={colors['fwd']} rev={colors['rev']}"
+    @pytest.mark.e2e
+    def test_strand_stripe_blue_forward_red_reverse(self, viewer_page: Page):
+        send_init_data(viewer_page, self.MEDIUM)
+        fwd_row = self._row_of(viewer_page, False)
+        rev_row = self._row_of(viewer_page, True)
+        fwd = sample_pixel_at_genomic(
+            viewer_page, "reads-canvas", 110, fwd_row * 14 + self.STRIPE_Y
         )
+        rev = sample_pixel_at_genomic(
+            viewer_page, "reads-canvas", 110, rev_row * 14 + self.STRIPE_Y
+        )
+        assert fwd["b"] > fwd["r"] + 60, f"forward stripe should be blue: {fwd}"
+        # The reverse read (MAPQ 50) is slightly faded toward white; still red-dominant.
+        assert rev["r"] > rev["b"] + 40, f"reverse stripe should be red: {rev}"
 
 
 class TestSoftClipPixelVerification:

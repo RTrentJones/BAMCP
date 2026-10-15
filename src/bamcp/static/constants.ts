@@ -8,13 +8,16 @@
 // server and may mis-decode, so we warn loudly (see BAMCPClient.handleData).
 export const EXPECTED_SCHEMA_VERSION = 1;
 
-// Base colors for nucleotides
+// Base colors for nucleotides. Deep enough that each keeps >= 3:1 contrast against
+// the grey read body (palette.ts READ_BODY) at every MAPQ fade, and >= 4.5:1 for the
+// white letters drawn on them; roughly iso-luminant so no base out-shouts another.
+// Enforced by palette.test.ts.
 export const BASE_COLORS: Record<string, string> = {
-    'A': '#22c55e',  // Green
-    'T': '#ef4444',  // Red
-    'G': '#f97316',  // Orange
-    'C': '#3b82f6',  // Blue
-    'N': '#9ca3af',  // Gray
+    'A': '#15803d',  // Green
+    'T': '#dc2626',  // Red
+    'G': '#b45309',  // Orange (deep amber)
+    'C': '#2563eb',  // Blue
+    'N': '#4b5563',  // Dark gray
 };
 
 // Color palettes for different colorBy modes

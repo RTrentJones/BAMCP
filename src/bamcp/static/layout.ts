@@ -103,3 +103,22 @@ export function cachedLayout(read: {
     }
     return layout;
 }
+
+/**
+ * Query index of the read base aligned to reference position `refPos`, or null
+ * when the read has no aligned base there (deletion, skip, outside the read).
+ * `layout.bases` is sorted by refPos, so this is a binary search.
+ */
+export function qposAt(layout: ReadLayout, refPos: number): number | null {
+    const bases = layout.bases;
+    let lo = 0;
+    let hi = bases.length - 1;
+    while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const r = bases[mid].refPos;
+        if (r === refPos) return bases[mid].qpos;
+        if (r < refPos) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return null;
+}

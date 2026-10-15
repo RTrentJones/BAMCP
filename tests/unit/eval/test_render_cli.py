@@ -36,9 +36,31 @@ class TestArgParsing:
         args = _parse_args(["--bam", "x.bam"])
         assert args.mode == "expanded"
         assert args.width == 1024
-        assert args.height == 800
+        assert args.height is None
+        assert args.blind is False
+        assert args.clip is None
         assert args.out == ".render-dev/last.png"
         assert args.print_path_only is False
+
+    @pytest.mark.unit
+    def test_height_resolution(self):
+        from bamcp.eval.render_cli import _resolve_height
+
+        assert _resolve_height(_parse_args(["--bam", "x.bam"])) == 800
+        assert _resolve_height(_parse_args(["--bam", "x.bam", "--blind"])) is None
+        assert _resolve_height(_parse_args(["--bam", "x.bam", "--height", "auto"])) is None
+        assert _resolve_height(_parse_args(["--bam", "x.bam", "--blind", "--height", "600"])) == 600
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad", ["tall", "0", "-5"])
+    def test_height_rejects_garbage(self, bad):
+        with pytest.raises(SystemExit):
+            _parse_args(["--bam", "x.bam", "--height", bad])
+
+    @pytest.mark.unit
+    def test_clip_validated(self):
+        with pytest.raises(SystemExit):
+            _parse_args(["--bam", "x.bam", "--clip", "#table"])
 
 
 class TestActiveVariantParsing:
@@ -144,6 +166,96 @@ class TestRebuildGuard:
         assert "does not exist" in warning
 
 
+class TestHashStaleness:
+    def _static(self, tmp_path: Path) -> Path:
+        static = tmp_path / "static"
+        (static / "dist").mkdir(parents=True)
+        (static / "renderer.ts").write_text("// v1")
+        (static / "viewer.html").write_text("<html>src</html>")
+        (static / "dist" / "viewer.html").write_text("<html>built</html>")
+        return static
+
+    @pytest.mark.unit
+    def test_fresh_stamp_ignores_newer_mtimes(self, monkeypatch, tmp_path: Path):
+        """A checkout/branch switch bumps mtimes without changing content: no warning."""
+        import os
+
+        from bamcp.eval import render_cli
+
+        static = self._static(tmp_path)
+        render_cli.record_build_hash(static)
+        future = time.time() + 3600
+        os.utime(static / "renderer.ts", (future, future))
+        monkeypatch.setattr(render_cli, "_STATIC_DIR", static)
+        assert render_cli._check_rebuild_needed() is None
+
+    @pytest.mark.unit
+    def test_content_change_warns_even_with_old_mtime(self, monkeypatch, tmp_path: Path):
+        import os
+
+        from bamcp.eval import render_cli
+
+        static = self._static(tmp_path)
+        render_cli.record_build_hash(static)
+        (static / "renderer.ts").write_text("// v2")
+        os.utime(static / "renderer.ts", (0, 0))
+        monkeypatch.setattr(render_cli, "_STATIC_DIR", static)
+        warning = render_cli._check_rebuild_needed()
+        assert warning is not None and "content hash" in warning
+
+    @pytest.mark.unit
+    def test_test_files_do_not_affect_hash(self, tmp_path: Path):
+        from bamcp.eval import render_cli
+
+        static = self._static(tmp_path)
+        before = render_cli.viewer_source_hash(static)
+        (static / "constants.test.ts").write_text("// test only")
+        assert render_cli.viewer_source_hash(static) == before
+        (static / "state.ts").write_text("// new source")
+        assert render_cli.viewer_source_hash(static) != before
+
+    @pytest.mark.unit
+    def test_stamp_for_older_dist_is_ignored(self, monkeypatch, tmp_path: Path):
+        """Rebuilt without re-stamping: the stamp no longer describes dist → mtime fallback."""
+        import os
+
+        from bamcp.eval import render_cli
+
+        static = self._static(tmp_path)
+        render_cli.record_build_hash(static)
+        (static / "renderer.ts").write_text("// v2")
+        (static / "dist" / "viewer.html").write_text("<html>rebuilt</html>")
+        os.utime(static / "renderer.ts", (0, 0))
+        monkeypatch.setattr(render_cli, "_STATIC_DIR", static)
+        assert render_cli._check_rebuild_needed() is None
+
+    @pytest.mark.unit
+    def test_corrupt_stamp_falls_back(self, monkeypatch, tmp_path: Path):
+        from bamcp.eval import render_cli
+
+        static = self._static(tmp_path)
+        (static / "dist" / render_cli.BUILD_STAMP_NAME).write_text("not json")
+        monkeypatch.setattr(render_cli, "_STATIC_DIR", static)
+        assert render_cli._read_stamp(static, static / "dist" / "viewer.html") is None
+
+    @pytest.mark.unit
+    def test_record_requires_dist(self, tmp_path: Path):
+        from bamcp.eval import render_cli
+
+        with pytest.raises(SystemExit, match="does not exist"):
+            render_cli.record_build_hash(tmp_path)
+
+    @pytest.mark.unit
+    def test_main_record_build_hash(self, monkeypatch, capsys, tmp_path: Path):
+        from bamcp.eval import render_cli
+
+        static = self._static(tmp_path)
+        monkeypatch.setattr(render_cli, "_STATIC_DIR", static)
+        assert render_cli.main(["--record-build-hash"]) == 0
+        assert render_cli.BUILD_STAMP_NAME in capsys.readouterr().out
+        assert render_cli._check_rebuild_needed() is None
+
+
 class TestPrintPathOnly:
     @pytest.mark.unit
     def test_main_prints_only_path_when_flag_set(self, monkeypatch, capsys, tmp_path: Path):
@@ -220,3 +332,55 @@ class TestPrintPathOnly:
         assert rc == 0
         assert "Rendered" in captured.out
         assert "dv-strips" in captured.out
+
+
+class TestBlindCli:
+    def _stub(self, monkeypatch, calls: list):
+        from bamcp.eval import render_cli
+
+        async def fake_capture(self, payload, mode, **kw):
+            calls.append({"mode": mode, **kw})
+            return b"\x89PNG"
+
+        async def fake_aenter(self):
+            return self
+
+        async def fake_aexit(self, *exc):
+            return None
+
+        async def fake_build(*a, **kw):
+            return {"contig": "chr1", "start": 1, "end": 10}
+
+        monkeypatch.setattr(render_cli.ViewerRenderer, "capture", fake_capture)
+        monkeypatch.setattr(render_cli.ViewerRenderer, "__aenter__", fake_aenter)
+        monkeypatch.setattr(render_cli.ViewerRenderer, "__aexit__", fake_aexit)
+        monkeypatch.setattr(render_cli, "_build_payload_from_bam", fake_build)
+        monkeypatch.setattr(render_cli, "_resolve_region", lambda bam, region: "chr1:1-10")
+        monkeypatch.setattr(render_cli, "_check_rebuild_needed", lambda: None)
+        return render_cli
+
+    @pytest.mark.unit
+    def test_blind_flag_reaches_capture(self, monkeypatch, tmp_path: Path):
+        calls: list = []
+        render_cli = self._stub(monkeypatch, calls)
+        out = tmp_path / "b.png"
+        assert render_cli.main(["--bam", "f.bam", "--blind", "--out", str(out)]) == 0
+        assert calls[0]["blind"] is True
+        assert calls[0]["viewport"] == (1024, None)
+        assert calls[0]["clip"] is None
+
+    @pytest.mark.unit
+    def test_default_is_unblinded_fixed_viewport(self, monkeypatch, tmp_path: Path):
+        calls: list = []
+        render_cli = self._stub(monkeypatch, calls)
+        render_cli.main(["--bam", "f.bam", "--out", str(tmp_path / "x.png")])
+        assert calls[0]["blind"] is False
+        assert calls[0]["viewport"] == (1024, 800)
+
+    @pytest.mark.unit
+    def test_blind_rejects_active_variant(self, monkeypatch, tmp_path: Path):
+        render_cli = self._stub(monkeypatch, [])
+        with pytest.raises(SystemExit, match="blind"):
+            render_cli.main(
+                ["--bam", "f.bam", "--blind", "--active-variant", "chr1:5:A>T", "--out", "x.png"]
+            )

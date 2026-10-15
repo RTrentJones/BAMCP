@@ -445,6 +445,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover — needs a 
     import argparse
     import asyncio
 
+    from .models import DEFAULT_SUBJECT_MODEL
     from .providers import get_provider
     from .router import InProcessRouter
 
@@ -453,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover — needs a 
     p.add_argument("--bam", required=True, help="BAM/CRAM fixture for the observation block.")
     p.add_argument("--reference", default=None)
     p.add_argument("--provider", default="anthropic", choices=["anthropic", "openai"])
-    p.add_argument("--model", default="claude-opus-4-7")
+    p.add_argument("--model", default=DEFAULT_SUBJECT_MODEL)
     p.add_argument("--output-dir", default=".eval-results/acmg")
     args = p.parse_args(argv)
 

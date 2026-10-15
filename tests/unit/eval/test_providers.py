@@ -46,8 +46,8 @@ def test_get_provider_anthropic_requires_sdk(monkeypatch):
     # The SDK was pulled in by `[eval]` extras; just smoke-test construction.
     from bamcp.eval.providers import AnthropicProvider
 
-    p = AnthropicProvider(model="claude-opus-4-7")
-    assert p.model == "claude-opus-4-7"
+    p = AnthropicProvider(model="claude-x")
+    assert p.model == "claude-x"
 
 
 @pytest.mark.unit
@@ -72,9 +72,10 @@ def test_get_provider_none_model_uses_provider_default():
 
 @pytest.mark.unit
 def test_resolve_judge_defaults_to_fixed_separate_model():
+    from bamcp.eval.models import COMPARISON_MODELS, DEFAULT_SUBJECT_MODEL
     from bamcp.eval.providers import DEFAULT_JUDGE_MODEL, DEFAULT_JUDGE_PROVIDER, resolve_judge
 
-    for subject in ("claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4-5"):
+    for subject in (DEFAULT_SUBJECT_MODEL, *COMPARISON_MODELS):
         assert resolve_judge("anthropic", subject) == (DEFAULT_JUDGE_PROVIDER, DEFAULT_JUDGE_MODEL)
     assert resolve_judge("mock", "mock") is None
 
@@ -129,3 +130,33 @@ async def test_anthropic_provider_forwards_temperature(monkeypatch):
     seen.clear()
     await AnthropicProvider("m").chat_with_tools([], [])
     assert "temperature" not in seen
+
+
+@pytest.mark.unit
+async def test_anthropic_provider_drops_temperature_for_no_sampling_models(monkeypatch):
+    """The 5.x family 400s on an explicit temperature; the judge must not send one."""
+    anthropic = pytest.importorskip("anthropic")
+    from bamcp.eval.models import JUDGE_MODEL
+    from bamcp.eval.providers import AnthropicProvider, build_judge_provider
+
+    seen = {}
+
+    class _Resp:
+        content = []
+
+    class _Messages:
+        async def create(self, **kwargs):
+            seen.update(kwargs)
+            return _Resp()
+
+    class _Client:
+        messages = _Messages()
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", lambda: _Client())
+    await build_judge_provider("anthropic", JUDGE_MODEL).chat_with_tools([], [])
+    assert "temperature" not in seen
+    assert seen["model"] == JUDGE_MODEL
+    assert seen["max_tokens"] >= 16000
+    seen.clear()
+    await AnthropicProvider("claude-legacy-x", temperature=0.0).chat_with_tools([], [])
+    assert seen["temperature"] == 0.0

@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 import weakref
 from collections import OrderedDict
@@ -37,6 +38,7 @@ from ..clients.ncbi import NCBIUnavailableError, TokenBucketRateLimiter, ncbi_ra
 from ..config import BAMCPConfig
 from ..constants import (
     BAM_PARSE_TIMEOUT_SECONDS,
+    COLD_START_TIMEOUT_SECONDS,
     DEFAULT_CACHE_TTL_SECONDS,
     INDEL_DETECTION_MAX_REGION,
     PARSE_MAX_CONCURRENCY,
@@ -44,10 +46,14 @@ from ..constants import (
     REGION_CACHE_MAX_ENTRIES,
     REGION_TILE_SIZE,
     SCAN_VARIANTS_CHUNK_SIZE,
+    SCAN_VARIANTS_CHUNK_TARGET_SECONDS,
+    SCAN_VARIANTS_DEADLINE_SECONDS,
     SCAN_VARIANTS_MAX_REGION,
     SCAN_VARIANTS_MAX_RESULTS,
+    SCAN_VARIANTS_MIN_CHUNK_SIZE,
     SCAN_VARIANTS_TIMEOUT_SECONDS,
     VIEWER_RESOURCE_URI,
+    WARM_INPUTS_MAX_ENTRIES,
 )
 from ..middleware.telemetry import telemetry_wrapper
 from .cache import BAMIndexCache
@@ -65,7 +71,6 @@ from .parsers import (
     format_region,
     load_vcf_variants,
     parse_region,
-    scan_contig,
 )
 from .serialization import build_enhanced_variants, serialize_region_data
 from .validation import (
@@ -744,6 +749,80 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
     return None
 
 
+# Remote inputs (BAM/CRAM URLs, reference FASTA URLs) that have been opened successfully at
+# least once in this process. The first open of a remote input fetches its header (and, for a
+# FASTA, the .fai/.gzi) and is the slow, cold part of a call; it runs under the larger
+# COLD_START_TIMEOUT_SECONDS budget so it can't eat the normal parse budget. Bounded LRU.
+_warm_inputs: OrderedDict[str, None] = OrderedDict()
+
+
+def _is_remote(path: str | None) -> bool:
+    return bool(path) and "://" in str(path)
+
+
+def _mark_warm(url: str) -> None:
+    _warm_inputs[url] = None
+    _warm_inputs.move_to_end(url)
+    while len(_warm_inputs) > WARM_INPUTS_MAX_ENTRIES:
+        _warm_inputs.popitem(last=False)
+
+
+def _open_remote_inputs_sync(
+    file_path: str | None, reference: str | None, index_path: str | None
+) -> None:
+    """Open (and immediately close) remote inputs so their headers/indexes are fetched.
+
+    Runs in the parse pool. ``file_path``/``reference`` are only passed when cold. Touching
+    the FASTA's first contig forces htslib to load the .fai (and .gzi for bgzip).
+    """
+    from .parsers import _open_alignment
+
+    if reference:
+        with pysam.FastaFile(reference) as fasta:
+            if fasta.references:
+                fasta.fetch(fasta.references[0], 0, 1)
+    if file_path:
+        with _open_alignment(file_path, reference, index_path) as samfile:
+            _ = samfile.references
+
+
+async def _warm_remote_inputs(
+    file_path: str, reference: str | None, index_path: str | None
+) -> None:
+    """Give a cold remote BAM/CRAM or reference its one-off open under the cold-start budget.
+
+    No-op for local inputs and for inputs already warm, so only the first call to a not-yet-seen
+    URL pays (and is allowed) the cold cost. A cold-open timeout raises a diagnosable
+    ``TimeoutError``; any other failure is left for the real parse to report with its own
+    message (the input simply stays cold).
+    """
+    cold_file = file_path if _is_remote(file_path) and file_path not in _warm_inputs else None
+    cold_ref = reference if _is_remote(reference) and reference not in _warm_inputs else None
+    if not cold_file and not cold_ref:
+        return
+    try:
+        await asyncio.wait_for(
+            _run_in_parse_pool(_open_remote_inputs_sync, cold_file, cold_ref, index_path),
+            timeout=COLD_START_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as e:
+        what = " and ".join(
+            name
+            for name, cold in (("alignment file", cold_file), ("reference FASTA", cold_ref))
+            if cold
+        )
+        raise TimeoutError(
+            f"Timed out after {COLD_START_TIMEOUT_SECONDS:g}s opening the remote {what} on "
+            "first use (fetching its header/index); retrying usually succeeds once it is warm."
+        ) from e
+    except Exception as e:  # noqa: BLE001 — the real parse reports the actual error
+        logger.debug("Cold open of remote inputs failed (left cold): %s", e)
+        return
+    for url in (cold_file, cold_ref):
+        if url:
+            _mark_warm(url)
+
+
 def _tile_bounds(start: int, end: int, tile: int) -> tuple[int, int]:
     """Snap [start, end) outward to fixed-width tile boundaries."""
     t_start = (start // tile) * tile
@@ -933,6 +1012,9 @@ async def _fetch_region_with_timeout(
 ) -> RegionData:
     """Fetch region data, converting a parse timeout into a diagnosable error.
 
+    A first call to a not-yet-seen remote file/reference first opens it under the separate
+    ``COLD_START_TIMEOUT_SECONDS`` budget (see :func:`_warm_remote_inputs`).
+
     Every ``asyncio.wait_for`` under this call raises a bare ``asyncio.TimeoutError``,
     whose ``str()`` is the EMPTY STRING. FastMCP renders a failed tool call as
     ``f"Error executing tool {name}: {exc}"``, so a timeout reached the caller as
@@ -944,6 +1026,12 @@ async def _fetch_region_with_timeout(
     unrelated per-tool bug. Re-raise with the context needed to tell "too slow" from
     "broken", and note that a retry is usually warm enough to succeed.
     """
+    # Cold start: fetch the index (never under a parse budget), then give a not-yet-seen remote
+    # BAM/reference its one-off open under the separate cold budget, so the parse that follows
+    # runs warm under the normal BAM_PARSE_TIMEOUT_SECONDS.
+    if _is_remote(file_path) or _is_remote(reference):
+        index_path = await _ensure_cached_index(file_path, config)
+        await _warm_remote_inputs(file_path, reference, index_path)
     try:
         return await _fetch_region_data(
             file_path,
@@ -2243,19 +2331,149 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
     )
 
 
+@dataclass
+class _ScanProgress:
+    """Shared, lock-guarded state of a progressive contig scan (worker thread → handler).
+
+    Coordinates are internal 0-based half-open. ``scanned_end`` advances only after a chunk's
+    candidates are appended, so ``[0, scanned_end)`` is exactly what ``variants`` covers.
+    """
+
+    variants: list[dict] = field(default_factory=list)
+    scanned_end: int = 0
+    scan_end: int = 0
+    contig_length: int | None = None
+    deadline_hit: bool = False
+    stop: threading.Event = field(default_factory=threading.Event)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def _scan_chunk(
+    samfile: pysam.AlignmentFile,
+    fasta: pysam.FastaFile,
+    contig: str,
+    chunk_start: int,
+    chunk_end: int,
+    min_vaf: float,
+    min_depth: int,
+    min_mapq: int,
+    min_baseq: int,
+    min_alt_count: int | None,
+) -> list[dict]:
+    """SNV candidates in one chunk — the same per-chunk logic as ``parsers.scan_contig``."""
+    from .parsers import _deletion_depth_at, detect_variants, read_passes_filters
+
+    ref_seq = fasta.fetch(contig, chunk_start, chunk_end)
+    counts = samfile.count_coverage(
+        contig,
+        chunk_start,
+        chunk_end,
+        quality_threshold=min_baseq,
+        read_callback=lambda r: read_passes_filters(r, min_mapq),
+    )
+    variants = detect_variants(counts, ref_seq, contig, chunk_start, min_vaf, min_depth)
+    if variants:
+        gaps = _deletion_depth_at(
+            samfile, contig, sorted({v["position"] for v in variants}), min_mapq
+        )
+        for v in variants:
+            gap = gaps.get(v["position"], 0)
+            if gap:
+                v["depth"] += gap
+                v["vaf"] = round(v["alt_count"] / v["depth"], 3)
+        # Adding deletion depth only lowers VAF: re-apply the threshold.
+        variants = [v for v in variants if v["vaf"] >= min_vaf]
+    if min_alt_count:
+        variants = [v for v in variants if v.get("alt_count", 0) >= min_alt_count]
+    return variants
+
+
+def _scan_contig_progressive(
+    bam_path: str,
+    contig: str,
+    reference_path: str,
+    progress: _ScanProgress,
+    deadline: float,
+    *,
+    chunk_size: int,
+    min_vaf: float,
+    min_depth: int,
+    min_mapq: int,
+    min_baseq: int,
+    max_region: int,
+    index_filename: str | None,
+    min_alt_count: int | None = None,
+) -> None:
+    """Scan ``contig`` chunk by chunk into ``progress``, stopping at ``deadline`` (monotonic).
+
+    Runs in the parse pool. Checks the deadline (and the handler's ``stop`` flag, set when the
+    hard timeout abandons it) before every chunk, so a slow remote scan ends cleanly with the
+    chunks done so far rather than holding a worker until the whole contig is read.
+
+    Raises:
+        ValueError: If ``contig`` is not in the alignment header.
+    """
+    from .parsers import _header_lengths, _open_alignment
+
+    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
+        contig_length = _header_lengths(samfile).get(contig)
+        if contig_length is None:
+            raise ValueError(f"Contig '{contig}' not found in the alignment header")
+        scan_end = min(contig_length, max_region)
+        with progress.lock:
+            progress.contig_length = contig_length
+            progress.scan_end = scan_end
+        # Adaptive chunking: start small, double while chunks are fast, halve when slow.
+        size = min(SCAN_VARIANTS_MIN_CHUNK_SIZE, chunk_size)
+        chunk_start = 0
+        with pysam.FastaFile(reference_path) as fasta:
+            while chunk_start < scan_end:
+                if progress.stop.is_set() or time.monotonic() >= deadline:
+                    with progress.lock:
+                        progress.deadline_hit = True
+                    return
+                chunk_end = min(chunk_start + size, scan_end)
+                started = time.monotonic()
+                found = _scan_chunk(
+                    samfile,
+                    fasta,
+                    contig,
+                    chunk_start,
+                    chunk_end,
+                    min_vaf,
+                    min_depth,
+                    min_mapq,
+                    min_baseq,
+                    min_alt_count,
+                )
+                with progress.lock:
+                    progress.variants.extend(found)
+                    progress.scanned_end = chunk_end
+                chunk_start = chunk_end
+                if time.monotonic() - started < SCAN_VARIANTS_CHUNK_TARGET_SECONDS:
+                    size = min(size * 2, chunk_size)
+                else:
+                    size = max(size // 2, min(SCAN_VARIANTS_MIN_CHUNK_SIZE, chunk_size))
+
+
 @telemetry_wrapper("scan_variants")
 async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Scan an entire contig for variants using fast coverage-based detection.
 
-    Failures (no reference, timeout) raise :class:`ToolInputError` so they reach the client as
-    an MCP error result rather than a successful ``{"error": ...}`` payload. With no
-    ``contig``, the BAM's first contig is scanned.
+    The scan runs chunk by chunk against ``SCAN_VARIANTS_DEADLINE_SECONDS``; when the deadline
+    (or the hard ``SCAN_VARIANTS_TIMEOUT_SECONDS`` backstop) hits, the candidates found so far
+    are returned with ``truncated: true``, the 1-based ``scanned_region`` and a
+    ``truncation_reason`` — a partial answer, never a bare timeout. Failures (no reference,
+    unknown contig, nothing scanned at all) raise :class:`ToolInputError` so they reach the
+    client as an MCP error result. With no ``contig``, the BAM's first contig is scanned.
     """
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
     _, reference = await _resolve_reference(args, config)
     min_vaf = args.get("min_vaf", config.min_vaf)
     min_depth = args.get("min_depth", config.min_depth)
+    # Package-A's min_alt_count (arg, else config default); tolerated if absent.
+    min_alt_count = args.get("min_alt_count", getattr(config, "min_alt_count", None))
 
     if not reference:
         raise ToolInputError(
@@ -2263,16 +2481,23 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
             "Use list_contigs to detect genome build and get a reference URL."
         )
 
-    contig = args.get("contig") or await _first_contig(file_path, reference, config)
     index_path = await _ensure_cached_index(file_path, config)
+    # Cold remote inputs get their one-off open under the cold budget, not the scan deadline.
+    await _warm_remote_inputs(file_path, reference, index_path)
+    contig = args.get("contig") or await _first_contig(file_path, reference, config)
 
+    progress = _ScanProgress()
+    deadline = time.monotonic() + SCAN_VARIANTS_DEADLINE_SECONDS
+    hard_timeout = False
     try:
-        scan = await asyncio.wait_for(
+        await asyncio.wait_for(
             _run_in_parse_pool(
-                scan_contig,
+                _scan_contig_progressive,
                 file_path,
                 contig,
                 reference,
+                progress,
+                deadline,
                 chunk_size=SCAN_VARIANTS_CHUNK_SIZE,
                 min_vaf=min_vaf,
                 min_depth=min_depth,
@@ -2280,19 +2505,49 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
                 min_baseq=config.min_baseq,
                 max_region=SCAN_VARIANTS_MAX_REGION,
                 index_filename=index_path,
+                min_alt_count=min_alt_count,
             ),
             timeout=SCAN_VARIANTS_TIMEOUT_SECONDS,
         )
-    except asyncio.TimeoutError as e:
-        raise ToolInputError(
-            f"Scan of {contig} timed out after {SCAN_VARIANTS_TIMEOUT_SECONDS:g}s; "
-            "use get_variants on a narrower region."
-        ) from e
+    except asyncio.TimeoutError:
+        # A single chunk hung past the soft deadline: tell the worker to stop at its next
+        # check and answer with what is already complete.
+        progress.stop.set()
+        hard_timeout = True
     except ValueError as e:
         # Unknown contig: an error, never a silent empty "no variants" result.
         raise ToolInputError(str(e)) from e
 
-    variants = scan.variants
+    with progress.lock:
+        all_variants = list(progress.variants)
+        scanned_end = progress.scanned_end
+        scan_end = progress.scan_end
+        contig_length = progress.contig_length
+        deadline_hit = progress.deadline_hit
+
+    if contig_length is None:
+        # Never got as far as the header: there is no partial result to give.
+        raise ToolInputError(
+            f"Scan of {contig} timed out after {SCAN_VARIANTS_TIMEOUT_SECONDS:g}s before any "
+            "data was read; retry (the first call to a remote file is the slowest) or use "
+            "get_variants on a narrower region."
+        )
+
+    truncated = hard_timeout or deadline_hit or scanned_end < scan_end
+    truncation_reason = None
+    if truncated:
+        budget = SCAN_VARIANTS_TIMEOUT_SECONDS if hard_timeout else SCAN_VARIANTS_DEADLINE_SECONDS
+        truncation_reason = (
+            f"time budget of {budget:g}s reached after scanning {scanned_end:,} of "
+            f"{scan_end:,} bp; candidates beyond scanned_region were NOT examined — use "
+            "get_variants (or scan again) on the unscanned remainder"
+        )
+
+    all_variants.sort(key=lambda v: v["vaf"], reverse=True)
+    variants = all_variants[:SCAN_VARIANTS_MAX_RESULTS]
+    # 1-based inclusive; None when not a single chunk completed.
+    scanned_region = format_region(contig, 0, scanned_end) if scanned_end > 0 else None
+
     filters = _applied_filters(config, args, include_max_reads=False)
     # Self-describing scope: what was scanned, and what this scan cannot see.
     filters.update(
@@ -2301,35 +2556,38 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
             "indel_detection": False,
             "indel_detection_note": "scan_variants is SNV-only; use get_variants on a "
             "smaller region to detect indels",
-            "scanned_region": format_region(contig, scan.scanned_start, scan.scanned_end),
-            "contig_length": scan.contig_length,
-            "truncated_by_max_region": scan.truncated_by_max_region,
+            "scanned_region": scanned_region,
+            "contig_length": contig_length,
+            "truncated_by_max_region": scan_end < contig_length,
             "max_region": SCAN_VARIANTS_MAX_REGION,
-            "total_candidates": scan.total_candidates,
-            "results_capped": scan.results_capped,
+            "truncated_by_deadline": truncated,
+            "total_candidates": len(all_variants),
+            "results_capped": len(all_variants) > SCAN_VARIANTS_MAX_RESULTS,
             "max_results": SCAN_VARIANTS_MAX_RESULTS,
         }
     )
+    if min_alt_count is not None:
+        filters.setdefault("min_alt_count", min_alt_count)
 
-    return {
-        "content": [
-            {
-                "type": "text",
-                "text": json.dumps(
-                    {
-                        "contig": contig,
-                        "variants": [_one_based(v) for v in variants],
-                        "count": len(variants),
-                        "coordinate_system": _LLM_COORDINATE_SYSTEM,
-                        "variant_type": "candidate",
-                        "applied_filters": filters,
-                        "filter_note": _FILTER_ABSENCE_NOTE,
-                        "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
-                    }
-                ),
-            }
-        ]
+    payload: dict[str, Any] = {
+        "contig": contig,
+        "variants": [_one_based(v) for v in variants],
+        "count": len(variants),
+        "truncated": truncated,
+        "scanned_region": scanned_region,
     }
+    if truncation_reason:
+        payload["truncation_reason"] = truncation_reason
+    payload.update(
+        {
+            "coordinate_system": _LLM_COORDINATE_SYSTEM,
+            "variant_type": "candidate",
+            "applied_filters": filters,
+            "filter_note": _FILTER_ABSENCE_NOTE,
+            "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
+        }
+    )
+    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
 
 
 @telemetry_wrapper("cleanup_cache")

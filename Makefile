@@ -88,7 +88,6 @@ eval-compare:
 # `--provider mock` runs the whole pipeline offline. See EVAL_RESULTS.md.
 eval-matrix:
 	python scripts/run_comparison.py --provider anthropic \
-		--models claude-opus-4-8 claude-sonnet-4-5 \
 		--results-md EVAL_RESULTS.md
 
 eval-matrix-mock:

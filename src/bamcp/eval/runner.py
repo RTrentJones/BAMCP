@@ -22,7 +22,15 @@ from typing import Any
 
 from ..middleware import telemetry
 from .grader import collect_rubric_payloads, grade_case, judge_with_llm
-from .providers import LLMProvider, ToolCall, ToolDescriptor, build_tool_result_content
+from .providers import (
+    VISION_IMAGE_ONLY,
+    VISION_MODES,
+    VISION_OFF,
+    LLMProvider,
+    ToolCall,
+    ToolDescriptor,
+    build_tool_result_content,
+)
 from .router import ToolRouter, tool_descriptors
 from .schema import EvalCase, EvalResult, GraderVerdict
 
@@ -103,6 +111,7 @@ async def _run_tool_loop(
     initial_user: str,
     *,
     vision_ctx: _VisionContext | None = None,
+    image_only: bool = False,
 ) -> tuple[str, list[tuple[str, str]], list[str], bool]:
     """Drive a single conversation through up to MAX_TURNS rounds.
 
@@ -148,7 +157,14 @@ async def _run_tool_loop(
                     screenshots.append(vision_ctx.last_path)
 
             payload_text = outcome.text or (outcome.error or "")
-            content = build_tool_result_content(payload_text, image_bytes, provider.kind)
+            # image-only withholds the text of UI tools (the render is the result); tools
+            # without a UI payload (lookups, coverage stats) still return their text.
+            content = build_tool_result_content(
+                payload_text,
+                image_bytes,
+                provider.kind,
+                image_only=image_only and vision_ctx is not None and outcome.ui_payload is not None,
+            )
             user_content.append(
                 {
                     "type": "tool_result",
@@ -182,6 +198,15 @@ def _assistant_content_blocks(text: str, tool_calls: list[ToolCall]) -> list[dic
     return blocks
 
 
+def _resolve_vision_mode(no_vision: bool, vision_mode: str | None) -> str:
+    """``vision_mode`` wins when given; otherwise the legacy ``no_vision`` flag decides."""
+    if vision_mode is None:
+        return VISION_OFF if no_vision else "text+image"
+    if vision_mode not in VISION_MODES:
+        raise ValueError(f"vision_mode must be one of {VISION_MODES}, got {vision_mode!r}")
+    return vision_mode
+
+
 def _vision_available(provider: LLMProvider, no_vision: bool) -> bool:
     """Whether visual capture is on for this run."""
     if no_vision:
@@ -207,8 +232,14 @@ async def run_case(
     no_vision: bool = False,
     screenshot_dir: Path | None = None,
     grade_tools: bool = True,
+    vision_mode: str | None = None,
 ) -> EvalResult:
-    """Run one case to completion and grade it."""
+    """Run one case to completion and grade it.
+
+    ``vision_mode`` (``off`` / ``text+image`` / ``image-only``) supersedes ``no_vision``.
+    """
+    vision_mode = _resolve_vision_mode(no_vision, vision_mode)
+    no_vision = vision_mode == VISION_OFF
     case_slug = case.name.replace(" ", "_").replace("/", "_").replace(":", "_").replace(">", "_")
     suffix = f"__{rendering_mode}" if rendering_mode else ""
 
@@ -264,7 +295,12 @@ async def run_case(
             async with renderer:
                 vision_ctx = _VisionContext(renderer, shot_dir, case_slug, rendering_mode or "")
                 final_text, tool_results, screenshots, completed = await _run_tool_loop(
-                    provider, router, tools, user_message, vision_ctx=vision_ctx
+                    provider,
+                    router,
+                    tools,
+                    user_message,
+                    vision_ctx=vision_ctx,
+                    image_only=vision_mode == VISION_IMAGE_ONLY,
                 )
         else:
             final_text, tool_results, screenshots, completed = await _run_tool_loop(
@@ -335,14 +371,20 @@ async def run_cases(
     no_vision: bool = False,
     screenshot_dir: Path | None = None,
     grade_tools: bool = True,
+    vision_mode: str | None = None,
+    rendering_mode: str | None = None,
 ) -> list[EvalResult]:
-    """Run a sequence of cases. Returns one result per (case, rendering_mode)."""
+    """Run a sequence of cases. Returns one result per (case, rendering_mode).
+
+    ``rendering_mode`` is the single display mode used when not comparing modes (vision
+    needs one to be active); ``vision_mode`` is passed through to :func:`run_case`.
+    """
     results: list[EvalResult] = []
     for case in cases:
         modes: list[str | None] = (
             list(case.rendering_modes)
             if (with_rendering_comparison and case.rendering_modes)
-            else [None]
+            else [rendering_mode]
         )
         for mode in modes:
             results.append(
@@ -356,6 +398,7 @@ async def run_cases(
                     no_vision=no_vision,
                     screenshot_dir=screenshot_dir,
                     grade_tools=grade_tools,
+                    vision_mode=vision_mode,
                 )
             )
     return results

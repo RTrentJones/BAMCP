@@ -28,6 +28,8 @@ from .core.tools import (
     handle_search_gene,
     handle_visualize_region,
 )
+from .demos import resolve_demo_alias
+from .prompts import SERVER_INSTRUCTIONS, register_demo_surface
 from .resources import get_viewer_html
 from .tool_specs import AUTO_REFERENCE_NOTE, DETECTION_DEFAULTS_NOTE, REGION_FORMAT_NOTE
 
@@ -62,6 +64,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     kwargs: dict = {
         "name": "bamcp",
+        "instructions": SERVER_INSTRUCTIONS,
         "host": config.host,
         "port": config.port,
     }
@@ -93,7 +96,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         result (isError=true) with a sanitized message — never raw pysam/OS text that could
         carry operator paths (see core/errors.py)."""
         try:
-            return await handler(args, config)
+            return await handler(resolve_demo_alias(args), config)
         except Exception as e:  # noqa: BLE001 — every failure goes through the sanitizer
             raise sanitize_tool_exception(e, tool, config) from e
 
@@ -419,6 +422,8 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     )
     def viewer() -> str:
         return get_viewer_html()
+
+    register_demo_surface(mcp)
 
     # -- Deploy identity -----------------------------------------------------
     # Greenlight's verify gate compares the commit the image was built from (GREENLIGHT_SHA, baked

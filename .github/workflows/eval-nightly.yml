@@ -53,7 +53,8 @@ jobs:
 
   llm-eval:
     # Optional: only runs when ANTHROPIC_API_KEY is present in repo secrets, so
-    # forks and key-less setups skip it cleanly instead of failing.
+    # forks and key-less setups skip it instead of failing. A skip is never silent:
+    # it emits a ::warning:: annotation and an "LLM eval SKIPPED" step summary.
     runs-on: ubuntu-latest
     needs: [ground-truth]
     steps:
@@ -69,6 +70,7 @@ jobs:
           PROVIDER: ${{ github.event.inputs.provider || 'anthropic' }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
+          reason=""
           case "$PROVIDER" in
             mock) available=true ;;
             openai)
@@ -78,12 +80,29 @@ jobs:
               # specific message translation in the runner (deferred, Phase 3b). Skip rather than
               # advertise a broken path.
               available=false
-              echo "OpenAI eval is gated until the runner does provider-specific message translation (Phase 3b)."
+              reason="provider 'openai' is gated until the runner does provider-specific message translation (Phase 3b)"
               ;;
-            *) [ -n "$ANTHROPIC_API_KEY" ] && available=true || available=false ;;
+            *)
+              if [ -n "$ANTHROPIC_API_KEY" ]; then
+                available=true
+              else
+                available=false
+                reason="ANTHROPIC_API_KEY secret is not configured for this repository"
+              fi
+              ;;
           esac
           echo "available=$available" >> "$GITHUB_OUTPUT"
-          [ "$available" = "true" ] || echo "Provider '$PROVIDER' not runnable here — skipping LLM eval."
+          if [ "$available" != "true" ]; then
+            # Surface the skip: a silently-skipped LLM job used to look like a green eval.
+            echo "::warning title=LLM eval skipped::LLM eval SKIPPED: $reason. Only the deterministic ground-truth gate ran."
+            {
+              echo "## LLM eval SKIPPED"
+              echo ""
+              echo "**Reason:** $reason (provider: \`$PROVIDER\`)."
+              echo ""
+              echo "Only the deterministic ground-truth gate ran; no model was evaluated in this run."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - if: steps.key.outputs.available == 'true'
         run: make install && pip install -e ".[eval]"
       - if: steps.key.outputs.available == 'true'
@@ -109,7 +128,6 @@ jobs:
         run: |
           python scripts/run_comparison.py \
             --provider "${{ github.event.inputs.provider || 'anthropic' }}" \
-            --models claude-opus-4-8 claude-sonnet-4-5 \
             --output-dir .eval-results/comparison
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.key.outputs.available == 'true'

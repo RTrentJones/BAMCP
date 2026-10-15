@@ -21,6 +21,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from . import models
+
 
 @dataclass
 class ToolDescriptor:
@@ -131,17 +133,19 @@ def make_one_shot_mock(
 
 
 # Per-provider default model ids (single source of truth for construction + run records).
-DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7"
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+# The IDs themselves live in models.py.
+DEFAULT_ANTHROPIC_MODEL = models.DEFAULT_SUBJECT_MODEL
+DEFAULT_OPENAI_MODEL = models.OPENAI_DEFAULT
 
 
 # The LLM judge is FIXED and SEPARATE from the model under test: a model grading its own
 # answers inflates its score, and a judge that changes with the subject makes runs
-# incomparable. Default: Anthropic claude-haiku-5-5 (no eval subject in this repo uses it),
-# at temperature 0. Override with --judge-provider / --judge-model; a judge identical to
-# the model under test is refused (see resolve_judge).
-DEFAULT_JUDGE_PROVIDER = "anthropic"
-DEFAULT_JUDGE_MODEL = "claude-haiku-5-5"
+# incomparable. Default: models.JUDGE_MODEL (no comparison subject uses it), at
+# temperature 0 where the model accepts sampling parameters. Override with
+# --judge-provider / --judge-model; a judge identical to the model under test is refused
+# (see resolve_judge).
+DEFAULT_JUDGE_PROVIDER = models.JUDGE_PROVIDER
+DEFAULT_JUDGE_MODEL = models.JUDGE_MODEL
 JUDGE_TEMPERATURE = 0.0
 
 
@@ -169,7 +173,10 @@ def resolve_judge(
 
 
 def build_judge_provider(provider: str, model: str) -> LLMProvider:
-    """Construct the judge: the given provider/model at temperature 0 (deterministic)."""
+    """Construct the judge: the given provider/model at temperature 0 (deterministic).
+
+    For models that reject sampling parameters the provider drops the temperature.
+    """
     return get_provider(provider, model, temperature=JUDGE_TEMPERATURE)
 
 
@@ -186,13 +193,14 @@ class AnthropicProvider:
     """Anthropic Claude provider using the tool-use API."""
 
     kind: str = "anthropic"
-    # All current claude-opus-4-* and claude-sonnet-4-* models accept vision.
+    # Every model in models.py accepts image content blocks.
     vision_capable: bool = True
 
     def __init__(
         self,
         model: str = DEFAULT_ANTHROPIC_MODEL,
-        max_tokens: int = 4096,
+        # Current models think by default and thinking spends output tokens; 4096 truncated.
+        max_tokens: int = 16000,
         temperature: float | None = None,
     ) -> None:
         try:
@@ -218,7 +226,8 @@ class AnthropicProvider:
             for t in tools
         ]
         extra: dict[str, Any] = {}
-        if self.temperature is not None:
+        # The 5.x family rejects explicit sampling params with a 400 — omit, don't send.
+        if self.temperature is not None and models.accepts_sampling_params(self.model):
             extra["temperature"] = self.temperature
         resp = await client.messages.create(
             model=self.model,
@@ -248,7 +257,7 @@ class OpenAIProvider:
     """OpenAI Responses API tool-calling provider."""
 
     kind: str = "openai"
-    # gpt-4o family accepts image content blocks.
+    # The OpenAI default (models.OPENAI_DEFAULT) accepts image content blocks.
     vision_capable: bool = True
 
     def __init__(
@@ -336,10 +345,28 @@ def get_provider(
 # -----------------------------------------------------------------------------
 
 
+# How a UI tool's render reaches the model under test:
+#   off         — text only (no render)
+#   text+image  — the tool's text result plus the viewer PNG
+#   image-only  — just the viewer PNG; the tool's text is withheld (the visual arm)
+VISION_OFF = "off"
+VISION_TEXT_IMAGE = "text+image"
+VISION_IMAGE_ONLY = "image-only"
+VISION_MODES = (VISION_OFF, VISION_TEXT_IMAGE, VISION_IMAGE_ONLY)
+
+# Sent in place of the withheld text when an image-only render could not be produced, so
+# the visual arm never silently falls back to the text it is meant to exclude.
+IMAGE_UNAVAILABLE_TEXT = "[viewer render unavailable; tool text withheld in image-only mode]"
+# What a non-vision (mock) provider sees for an image-only result.
+IMAGE_ONLY_PLACEHOLDER = "[viewer image]"
+
+
 def build_tool_result_content(
     text: str,
     image_bytes: bytes | None,
     provider_kind: str,
+    *,
+    image_only: bool = False,
 ) -> Any:
     """Build the right content-block shape for a tool_result, per provider.
 
@@ -352,33 +379,36 @@ def build_tool_result_content(
 
     When ``image_bytes`` is None or the provider doesn't support vision, the
     return value is the original ``text`` string.
+
+    ``image_only=True`` (the ``image-only`` vision mode) withholds ``text``: the result is
+    the image block alone, or :data:`IMAGE_UNAVAILABLE_TEXT` when there is no image —
+    never the tool text the visual arm is meant to exclude.
     """
     if image_bytes is None:
-        return text
+        return IMAGE_UNAVAILABLE_TEXT if image_only else text
 
     import base64
 
     encoded = base64.b64encode(image_bytes).decode("ascii")
 
+    image_block: dict[str, Any]
     if provider_kind == "anthropic":
-        return [
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": encoded,
-                },
+        image_block = {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": encoded,
             },
-            {"type": "text", "text": text},
-        ]
-    if provider_kind == "openai":
-        return [
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{encoded}"},
-            },
-            {"type": "text", "text": text},
-        ]
-    # Mock / unknown: fall back to plain text.
-    return text
+        }
+    elif provider_kind == "openai":
+        image_block = {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{encoded}"},
+        }
+    else:
+        # Mock / unknown: no image support — plain text (or a placeholder in image-only).
+        return IMAGE_ONLY_PLACEHOLDER if image_only else text
+    if image_only:
+        return [image_block]
+    return [image_block, {"type": "text", "text": text}]

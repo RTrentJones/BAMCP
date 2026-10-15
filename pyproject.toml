@@ -61,6 +61,8 @@ eval = [
     "jinja2>=3.1",
     # Headless rendering for visual eval + the developer feedback loop.
     "playwright>=1.40",
+    # Charts for the visual-vs-text eval grader (bamcp.eval.visual.charts).
+    "matplotlib>=3.8",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -118,6 +120,8 @@ module = [
     "openai.*",
     "opentelemetry",
     "opentelemetry.*",
+    "matplotlib",
+    "matplotlib.*",
 ]
 ignore_missing_imports = true
 

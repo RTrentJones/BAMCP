@@ -63,16 +63,22 @@ FILE_DESCRIPTIONS = {
 
 VIEWER_KEY = """\
 Viewer key (screenshots; describes the BAMCP viewer as rendered at build time): top to
-bottom — coordinate ruler (1-based), reference sequence (coloured base tiles), per-base
-coverage track (the dashed line marks 10x), then one row per read, reads packed into rows.
-Reads aligned forward are blue, reads aligned in reverse are red; the pointed end shows the
-alignment direction. Reads with lower mapping quality are drawn paler; reads with mapping
-quality 0 are drawn as outlined, nearly transparent boxes. At the wide zoom, read bases that
-differ from the reference are drawn as coloured ticks (A green, C blue, G orange, T red)
-and matching bases are not marked. At base-level zoom every read base is drawn as a coloured
-letter tile (same colours) with a blue/red bar under the read for its orientation, so
-compare the rows with the reference row to spot differences. A deletion is a gap in the read
-bridged by a thin black line; an insertion is a purple vertical mark between two bases.
+bottom — coordinate ruler (1-based), reference sequence (coloured base tiles: A green,
+C blue, G orange, T red), per-base coverage track (the dashed line marks 10x), then one row
+per read, reads packed into rows. Every read is a light-grey bar whatever its strand; the
+strand is shown only by a coloured stripe along the read's bottom edge and its coloured
+pointed end: blue = aligned forward (points right), red = aligned in reverse (points left).
+Reads with lower mapping quality are drawn paler (faded toward white); reads with mapping
+quality 0 are white boxes with a dashed grey outline. At the wide zoom, read bases that
+differ from the reference are vertical ticks in the read base's colour (A green, C blue,
+G orange, T red, N dark grey) and matching bases are not marked. At base-level zoom every
+read base is a lettered tile: bases that match the reference are grey tiles with dark
+letters, bases that differ are tiles in the base's colour with white letters, so a
+differing base stands out from the grey. Base quality: a differing base with base quality
+below 20 is drawn hollow (a pale centre inside a border of the base's colour; at base zoom
+its letter is also in the base's colour), while base quality 20 or above is drawn solid.
+Tick and tile colours are not faded by mapping quality. A deletion is a gap in the read
+bridged by a thin dark line; an insertion is a purple vertical mark between two bases.
 Soft-clipped bases are not shown."""
 
 

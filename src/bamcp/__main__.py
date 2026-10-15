@@ -87,6 +87,12 @@ def main() -> None:
         _add_http_middleware(app, config)
 
         async def _serve() -> None:
+            from .core.prewarm import start_prewarm
+
+            # Best-effort background warm-up of the demo datasets; never blocks readiness and
+            # never raises (HTTP only — stdio never reaches this branch). Keep a reference so
+            # the task isn't garbage-collected mid-flight.
+            prewarm_task = start_prewarm(config)  # noqa: F841
             uvi_config = uvicorn.Config(
                 app,
                 host=config.host,

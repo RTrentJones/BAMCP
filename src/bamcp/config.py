@@ -180,6 +180,10 @@ class BAMCPConfig:
     telemetry_path: str = ""  # JSONL file path; empty disables file output
     telemetry_otel_enabled: bool = False
 
+    # Startup prewarm (HTTP transports only): fetch the demo datasets' indexes/headers and open
+    # their reference .fai in the background so the first demo call isn't a cold start.
+    prewarm: bool = True
+
     def __post_init__(self) -> None:
         """Validate config values and set defaults."""
         # Set default cache_dir if not provided
@@ -323,4 +327,5 @@ class BAMCPConfig:
             telemetry_enabled=_env_bool("BAMCP_TELEMETRY_ENABLED", False),
             telemetry_path=env.get("BAMCP_TELEMETRY_PATH", ""),
             telemetry_otel_enabled=_env_bool("BAMCP_TELEMETRY_OTEL", False),
+            prewarm=_env_bool("BAMCP_PREWARM", True),
         )

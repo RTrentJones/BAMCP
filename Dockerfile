@@ -8,7 +8,7 @@
 # ---------------------------------------------------------------------------
 # Base images are pinned by multi-arch index digest (amd64 + arm64) so a rebuild of the same
 # commit gets the same base; Dependabot (docker ecosystem) bumps the digests.
-FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS frontend
+FROM node:26-slim@sha256:193fe51b64e77981119c98c2002c9e32a70e2f006fb4d25068ce0558998917f0 AS frontend
 
 WORKDIR /frontend
 COPY src/bamcp/static/package.json src/bamcp/static/package-lock.json* ./

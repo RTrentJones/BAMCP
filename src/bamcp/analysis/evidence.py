@@ -30,6 +30,9 @@ from ..constants import (
 )
 from ..core.parsers import AlignedRead
 
+# Mean alt-base quality below this is a low_base_quality concern (Phred 20 = 1% error).
+ARTIFACT_LOW_BASEQ_THRESHOLD = LOW_CONFIDENCE_MIN_MEAN_QUALITY
+
 
 def get_query_position(read: AlignedRead, ref_pos: int) -> int | None:
     """Get the query (read) position corresponding to a reference position.
@@ -489,6 +492,25 @@ def compute_artifact_risk(
         )
         risk_score += 0.4 if severity == "high" else 0.2
 
+    # 2b. Low base quality: the alt bases themselves are low-confidence calls. Only when
+    # qualities were actually observed (an empty histogram means "unknown", not "Q0").
+    quality_observed = sum(evidence.get("quality_histogram") or []) > 0
+    mean_quality = float(evidence.get("mean_quality") or 0)
+    low_baseq = computed and quality_observed and mean_quality < ARTIFACT_LOW_BASEQ_THRESHOLD
+    if low_baseq:
+        risks.append(
+            {
+                "type": "low_base_quality",
+                "severity": "medium",
+                "description": (
+                    f"Low mean alt base quality (Q{mean_quality:.1f} < "
+                    f"Q{ARTIFACT_LOW_BASEQ_THRESHOLD})"
+                ),
+                "value": round(mean_quality, 1),
+            }
+        )
+        risk_score += 0.3
+
     # 3. Low MAPQ fraction
     mapq_hist = evidence.get("mapq_histogram", [])
     if mapq_hist:
@@ -540,6 +562,11 @@ def compute_artifact_risk(
             }
         )
         risk_score += 0.3 if severity == "high" else 0.15
+
+    # Low-quality alt bases that all sit on one strand is the classic sequencing-error
+    # signature (e.g. Q8 support, 11F/0R): never less than HIGH, whatever else scored.
+    if low_baseq and any(r["type"] == "strand_bias" for r in risks):
+        risk_score = max(risk_score, 0.6)
 
     # Cap risk score at 1.0
     risk_score = min(risk_score, 1.0)
@@ -757,3 +784,82 @@ def enhance_variants_with_evidence(
         enhanced_variants.append(enhanced)
 
     return enhanced_variants, variant_evidence
+
+
+# ---------------------------------------------------------------------------
+# Plain-language interpretation
+# ---------------------------------------------------------------------------
+
+# Germline zygosity bands on VAF. Deliberately wide: allelic imbalance, mapping bias and
+# sampling at modest depth all move a real het well off 0.5.
+_HOM_ALT_MIN_VAF = 0.85
+_HET_MIN_VAF = 0.30
+_HET_MAX_VAF = 0.70
+
+
+def zygosity_hint(vaf: float | None) -> str | None:
+    """A germline zygosity hint from VAF — a hint, not a genotype call."""
+    if not isinstance(vaf, (int, float)):
+        return None
+    if vaf >= _HOM_ALT_MIN_VAF:
+        return "consistent with homozygous alt"
+    if _HET_MIN_VAF <= vaf <= _HET_MAX_VAF:
+        return "consistent with heterozygous"
+    if vaf > _HET_MAX_VAF:
+        return "between het and hom-alt (possible allelic imbalance)"
+    return "below the germline het range (subclonal/mosaic, or an artifact)"
+
+
+def variant_concerns(variant: dict) -> list[str]:
+    """Artifact-risk types flagged for a variant, as a short list (empty when none)."""
+    risk = variant.get("artifact_risk")
+    if not isinstance(risk, dict):
+        return []
+    return [str(r.get("type")) for r in risk.get("risks") or [] if r.get("type")]
+
+
+def interpret_variant(variant: dict, *, one_based: bool = True) -> str:
+    """One plain-language sentence for a candidate/VCF variant.
+
+    Says what was seen (alt reads / depth / VAF), a zygosity hint, the artifact risk with
+    its concerns, and the confidence — so a newcomer can read a call without a glossary.
+    ``position`` is printed as given when ``one_based`` (tool-boundary dicts), else +1.
+    """
+    pos = variant.get("position", 0) + (0 if one_based else 1)
+    label = (
+        f"{variant.get('contig', '?')}:{pos} {variant.get('ref', '?')}>{variant.get('alt', '?')}"
+    )
+    if variant.get("variant_kind") == "sv":
+        return f"{label}: structural variant from the VCF; BAMCP does not assess SV evidence."
+    vaf = variant.get("vaf")
+    depth = variant.get("depth")
+    alt = variant.get("alt_count")
+    parts: list[str] = []
+    if isinstance(vaf, (int, float)) and depth:
+        seen = f"{alt}/{depth} reads" if alt is not None else f"depth {depth}"
+        parts.append(f"{seen} (VAF {vaf:.0%})")
+        hint = zygosity_hint(vaf)
+        if hint:
+            parts.append(hint)
+    risk = variant.get("artifact_risk")
+    if isinstance(risk, dict):
+        likelihood = risk.get("artifact_likelihood", "unknown")
+        concerns = [str(r.get("description") or r.get("type")) for r in risk.get("risks") or []]
+        risk_text = f"artifact risk {likelihood}"
+        if concerns:
+            risk_text += " (" + "; ".join(concerns) + ")"
+        parts.append(risk_text)
+    else:
+        parts.append("read-level artifact evidence not assessed")
+    if variant.get("confidence"):
+        parts.append(f"confidence {variant['confidence']}")
+    source = "from your VCF" if variant.get("source") == "vcf" else "BAMCP candidate"
+    return f"{label} ({source}): " + "; ".join(parts) + "."
+
+
+def annotate_interpretation(variant: dict, *, one_based: bool = True) -> dict:
+    """Return a copy of ``variant`` with ``concerns`` and ``interpretation`` attached."""
+    out = dict(variant)
+    out["concerns"] = variant_concerns(variant)
+    out["interpretation"] = interpret_variant(variant, one_based=one_based)
+    return out

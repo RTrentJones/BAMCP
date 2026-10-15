@@ -29,7 +29,7 @@ from .core.tools import (
     handle_visualize_region,
 )
 from .resources import get_viewer_html
-from .tool_specs import REGION_FORMAT_NOTE
+from .tool_specs import AUTO_REFERENCE_NOTE, DETECTION_DEFAULTS_NOTE, REGION_FORMAT_NOTE
 
 _VIEWER_URI = "ui://bamcp/viewer"
 _VIEWER_META: dict = {"ui": {"resourceUri": _VIEWER_URI}}
@@ -106,6 +106,11 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         description=(
             "Detect and return candidate variants in a genomic region. "
             + REGION_FORMAT_NOTE
+            + " Each variant carries artifact_risk, confidence, concerns and a plain-language "
+            "interpretation (with a zygosity hint). "
+            + DETECTION_DEFAULTS_NOTE
+            + " "
+            + AUTO_REFERENCE_NOTE
             + " variant_source: 'auto' (BAMCP candidates, VCF overlaid if given), "
             "'vcf' (the VCF is authoritative — BAMCP attaches read-level evidence at "
             "each site; requires vcf_path), or 'bamcp' (BAMCP candidates only)."
@@ -119,6 +124,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         variant_source: str = "auto",
         min_vaf: float | None = None,
         min_depth: int | None = None,
+        min_alt_count: int | None = None,
     ) -> str:
         args = _args(
             file_path=file_path,
@@ -128,6 +134,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             variant_source=variant_source,
             min_vaf=min_vaf,
             min_depth=min_depth,
+            min_alt_count=min_alt_count,
         )
         return _text(await _run("get_variants", handle_get_variants, args))
 
@@ -144,16 +151,18 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     @mcp.tool(
         description=(
-            "List chromosomes/contigs in a BAM/CRAM file and detect genome build. "
-            "Use this first on new BAM files to determine whether reference is GRCh37 or GRCh38. "
-            "Returns detected build, confidence, and suggested public reference URL if available."
+            "Detect a BAM/CRAM's genome build (GRCh37 vs GRCh38) and contig naming style, and "
+            "list its primary chromosomes. Use this first on new BAM files. The summary (build, "
+            "style, suggested public reference URL, contig counts) comes first; alt/decoy/HLA/"
+            "unplaced contigs are counted, not listed, unless include_all=true."
         ),
     )
     async def list_contigs(
         file_path: str,
         reference: str | None = None,
+        include_all: bool = False,
     ) -> str:
-        args = _args(file_path=file_path, reference=reference)
+        args = _args(file_path=file_path, reference=reference, include_all=include_all)
         return _text(await _run("list_contigs", handle_list_contigs, args))
 
     @mcp.tool(
@@ -212,7 +221,8 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     @mcp.tool(
         description=(
             "Get a text summary of a genomic region "
-            "(read count, coverage, candidate variants) for LLM reasoning. " + REGION_FORMAT_NOTE
+            "(read count, coverage, candidate variants each with a plain-language "
+            "interpretation) for LLM reasoning. " + REGION_FORMAT_NOTE + " " + AUTO_REFERENCE_NOTE
         ),
     )
     async def get_region_summary(
@@ -221,6 +231,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         reference: str | None = None,
         vcf_path: str | None = None,
         variant_source: str = "auto",
+        min_alt_count: int | None = None,
     ) -> str:
         args = _args(
             file_path=file_path,
@@ -228,6 +239,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             reference=reference,
             vcf_path=vcf_path,
             variant_source=variant_source,
+            min_alt_count=min_alt_count,
         )
         return _text(await _run("get_region_summary", handle_get_region_summary, args))
 
@@ -363,9 +375,9 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     @mcp.tool(
         description=(
             "Scan an entire contig for candidate variants using fast coverage-based detection. "
-            "Requires a reference genome. Returns up to 500 candidate variants ranked by VAF. "
-            "If contig is omitted, the BAM's first contig is scanned. "
-            "Use list_contigs first to detect genome build and get a reference URL."
+            "Requires a reference genome (" + AUTO_REFERENCE_NOTE + ") Returns up to 500 "
+            "candidate variants ranked by VAF. If contig is omitted, the BAM's first contig is "
+            "scanned. " + DETECTION_DEFAULTS_NOTE
         ),
     )
     async def scan_variants(
@@ -374,6 +386,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         reference: str | None = None,
         min_vaf: float | None = None,
         min_depth: int | None = None,
+        min_alt_count: int | None = None,
     ) -> str:
         args = _args(
             file_path=file_path,
@@ -381,6 +394,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             reference=reference,
             min_vaf=min_vaf,
             min_depth=min_depth,
+            min_alt_count=min_alt_count,
         )
         return _text(await _run("scan_variants", handle_scan_variants, args))
 

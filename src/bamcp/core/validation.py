@@ -166,7 +166,12 @@ def validate_remote_url(url: str, config: BAMCPConfig) -> None:
     if config.allowed_remote_hosts:
         allowed_hosts = {h.lower() for h in config.allowed_remote_hosts}
         if hostname.lower() not in allowed_hosts:
-            raise ValueError(f"Host '{hostname}' is not in the allowed remote hosts list")
+            # The allow-list is public policy on an open demo (it names public genomics
+            # hosts, never credentials), so naming it tells the caller what WILL work.
+            raise ValueError(
+                f"Host '{hostname}' is not in the allowed remote hosts list. Allowed hosts: "
+                + ", ".join(sorted(allowed_hosts))
+            )
 
     # Resolve hostname to IP addresses and check each one
     try:

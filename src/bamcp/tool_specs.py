@@ -36,6 +36,22 @@ REGION_FORMAT_NOTE = (
 )
 _REGION = {**_STR, "description": "1-based inclusive, samtools-style, e.g. chr1:1000-2000"}
 
+# Reference resolution shared by the variant tools (see core/tools._resolve_reference_info).
+AUTO_REFERENCE_NOTE = (
+    "If reference is omitted, a public FASTA matching the BAM's detected build and contig "
+    "naming is used automatically when available (applied_filters.reference_source says "
+    "explicit/config/auto/none)."
+)
+# The detection operating point (constants.DEFAULT_MIN_*), loosenable per call.
+DETECTION_DEFAULTS_NOTE = (
+    "Defaults: min_vaf 0.10, min_alt_count 3 alt reads, MAPQ>=20, base quality>=13; all "
+    "echoed in applied_filters. Lower min_vaf/min_alt_count to see weaker candidates."
+)
+_MIN_ALT_COUNT = {
+    **_INT,
+    "description": "Minimum alt-supporting reads for a BAMCP candidate (default 3)",
+}
+
 
 def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
     return {
@@ -52,7 +68,8 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         "1-based (VCF/dbSNP convention); "
         + REGION_FORMAT_NOTE
         + " Each variant carries strand counts, mean base "
-        "quality, artifact-risk assessment, and a confidence level.",
+        "quality, artifact-risk assessment, a confidence level, concerns, and a plain-language "
+        "interpretation with a zygosity hint. " + DETECTION_DEFAULTS_NOTE,
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -62,6 +79,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "variant_source": _VARIANT_SOURCE,
                 "min_vaf": _NUM,
                 "min_depth": _INT,
+                "min_alt_count": _MIN_ALT_COUNT,
             },
             ["file_path", "region"],
         ),
@@ -75,10 +93,21 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         ),
     },
     "list_contigs": {
-        "description": "List chromosomes/contigs in a BAM/CRAM file and detect genome build "
-        "(GRCh37 vs GRCh38). Use this first on new BAM files. Returns detected build, "
-        "confidence, and a suggested public reference URL if available.",
-        "input_schema": _obj({"file_path": _STR, "reference": _STR}, ["file_path"]),
+        "description": "Detect a BAM/CRAM's genome build (GRCh37 vs GRCh38) and contig naming "
+        "style, and list its primary chromosomes. Use this first on new BAM files. The summary "
+        "(build, style, suggested public reference URL, contig counts) comes first; alt/decoy/"
+        "HLA/unplaced contigs are counted, not listed, unless include_all=true.",
+        "input_schema": _obj(
+            {
+                "file_path": _STR,
+                "reference": _STR,
+                "include_all": {
+                    "type": "boolean",
+                    "description": "List every contig, not just the primary chromosomes",
+                },
+            },
+            ["file_path"],
+        ),
     },
     "jump_to": {
         "description": "Jump to a specific genomic position and view the surrounding reads in "
@@ -113,8 +142,8 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "get_region_summary": {
         "description": "Get a text summary of a genomic region (read count, coverage, and each "
-        "variant with confidence, artifact risk, and strand balance) for LLM reasoning. No UI. "
-        + REGION_FORMAT_NOTE,
+        "variant with a plain-language interpretation: zygosity hint, artifact risk, confidence) "
+        "for LLM reasoning. No UI. " + REGION_FORMAT_NOTE + " " + AUTO_REFERENCE_NOTE,
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -122,6 +151,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "reference": _STR,
                 "vcf_path": _VCF_PATH,
                 "variant_source": _VARIANT_SOURCE,
+                "min_alt_count": _MIN_ALT_COUNT,
             },
             ["file_path", "region"],
         ),
@@ -168,9 +198,9 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "scan_variants": {
         "description": "Scan an entire contig for variants using fast coverage-based detection. "
-        "Requires a reference genome. Returns up to 500 variants ranked by VAF. If contig is "
-        "omitted, the BAM's first contig is scanned. Use list_contigs first to detect the genome "
-        "build and get a reference URL.",
+        "Requires a reference genome (" + AUTO_REFERENCE_NOTE + ") Returns up to 500 variants "
+        "ranked by VAF. If contig is omitted, the BAM's first contig is scanned. "
+        + DETECTION_DEFAULTS_NOTE,
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -178,6 +208,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "reference": _STR,
                 "min_vaf": _NUM,
                 "min_depth": _INT,
+                "min_alt_count": _MIN_ALT_COUNT,
             },
             ["file_path"],
         ),

@@ -40,7 +40,12 @@ six parallel implementation packages → QA acceptance against real public BAMs 
   p = 0.375). Image-only failures traced to rendering; the legibility fix (neutral read bodies,
   colour only on mismatches, hollow low-BQ tiles) raised image-only accuracy 0.82 → 0.91
   (exploratory, same items).
-- [ ] **Open:** pre-registered confirmation of the fixed viewer on fresh + GIAB items; GRCh37 demo cold latency (~27 s);
+- [x] **Round 3, pre-registered confirmation** (fresh synthetic + real GIAB HG002 tier, 756 runs):
+  all three confirmatory contrasts null after Holm. Raw read text beats the picture alone on
+  both tiers; the picture alone ≈ structured JSON; adding the image to raw text changes nothing.
+  The model keeps getting text evidence; the viewer is for the person.
+- [ ] **Open:** viewer: mark the position of interest / mismatch columns so a hom-alt column
+  cannot be read as reference (round-3 failure mode); GRCh37 demo cold latency (~27 s);
   dependabot python 3.14 / mcp<3 (lockfile + API work); real-data (GIAB) eval tier.
 
 ## Biological correctness (peer-review round) — closed

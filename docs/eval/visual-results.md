@@ -56,3 +56,60 @@ run per cell), several case types have a single item, and text arms are near the
 
 **Next.** A pre-registered test of the fixed viewer on fresh items, including GIAB
 difficult-region sites from real data, with repeats per item.
+
+## Round 3 (pre-registered confirmation) — 756 runs
+
+Pre-registration: [`visual-preregistration-r3.md`](visual-preregistration-r3.md), committed
+(4cb4048) before any run. Fixed viewer (`ae5111b`). Two tiers, analysed separately:
+
+- **S — fresh synthetic:** 36 never-seen items (seed 2, all 18 case types × 2), `Traw`, `Tjson`,
+  `V`; 324 runs.
+- **R — real reads:** 36 sites from the GIAB HG002 60x BAM on chr20, truth from GIAB v4.2.1
+  (26 truth variants, half of them indels or SNVs in repeats; 8 noisy negatives where ≥ 3 reads
+  disagree with a reference call; 2 clean negatives), blinded onto re-indexed contigs; `Traw`,
+  `Tjson`, `V`, `V+Traw`; 432 runs. Site manifest [`data/r3_real_sites.jsonl`](data/r3_real_sites.jsonl).
+
+Audit: 756/756 answered, 1 invalid answer (scored wrong), one rule deviation (a run used Grep on
+its own listed `tjson.json`; not a read outside its files, so kept per the exclusion rule;
+excluding it changes nothing reported below).
+
+| Tier | `Traw` | `Tjson` | `V` | `V+Traw` |
+|------|------:|------:|----:|------:|
+| S (fresh synthetic) | 0.981 | 0.824 | 0.889 | — |
+| R (real HG002) | 0.991 | 0.926 | 0.870 | 0.981 |
+
+**Confirmatory contrasts (Holm over three):**
+
+| | delta | 95% CI | McNemar p | Holm p | |
+|---|---:|---|---:|---:|---|
+| C1 S: `V` vs `Tjson` | +0.065 | −0.019 to +0.148 | 0.167 | 0.50 | not supported |
+| C2 R: `V+Traw` vs `Traw` | −0.009 | −0.028 to 0.000 | 1.0 | 1.0 | not supported |
+| C3 R: `V` vs `Tjson` | −0.056 | −0.139 to +0.019 | 0.210 | 0.50 | not supported |
+
+**Secondary (descriptive):** raw read text beats the picture alone on both tiers (S −0.093,
+CI −0.167 to −0.028, p = 0.006; R −0.120, CI −0.204 to −0.056, p = 0.001), and beats structured
+JSON (S −0.157; R −0.065). Image-only accuracy by model tier: S 0.806 / 0.861 / 1.000,
+R 0.694 / 0.944 / 0.972 (small / mid / large). Among real variants, `V` got zygosity right 85%
+and the allele 80% of the time, against 96% and 99% for `Traw`. Brier: `Traw` 0.042 / 0.034,
+`V+Traw` 0.033 (R), `V` 0.115 / 0.107. Image-only answers stayed overconfident when wrong
+(mean confidence 0.74 on S and 0.69 on R for wrong answers, against 0.78–0.81 for right ones).
+
+Where the picture alone failed on real data: homopolymer insertions read as polymerase stutter
+(one item missed by all three models), and three homozygous SNVs read as "every read matches
+the reference". The blinded reference and render are correct there (a solid column of alt tiles
+in every read), so this is a reading error, plausibly because the reference track is fully
+coloured and a column coloured in every read looks like more reference.
+
+## Conclusion across rounds
+
+- On these items, **a picture of the pileup does not beat the reads as text**. Raw read text is
+  the strongest single input on synthetic and on real data, and adding the image to it neither
+  helps nor hurts measurably (two pre-registered tests, both null at the ceiling).
+- **The picture alone is a usable but weaker channel**: 0.87–0.89 joint accuracy, close to
+  BAMCP's structured JSON and well behind raw text, and overconfident when wrong. The round-2
+  gain from the legibility fix is real in direction (fresh items: `V` 0.889 vs `Tjson` 0.824)
+  but did not reach significance, so it is not confirmed.
+- **Model size matters most for images**: the largest model was near-perfect from pictures
+  (1.000 synthetic, 0.972 real); the smallest was not (0.81, 0.69).
+- For BAMCP this supports the current design: the viewer is for the person; the model should
+  keep getting the read evidence as text.

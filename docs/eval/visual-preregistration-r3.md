@@ -129,3 +129,16 @@ re-run with the identical prompt. No item is dropped after seeing results.
   combined noisy-negative pool was full but one repeat sub-pool was short; the stop rule now
   checks both. (5) The self-test oracle answered the unscored `unknown` type, which is not a
   valid answer value; it now answers `none`. The oracle self-test passes on the real run set.
+- **2026-10-16, after the runs (later review rounds; no effect on the data).** Further
+  selection-code fixes for future seeds: results.csv leaves an unscored `artifact_type` cell
+  empty; a zero quota takes nothing; the scan stops only when each pool holds enough mutually
+  spaced candidates; truth isolation excludes the current record by index, not by start
+  position; only scanned windows count toward `max_windows`; `build-real` takes
+  `--png/--no-png`; and a source read is copied into one item only. Checks on the frozen set:
+  no selected variant shares a POS with another truth record; its closest pair of sites is
+  1,502 bp apart, so no read can reach two items. **Reproduction:** re-running
+  `select-real --seed 3` with the registered code (commit 4cb4048) reproduces
+  `data/r3_real_sites.jsonl` byte for byte (sha256 a3e85c3d…, pools full after 111 windows).
+  The current code selects a different set for seed 3 (pools fill later under the
+  spacing-aware stop rule), as expected after these fixes; the registered set stays the one
+  defined by the registered code.

@@ -36,6 +36,14 @@ class ToolInputError(Exception):
     """
 
 
+class ReferenceUnavailableError(ToolInputError):
+    """A check needed the reference base and none was available (no reference resolved).
+
+    Distinct from a wrong REF: callers that have a safe fallback (e.g. classify reporting
+    the site as not called) may catch this one specifically.
+    """
+
+
 def _config_secrets(config: BAMCPConfig | None) -> list[str]:
     """Operator-sourced strings that must never be echoed to a client."""
     if config is None:

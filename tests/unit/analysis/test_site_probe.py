@@ -138,3 +138,27 @@ async def test_classify_observation_reports_below_filters_with_evidence(tmp_path
     assert obs["artifact_likelihood"] == "high"
     assert {"low_base_quality", "strand_bias"} <= set(obs["artifact_concerns"])
     assert obs["alt_reads_seen"] == 8
+
+
+def _cfg_no_ref() -> BAMCPConfig:
+    return BAMCPConfig(clinvar_enabled=False, gnomad_enabled=False)
+
+
+@pytest.mark.unit
+async def test_curation_refuses_probe_without_reference(tmp_path):
+    """No reference → REF can't be verified, so the site probe is refused, never run blind."""
+    bam, _ = _write(tmp_path, alt_reads=8, alt_qual=6)
+    out = await handle_get_variant_curation_summary(_args(bam, format="rubric"), _cfg_no_ref())
+    doc = json.loads(out["content"][0]["text"])
+    assert "without a reference sequence" in doc["error"]
+    assert "artifact_assessment" not in doc
+
+
+@pytest.mark.unit
+async def test_classify_without_reference_reports_not_called(tmp_path):
+    """Fusion falls back to the calls it has (not detected) instead of probing blind."""
+    bam, _ = _write(tmp_path, alt_reads=8, alt_qual=6)
+    ev = await assemble_evidence("chr1", SITE0 + 1, REF_BASE, ALT_BASE, bam, _cfg_no_ref())
+    obs = ev["observation"]
+    assert obs["detected"] is False
+    assert obs["status"] != "below_filters"

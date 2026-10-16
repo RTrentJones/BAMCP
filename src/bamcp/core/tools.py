@@ -57,7 +57,7 @@ from ..constants import (
 )
 from ..middleware.telemetry import telemetry_wrapper
 from .cache import BAMIndexCache
-from .errors import ToolInputError
+from .errors import ReferenceUnavailableError, ToolInputError
 from .parsers import (
     EXCLUDED_READ_FLAGS,
     MAX_REGION_SIZE,
@@ -1755,14 +1755,20 @@ async def probe_site(
     # every ordinary read into "support" for a variant that doesn't exist. Verify it first.
     ref_seq = data.reference_sequence
     offset = pos0 - data.start
-    if ref_seq and offset >= 0 and offset + len(ref) <= len(ref_seq):
-        actual = ref_seq[offset : offset + len(ref)].upper()
-        if actual != ref.upper():
-            raise ToolInputError(
-                f"REF '{ref}' does not match the reference at {contig}:{pos0 + 1} "
-                f"(the reference has '{actual}'). Check the allele, the position (1-based) "
-                "and the genome build."
-            )
+    if not ref_seq or offset < 0 or offset + len(ref) > len(ref_seq):
+        # Without the reference base the probe can't tell a real ALT from a mistyped REF.
+        raise ReferenceUnavailableError(
+            f"Can't verify REF '{ref}' at {contig}:{pos0 + 1} without a reference sequence, "
+            "so the filter-independent site check was not run. Pass `reference` (or use a "
+            "remote BAM so one is auto-selected)."
+        )
+    actual = ref_seq[offset : offset + len(ref)].upper()
+    if actual != ref.upper():
+        raise ToolInputError(
+            f"REF '{ref}' does not match the reference at {contig}:{pos0 + 1} "
+            f"(the reference has '{actual}'). Check the allele, the position (1-based) "
+            "and the genome build."
+        )
     if len(ref) == 1 == len(alt):
         # Both pileups at once (each is a remote open + seek; they share nothing).
         loose, strict = await asyncio.gather(

@@ -22,6 +22,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..config import BAMCPConfig
+from ..core.errors import ReferenceUnavailableError
 from ..core.serialization import build_enhanced_variants
 
 logger = logging.getLogger(__name__)
@@ -375,6 +376,10 @@ async def assemble_evidence(
                 probe = await probe_site(file_path, data, pos - 1, ref, alt, ref_path, config)
             except (asyncio.TimeoutError, TimeoutError):
                 logger.warning("Site probe timed out during fusion")
+            except ReferenceUnavailableError:
+                # No reference base to verify REF against: don't probe (it could count ordinary
+                # reads as ALT); the site is reported as not called from the calls we have.
+                probe = None
             alt_reads_seen = (
                 probe["filter_check"].get("unfiltered", probe["filter_check"]["at_filters"])[
                     "alt_count"

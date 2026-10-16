@@ -1,6 +1,7 @@
 # Visual-vs-text eval, round 3 — pre-registration
 
-**Status:** registered before any round-3 model answer was generated (2026-10-16). Changes
+**Status:** registered before any round-3 model answer was generated (2026-10-16); the
+commit that adds this file precedes the first run. Changes
 after the first model run go in *Amendments* with a date and a reason, and are reported
 alongside the results.
 
@@ -69,8 +70,14 @@ are re-indexed" and the prompt says "a sequenced sample" in place of "a simulate
 
 Conditions **`Traw`, `Tjson`, `V`, `V+Traw`**. 36 × 4 × 3 = **432 runs**.
 
-Frozen site manifest: `real_sites.jsonl`, sha256 **`{{SITES_SHA256}}`** (recorded in each
+Frozen site manifest: [`data/r3_real_sites.jsonl`](data/r3_real_sites.jsonl) (36 sites, pools filled after 111 windows), sha256 **`a3e85c3dcbe91511c33577212d6bac4897fc638a2b1dc2e2ce961ab645f3232b`** (recorded in each
 run set's `build.json`).
+
+## Run sets as built
+
+Both run sets were built and leak-linted (0 problems) before this document was committed; the
+viewer source hash (`6ccf323b…`) is recorded in each `build.json`. Labels are sealed in an archive outside the
+run directories for the whole run and restored only for grading.
 
 ## Hypotheses
 

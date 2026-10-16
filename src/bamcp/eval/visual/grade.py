@@ -69,7 +69,11 @@ def grade_run(run: dict[str, Any], label: dict[str, Any], answer_file: Path) -> 
     v = parse_answer(answer_file.read_text(encoding="utf-8", errors="replace"))
     if not v.ok or v.answer is None:
         return Graded(run, label, "invalid", v.error or "invalid")
-    correct = {f: field_correct(f, v.answer, label) for f in SCORED_FIELDS}
+    correct = {
+        f: field_correct(f, v.answer, label)
+        for f in SCORED_FIELDS
+        if not (f == "artifact_type" and label["artifact_type"] == UNSCORED_TYPE)
+    }
     return Graded(run, label, "valid", answer=v.answer, correct=correct)
 
 
@@ -242,6 +246,14 @@ def _clean(o: Any) -> Any:
     return o
 
 
+def _cell(g: Graded, f: str) -> int | str:
+    """A per-run field cell: 1/0, or empty for a field the label leaves unscored (a real
+    negative's ``artifact_type``), so it is never read as wrong."""
+    if f == "artifact_type" and g.label["artifact_type"] == UNSCORED_TYPE:
+        return ""
+    return int(g.correct.get(f, False))
+
+
 def _write_csv(graded: list[Graded], path: Path) -> None:
     cols = [
         "run_id",
@@ -271,7 +283,7 @@ def _write_csv(graded: list[Graded], path: Path) -> None:
                     g.run["repeat"],
                     g.status,
                     g.error,
-                    *[int(g.correct.get(fl, False)) for fl in SCORED_FIELDS],
+                    *[_cell(g, fl) for fl in SCORED_FIELDS],
                     int(g.joint),
                     int(g.joint_lenient),
                     g.answer["confidence"] if g.answer else "",

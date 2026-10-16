@@ -337,6 +337,13 @@ def test_build_real_run_set_lints_and_grades(giab, tmp_path):
     # answer there costs nothing.
     assert g["field_accuracy"]["artifact_type"] == 1.0
     assert "unknown" not in g["artifact_type_confusion"]
+    # ...and the per-run export leaves that cell empty rather than marking it wrong.
+    import csv
+
+    rows = list(csv.DictReader((out / "results" / "results.csv").open()))
+    noisy = [r for r in rows if r["case_type"] == "real_noisy_negative"]
+    assert noisy and all(r["artifact_type_correct"] == "" for r in noisy)
+    assert all(r["artifact_type_correct"] == "1" for r in rows if r not in noisy)
 
 
 def _vcf_with(tmp_path: Path, giab, records: list[tuple[int, str, str]]) -> Path:

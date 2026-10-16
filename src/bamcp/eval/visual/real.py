@@ -359,16 +359,29 @@ def _pick(
     return chosen
 
 
+def _spaced(pool: list[RealSite]) -> int:
+    """How many of ``pool`` can be taken at once, ``MIN_SPACING`` apart (greedy on position):
+    adjacent candidates from one locus count once."""
+    n, last = 0, None
+    for s in sorted(pool, key=lambda s: (s.chrom, s.site0)):
+        if last is None or s.chrom != last.chrom or s.site0 - last.site0 >= MIN_SPACING:
+            n, last = n + 1, s
+    return n
+
+
 def _pools_full(pools: dict[str, list[RealSite]], quotas: dict[str, int], factor: int) -> bool:
-    """Every stratum's pool holds ``factor`` x its quota; noisy negatives need that inside
-    and outside repeats separately, since they are drawn half from each."""
+    """Every stratum's pool holds ``factor`` x its quota of mutually spaced candidates; noisy
+    negatives need that inside and outside repeats separately (drawn half from each). The
+    ``factor`` margin absorbs cross-stratum spacing conflicts; a draw that still falls short
+    raises rather than returning a short manifest."""
     for k, q in quotas.items():
         pool = pools.get(k, [])
         if k == "real_noisy_negative":
-            inside = sum(s.in_repeat for s in pool)
-            if inside < factor * (q // 2) or len(pool) - inside < factor * (q - q // 2):
+            inside = [s for s in pool if s.in_repeat]
+            outside = [s for s in pool if not s.in_repeat]
+            if _spaced(inside) < factor * (q // 2) or _spaced(outside) < factor * (q - q // 2):
                 return False
-        elif len(pool) < factor * q:
+        elif _spaced(pool) < factor * q:
             return False
     return True
 

@@ -421,22 +421,32 @@ def test_snv_next_to_a_repeat_is_not_in_it(giab, tmp_path):
     assert pools["real_snv_in_repeat"] == []
 
 
-def _site(case: str, in_repeat: bool) -> real.RealSite:
-    return real.RealSite(case, CHROM, 0, {}, in_repeat)
+def _sites_at(case: str, in_repeat: bool, n: int, start: int = 0) -> list[real.RealSite]:
+    """``n`` sites MIN_SPACING apart."""
+    return [
+        real.RealSite(case, CHROM, start + i * real.MIN_SPACING, {}, in_repeat) for i in range(n)
+    ]
 
 
 def test_pools_full_needs_both_noisy_subpools():
     quotas = {"real_noisy_negative": 4, "real_clean_negative": 1}
-    clean = [_site("real_clean_negative", False)]
-    lopsided = {"real_noisy_negative": [_site("n", False)] * 8, "real_clean_negative": clean}
+    clean = _sites_at("real_clean_negative", False, 1, start=10**6)
+    lopsided = {"real_noisy_negative": _sites_at("n", False, 8), "real_clean_negative": clean}
     assert not real._pools_full(lopsided, quotas, 2)  # 8 >= 2x4 overall, but none in repeats
     split = {
-        "real_noisy_negative": [_site("n", True)] * 4 + [_site("n", False)] * 4,
+        "real_noisy_negative": _sites_at("n", True, 4) + _sites_at("n", False, 4, start=10**5),
         "real_clean_negative": clean,
     }
     assert not real._pools_full(split, quotas, 2)  # clean pool short of 2x1
-    split["real_clean_negative"] = clean * 2
+    split["real_clean_negative"] = _sites_at("real_clean_negative", False, 2, start=10**6)
     assert real._pools_full(split, quotas, 2)
+
+
+def test_pools_full_counts_adjacent_candidates_once():
+    """Ten adjacent clean positions from one locus can supply only one spaced site."""
+    adjacent = [real.RealSite("real_clean_negative", CHROM, 5000 + i, {}, False) for i in range(10)]
+    assert real._spaced(adjacent) == 1
+    assert not real._pools_full({"real_clean_negative": adjacent}, {"real_clean_negative": 2}, 1)
 
 
 def test_selftest_oracle_passes_on_a_real_run_set(giab, tmp_path):

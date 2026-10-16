@@ -351,11 +351,11 @@ def _pick(
     rng.shuffle(pool)
     chosen: list[RealSite] = []
     for s in pool:
+        if len(chosen) >= k:
+            break
         if all(s.chrom != c.chrom or abs(s.site0 - c.site0) >= MIN_SPACING for c in taken):
             chosen.append(s)
             taken.append(s)
-        if len(chosen) == k:
-            break
     return chosen
 
 

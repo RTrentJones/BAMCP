@@ -458,3 +458,13 @@ def test_selftest_oracle_passes_on_a_real_run_set(giab, tmp_path):
     )
     results = {r.name: r for r in run_selftests(out, charts=False)}
     assert results["oracle = 100%"].ok, results["oracle = 100%"].detail
+
+
+def test_pick_honours_zero_and_small_quotas():
+    """An odd noisy quota asks for 0 sites from one side: none may be taken (or reserved)."""
+    rng = random.Random(1)  # noqa: S311
+    pool = [real.RealSite("n", CHROM, i * 5000, {}, True) for i in range(5)]
+    taken: list[real.RealSite] = []
+    assert real._pick(list(pool), 0, rng, taken) == [] and taken == []
+    got = real._pick(list(pool), 2, rng, taken)
+    assert len(got) == 2 and taken == got

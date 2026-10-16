@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .answers import ENUMS
-from .grade import grade_run_set, load_jsonl
+from .grade import UNSCORED_TYPE, grade_run_set, load_jsonl
 
 # P(joint correct) for a uniform random answer: 1/2 (variant_present) x 1/3 (verdict).
 RANDOM_CHANCE = 1 / (len(ENUMS["variant_present"]) * len(ENUMS["artifact_verdict"]))
@@ -31,7 +31,10 @@ def oracle_answer(label: dict[str, Any]) -> dict[str, Any]:
         "alt_allele": label["alt_allele"],
         "zygosity": label["zygosity"],
         "artifact_verdict": label["artifact_verdict"],
-        "artifact_type": label["artifact_type"],
+        # An unscored type (real-tier negatives) is not a valid answer value: answer "none".
+        "artifact_type": "none"
+        if label["artifact_type"] == UNSCORED_TYPE
+        else label["artifact_type"],
         "phase": label["phase"],
         "confidence": 1.0,
         "rationale": "oracle",

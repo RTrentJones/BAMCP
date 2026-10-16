@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .cases import CASE_TYPES
+from .real import REAL_CASE_TYPES
 from .stimuli import FILE_ORDER, prompt_text
 
 ALLOWED_FILES = frozenset(
@@ -49,7 +50,8 @@ CAPTION_RE = re.compile(
     r"^# Site\n\n"
     r"- Region: chr\d+:\d+-\d+ \(1-based, inclusive\)\n"
     r"- Position\(s\) of interest: chr\d+:\d+(, chr\d+:\d+)?\n"
-    r"- Sample: simulated diploid sample on a synthetic GRCh38-like reference\n$"
+    r"- Sample: (simulated diploid sample on a synthetic GRCh38-like reference"
+    r"|sequenced human sample \(Illumina short reads\); coordinates are re-indexed)\n$"
 )
 
 
@@ -110,7 +112,13 @@ def lint_run_set(run_dir: str | Path, bam_path: str | None = None) -> LintReport
     ids: set[str] = set()
     if labels_path.exists():
         ids = {json.loads(line)["item"] for line in labels_path.read_text().splitlines() if line}
-    case_names = {c.name for c in CASE_TYPES}
+    case_names = {c.name for c in CASE_TYPES} | set(REAL_CASE_TYPES)
+    meta = run_dir / "build.json"
+    sample_kind = (
+        "sequenced"
+        if meta.exists() and json.loads(meta.read_text()).get("tier") == "real"
+        else "simulated"
+    )
 
     for path in sorted(stim.rglob("*")):
         rel = path.relative_to(run_dir)
@@ -140,7 +148,7 @@ def lint_run_set(run_dir: str | Path, bam_path: str | None = None) -> LintReport
             # vocabulary scan it must be exactly the uniform text for its file set.
             present = sorted(p.name for p in path.parent.iterdir() if p.name in FILE_ORDER)
             present.sort(key=FILE_ORDER.index)
-            if text != prompt_text(present):
+            if text != prompt_text(present, sample_kind):
                 report.problems.append(f"{rel}: prompt differs from the uniform prompt")
             continue
         for token in _tokens(text):

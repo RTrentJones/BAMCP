@@ -17,6 +17,7 @@ from .ncbi import (
     TokenBucketRateLimiter,
     check_esearch,
     check_esummary,
+    ncbi_get,
     ncbi_rate_limiter,
     response_json,
 )
@@ -201,7 +202,6 @@ class ClinVarClient:
         # Step 2/3: esummary the candidates in batches, returning the first whose allele
         # matches (early-exit avoids summarizing every record).
         for batch in _chunks(id_list, _ESUMMARY_BATCH):
-            await self._rate_limiter.acquire()
             result_section = await self._esummary(batch)
             entry = _select_entry(result_section, pos, ref, alt, build=build, chrom=chrom)
             if entry is not None:
@@ -229,7 +229,6 @@ class ClinVarClient:
         retstart = 0
         count = 0
         while retstart < _MAX_POSITION_RECORDS:
-            await self._rate_limiter.acquire()
             params: dict[str, str | int] = {
                 "db": "clinvar",
                 "term": term,
@@ -239,7 +238,9 @@ class ClinVarClient:
             }
             if self.api_key:
                 params["api_key"] = self.api_key
-            resp = await self._http_client.get(f"{EUTILS_BASE}esearch.fcgi", params=params)
+            resp = await ncbi_get(
+                self._http_client, f"{EUTILS_BASE}esearch.fcgi", params, self._rate_limiter
+            )
             resp.raise_for_status()
             search_result = check_esearch(response_json(resp, "ClinVar esearch"), "ClinVar")
             try:
@@ -264,7 +265,9 @@ class ClinVarClient:
         }
         if self.api_key:
             params["api_key"] = self.api_key
-        resp = await self._http_client.get(f"{EUTILS_BASE}esummary.fcgi", params=params)
+        resp = await ncbi_get(
+            self._http_client, f"{EUTILS_BASE}esummary.fcgi", params, self._rate_limiter
+        )
         resp.raise_for_status()
         return check_esummary(response_json(resp, "ClinVar esummary"), "ClinVar")
 

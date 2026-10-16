@@ -317,9 +317,15 @@ class TestValidateRegion:
             validate_region("chr1")
 
     @pytest.mark.unit
-    def test_invalid_region_only_start(self):
+    def test_valid_region_single_position(self):
+        # A bare 1-based position is the single base N-N (samtools-style).
+        validate_region("chr1:1000")
+        validate_region("chr17:43,099,914")
+
+    @pytest.mark.unit
+    def test_invalid_region_trailing_dash(self):
         with pytest.raises(ValueError, match="Invalid region format"):
-            validate_region("chr1:1000")
+            validate_region("chr1:1000-")
 
     @pytest.mark.unit
     def test_invalid_region_letters_in_position(self):

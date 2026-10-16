@@ -21,7 +21,8 @@ from bamcp.core.tools import (
 
 @pytest.fixture
 def cfg(ref_fasta_path):
-    return BAMCPConfig(reference=ref_fasta_path, min_vaf=0.1, min_depth=1)
+    # min_alt_count=1: these contract tests pin coordinates on single-read fixture variants.
+    return BAMCPConfig(reference=ref_fasta_path, min_vaf=0.1, min_depth=1, min_alt_count=1)
 
 
 class TestSingleBaseRegion:

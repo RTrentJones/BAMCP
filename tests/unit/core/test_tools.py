@@ -13,6 +13,7 @@ from bamcp.constants import (
     LOW_CONFIDENCE_MIN_VAF,
     VIEWER_RESOURCE_URI,
 )
+from bamcp.core.errors import ToolInputError
 from bamcp.core.parsers import AlignedRead, RegionData
 from bamcp.core.serialization import serialize_region_data
 from bamcp.core.tools import (
@@ -329,7 +330,12 @@ class TestHandleBrowseRegion:
         self, small_bam_path, ref_fasta_path, config
     ):
         result = await handle_jump_to(
-            {"file_path": small_bam_path, "position": 150, "reference": ref_fasta_path},
+            {
+                "file_path": small_bam_path,
+                "position": 150,
+                "contig": "chr1",
+                "reference": ref_fasta_path,
+            },
             config,
         )
         assert result["_meta"]["ui/init"]["reference"] == ref_fasta_path
@@ -426,7 +432,13 @@ class TestHandleGetVariants:
         assert raw_positions, "fixture region should contain at least one variant"
 
         result = await handle_get_variants(
-            {"file_path": small_bam_path, "region": region, "min_vaf": 0.05, "min_depth": 1},
+            {
+                "file_path": small_bam_path,
+                "region": region,
+                "min_vaf": 0.05,
+                "min_depth": 1,
+                "min_alt_count": 1,
+            },
             config_with_ref,
         )
         tool_positions = sorted(
@@ -1188,12 +1200,10 @@ class TestHandleJumpTo:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_default_contig(self, small_bam_path, config):
-        """Without contig arg, defaults to configured constant."""
-        result = await handle_jump_to({"file_path": small_bam_path, "position": 150}, config)
-        # Payload is in _meta.ui/init
-        payload = result["_meta"]["ui/init"]
-        assert payload["contig"] == "chr1"  # first contig in the BAM header
+    async def test_missing_contig_is_a_clear_error(self, small_bam_path, config):
+        """A bare position is ambiguous: never silently fall back to the first contig."""
+        with pytest.raises(ToolInputError, match="needs a contig"):
+            await handle_jump_to({"file_path": small_bam_path, "position": 150}, config)
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -1973,16 +1983,14 @@ class TestHandleScanVariants:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_variants_sorted_by_vaf(self, small_bam_path, config_with_ref):
-        """Returned variants should be sorted by VAF descending."""
+    async def test_variants_sorted_by_position(self, small_bam_path, config_with_ref):
+        """Returned variants are in genomic order (the cap keeps the highest-VAF ones)."""
         result = await handle_scan_variants(
             {"file_path": small_bam_path, "contig": "chr1"}, config_with_ref
         )
         payload = json.loads(result["content"][0]["text"])
-        variants = payload["variants"]
-        if len(variants) >= 2:
-            for i in range(len(variants) - 1):
-                assert variants[i]["vaf"] >= variants[i + 1]["vaf"]
+        positions = [v["position"] for v in payload["variants"]]
+        assert positions == sorted(positions)
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -2737,13 +2745,11 @@ class TestSearchGeneBuildResolution:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_unrecognized_build_errors(self, monkeypatch):
-        import json as _json
 
         from bamcp.core.tools import handle_search_gene
 
-        r = await handle_search_gene({"symbol": "BRCA1", "build": "hg99"}, BAMCPConfig())
-        p = _json.loads(r["content"][0]["text"])
-        assert "error" in p and "hg99" in p["error"]
+        with pytest.raises(ToolInputError, match="hg99"):
+            await handle_search_gene({"symbol": "BRCA1", "build": "hg99"}, BAMCPConfig())
 
 
 class TestAppliedFiltersHelpers:
@@ -2846,7 +2852,9 @@ class TestSelfDescribingFilters:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_jump_to_payload_has_applied_filters(self, small_bam_path, config):
-        result = await handle_jump_to({"file_path": small_bam_path, "position": 150}, config)
+        result = await handle_jump_to(
+            {"file_path": small_bam_path, "position": 150, "contig": "chr1"}, config
+        )
         payload = result["_meta"]["ui/init"]
         assert payload["applied_filters"]["max_reads"] == config.max_reads
         assert "filters:" in result["content"][0]["text"]
@@ -2918,6 +2926,38 @@ class TestFetchRegionTimeoutMessage:
 
         assert "retrying" in str(exc_info.value)
 
+    @pytest.mark.unit
+    async def test_large_region_timeout_suggests_a_smaller_window(self, monkeypatch):
+        """A gene-scale timeout is about size: suggest a smaller window, not a warm retry."""
+        import bamcp.core.tools as tools_mod
+
+        async def _boom(*args, **kwargs):
+            raise asyncio.TimeoutError()
+
+        monkeypatch.setattr(tools_mod, "_fetch_region_data", _boom)
+        ref = "https://example.com/ref.fa.gz"
+        with pytest.raises(TimeoutError) as exc_info:
+            await tools_mod._fetch_region_with_timeout(
+                "/x.bam", "chr17:43044295-43125483", ref, BAMCPConfig()
+            )
+        message = str(exc_info.value)
+        assert "smaller window" in message and "81,189 bp" in message
+        assert "retrying" not in message
+
+    @pytest.mark.unit
+    async def test_warm_reference_small_region_gets_no_cold_hint(self, monkeypatch):
+        import bamcp.core.tools as tools_mod
+
+        async def _boom(*args, **kwargs):
+            raise asyncio.TimeoutError()
+
+        ref = "https://example.com/warm.fa.gz"
+        monkeypatch.setattr(tools_mod, "_fetch_region_data", _boom)
+        monkeypatch.setitem(tools_mod._warm_inputs, ref, None)
+        with pytest.raises(TimeoutError) as exc_info:
+            await tools_mod._fetch_region_with_timeout("/x.bam", "chr1:1-100", ref, BAMCPConfig())
+        assert "retrying" not in str(exc_info.value)
+
 
 class TestLookupBuildRouting:
     """lookup_clinvar / lookup_gnomad route by genome build and keep unavailable != not_found."""
@@ -2962,10 +3002,20 @@ class TestLookupBuildRouting:
     @pytest.mark.asyncio
     async def test_unrecognized_build_is_invalid_input(self, config):
         for handler in (handle_lookup_clinvar, handle_lookup_gnomad):
-            r = await handler(
-                {"chrom": "17", "pos": 1, "ref": "G", "alt": "C", "build": "hg99"}, config
-            )
-            assert json.loads(r["content"][0]["text"])["status"] == "invalid_input"
+            with pytest.raises(ToolInputError, match="hg99"):
+                await handler(
+                    {"chrom": "17", "pos": 1, "ref": "G", "alt": "C", "build": "hg99"}, config
+                )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_invalid_allele_or_position_is_a_tool_error(self, config):
+        # Invalid input is an error (isError via the envelope), never a success payload.
+        for handler in (handle_lookup_clinvar, handle_lookup_gnomad):
+            with pytest.raises(ToolInputError, match="Invalid alternate allele: Z"):
+                await handler({"chrom": "17", "pos": 1, "ref": "G", "alt": "Z"}, config)
+            with pytest.raises(ToolInputError, match="Position must be positive"):
+                await handler({"chrom": "17", "pos": -5, "ref": "G", "alt": "C"}, config)
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -3092,10 +3142,8 @@ class TestSearchGeneHonesty:
 
         self._detect(monkeypatch, exc=ValueError("Path is not in allowed directories"))
         self._client(monkeypatch, self._gene("GRCh38"))
-        r = await handle_search_gene({"symbol": "TP53", "file_path": "/etc/x.bam"}, BAMCPConfig())
-        p = json.loads(r["content"][0]["text"])
-        assert p["status"] == "invalid_input"
-        assert "region" not in p
+        with pytest.raises(ToolInputError, match="Invalid file_path"):
+            await handle_search_gene({"symbol": "TP53", "file_path": "/etc/x.bam"}, BAMCPConfig())
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -3104,8 +3152,8 @@ class TestSearchGeneHonesty:
 
         self._detect(monkeypatch, exc=FileNotFoundError("File not found: x.bam"))
         self._client(monkeypatch, self._gene("GRCh38"))
-        r = await handle_search_gene({"symbol": "TP53", "file_path": "x.bam"}, BAMCPConfig())
-        assert json.loads(r["content"][0]["text"])["status"] == "invalid_input"
+        with pytest.raises(ToolInputError, match="Invalid file_path"):
+            await handle_search_gene({"symbol": "TP53", "file_path": "x.bam"}, BAMCPConfig())
 
     @pytest.mark.unit
     @pytest.mark.asyncio

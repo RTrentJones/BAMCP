@@ -61,26 +61,68 @@ CLASSIFICATION_OPTIONS = [
 ]
 
 
+def _reliability_reasons(pop: dict[str, Any], *, include_an: bool) -> list[str]:
+    """Why a gnomAD frequency is unreliable, each reason once.
+
+    gnomAD's own ``frequency_reliable=false`` warning usually just restates the failed QC
+    filters; repeating it ("FAILED filters X and ... (fails filters X)") is noise, so a warning
+    that only re-reports the filters is dropped when the filters are already listed.
+    """
+    filters = pop.get("filters") or []
+    reasons = []
+    if filters:
+        reasons.append(f"the site FAILED gnomAD QC filters {list(filters)}")
+    an = pop.get("an")
+    if include_an and isinstance(an, int | float) and an < PM2_MIN_ALLELE_NUMBER:
+        reasons.append(f"allele number is low (AN={an} < {PM2_MIN_ALLELE_NUMBER})")
+    if pop.get("frequency_reliable") is False:
+        warnings = [
+            w for w in pop.get("warnings") or [] if not (filters and "filter" in str(w).lower())
+        ]
+        if warnings:
+            reasons.append(f"the frequency is not reliable ({'; '.join(warnings)})")
+        elif not filters:
+            reasons.append("the frequency is not reliable (gnomAD flagged the frequency)")
+    return reasons
+
+
 def _pm2_quality_caveat(pop: dict[str, Any]) -> str | None:
     """Why this gnomAD record can't support PM2 on low AF, or None if it can.
 
     Tolerant of the client not surfacing ``filters``/``an``: missing fields add no caveat.
     """
-    filters = pop.get("filters") or []
-    an = pop.get("an")
-    reasons = []
-    if filters:
-        reasons.append(f"the site FAILED gnomAD QC filters {list(filters)}")
-    if isinstance(an, int | float) and an < PM2_MIN_ALLELE_NUMBER:
-        reasons.append(f"allele number is low (AN={an} < {PM2_MIN_ALLELE_NUMBER})")
-    if pop.get("frequency_reliable") is False:
-        why = "; ".join(pop.get("warnings") or []) or "gnomAD flagged the frequency"
-        reasons.append(f"the frequency is not reliable ({why})")
+    reasons = _reliability_reasons(pop, include_an=True)
     if not reasons:
         return None
     return (
         " and ".join(reasons) + ", so a low AF here is NOT evidence of rarity. Do NOT "
         "apply PM2 from this record; check coverage/another dataset first."
+    )
+
+
+def _benign_frequency_caveat(pop: dict[str, Any]) -> str | None:
+    """Why this gnomAD record's AF can't support BA1/BS1 (a HIGH AF is unreliable too).
+
+    Mirrors the PM2 guard: an AF gnomAD itself flags as unreliable, or one from a site that
+    failed QC, must not become standalone/strong benign evidence either.
+    """
+    reasons = _reliability_reasons(pop, include_an=False)
+    if not reasons:
+        return None
+    return (
+        " and ".join(reasons) + ", so a high AF here is NOT evidence of benignity. Do NOT "
+        "apply BA1/BS1 from this record; check another dataset first."
+    )
+
+
+def _gnomad_caution(pop: dict[str, Any]) -> str | None:
+    """Direction-neutral caution for the GNOMAD summary line (any AF, high or low)."""
+    reasons = _reliability_reasons(pop, include_an=True)
+    if not reasons:
+        return None
+    return (
+        " and ".join(reasons) + ", so treat this frequency as unreliable in either direction "
+        "(neither rarity nor commonness); confirm it in another dataset before using it."
     )
 
 
@@ -118,18 +160,23 @@ def _frequency_criteria(pop: dict[str, Any] | None) -> list[dict[str, Any]]:
     caveat = _pm2_quality_caveat(pop)
     if caveat:
         pm2_text = f"global_af={global_af}, but {caveat}"
+    ba1_text = f"max_pop_af={max_af}. Apply only if this exceeds {BA1_AF_THRESHOLD}."
+    bs1_text = f"global_af={global_af}, max_pop_af={max_af}. Consider if above ~{BS1_AF_THRESHOLD}."
+    benign_caveat = _benign_frequency_caveat(pop)
+    if benign_caveat:
+        ba1_text = f"max_pop_af={max_af}, but {benign_caveat}"
+        bs1_text = f"global_af={global_af}, max_pop_af={max_af}, but {benign_caveat}"
     return [
         {
             "code": "BA1",
             "description": f"Allele frequency > {BA1_AF_THRESHOLD:.0%} in any population "
             "(standalone benign).",
-            "evaluate_with": f"max_pop_af={max_af}. Apply only if this exceeds {BA1_AF_THRESHOLD}.",
+            "evaluate_with": ba1_text,
         },
         {
             "code": "BS1",
             "description": "Allele frequency greater than expected for the disorder.",
-            "evaluate_with": f"global_af={global_af}, max_pop_af={max_af}. Consider if above "
-            f"~{BS1_AF_THRESHOLD}.",
+            "evaluate_with": bs1_text,
         },
         {
             "code": "PM2_supporting",
@@ -311,6 +358,20 @@ def _format_classify_text(evidence: dict[str, Any], scaffold: dict[str, Any]) ->
                 "  Read-level evidence (strand/quality/position) NOT COMPUTED — treat "
                 "call quality as unknown."
             )
+    elif status == "below_filters":
+        lines.append(
+            "  NOT CALLED under the applied filters (fails "
+            f"{', '.join(obs.get('failed_filters') or [])}); evaluated at the site anyway:"
+        )
+        lines.append(
+            f"  {obs.get('alt_count')}/{obs.get('depth')} alt reads (vaf={obs.get('vaf')}), "
+            f"strand {obs.get('strand_forward')}F/{obs.get('strand_reverse')}R, "
+            f"mean alt base quality {obs.get('mean_quality')}, "
+            f"artifact={obs.get('artifact_likelihood')} "
+            f"(concerns: {', '.join(obs.get('artifact_concerns') or []) or 'none'}), "
+            f"confidence={obs.get('confidence')}"
+        )
+        lines.append(f"  Applied filters: {filters_text}")
     else:
         lines.append(
             f"  No variant call at this position under the applied filters ({filters_text})."
@@ -342,7 +403,7 @@ def _format_classify_text(evidence: dict[str, Any], scaffold: dict[str, Any]) ->
         )
     elif pop:
         lines.append(f"  global_af={pop.get('global_af')} max_pop_af={pop.get('max_pop_af')}")
-        caveat = _pm2_quality_caveat(pop)
+        caveat = _gnomad_caution(pop)
         if caveat:
             lines.append(f"  CAUTION: {caveat}")
     else:
@@ -369,6 +430,7 @@ async def handle_classify_variant(args: dict[str, Any], config: BAMCPConfig) -> 
     the raw evidence and scaffold so an eval harness can grade the reasoning.
     Positions are 1-based. Research-grade; not a clinical determination.
     """
+    from ..core.errors import ToolInputError
     from ..core.validation import validate_path, validate_variant_input
 
     file_path = args["file_path"]
@@ -379,11 +441,16 @@ async def handle_classify_variant(args: dict[str, Any], config: BAMCPConfig) -> 
     alt = args["alt"]
     gene = args.get("gene")
     window = args.get("window", 50)
-    reference = args.get("reference", config.reference)
+    # Same resolution as every read tool: a caller-supplied reference is SSRF-validated (it is
+    # handed to htslib), else the operator default, else the auto-selected public FASTA.
+    from ..core.tools import _resolve_reference
+
+    _, reference = await _resolve_reference(args, config)
 
     validation_error = validate_variant_input(chrom, pos, ref, alt)
     if validation_error:
-        return {"content": [{"type": "text", "text": json.dumps({"error": validation_error})}]}
+        # Invalid input is a tool error (isError via the server envelope), not an answer.
+        raise ToolInputError(validation_error)
 
     evidence = await assemble_evidence(
         chrom, pos, ref, alt, file_path, config, gene=gene, window=window, reference=reference

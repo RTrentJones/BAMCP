@@ -772,3 +772,60 @@ class TestSharedRateLimiter:
         limiter = TokenBucketRateLimiter(3)
         client = ClinVarClient(rate_limiter=limiter)
         assert client._rate_limiter is limiter
+
+
+# -- NCBI throttling: bounded retry with backoff ---------------------------------
+
+
+class TestNcbiRetry:
+    @pytest.fixture
+    def sleeps(self, monkeypatch):
+        import bamcp.clients.ncbi as ncbi
+
+        recorded: list[float] = []
+
+        async def fake_sleep(seconds):
+            recorded.append(seconds)
+
+        monkeypatch.setattr(ncbi.asyncio, "sleep", fake_sleep)
+        return recorded
+
+    @staticmethod
+    def _client():
+        class NoWait(TokenBucketRateLimiter):
+            async def acquire(self):  # the bucket's own waits are not retries
+                return None
+
+        return ClinVarClient(rate_limiter=NoWait(3))
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_429_is_retried_honoring_retry_after(self, httpx_mock, sleeps):
+        esearch = re.compile(r".*/esearch\.fcgi.*")
+        httpx_mock.add_response(url=esearch, status_code=429, headers={"Retry-After": "2"})
+        httpx_mock.add_response(url=esearch, json=ESEARCH_RESPONSE)
+        httpx_mock.add_response(url=re.compile(r".*/esummary\.fcgi.*"), json=ESUMMARY_RESPONSE)
+
+        result = await self._client().lookup("chr17", 7674220, "G", "A")
+        assert result is not None and result.gene == "TP53"
+        assert sleeps == [2.0]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_retry_is_bounded_and_backs_off(self, httpx_mock, sleeps):
+        from bamcp.clients.ncbi import NCBI_MAX_RETRIES
+
+        for _ in range(NCBI_MAX_RETRIES + 1):
+            httpx_mock.add_response(url=re.compile(r".*/esearch\.fcgi.*"), status_code=429)
+        with pytest.raises(httpx.HTTPStatusError):
+            await self._client().lookup("chr17", 7674220, "G", "A")
+        assert sleeps == [0.5, 1.0, 2.0]  # exponential, then give up (-> unavailable)
+
+    @pytest.mark.unit
+    def test_retry_after_is_capped_and_date_form_ignored(self):
+        from bamcp.clients.ncbi import NCBI_RETRY_MAX_DELAY, _retry_delay
+
+        big = httpx.Response(429, headers={"Retry-After": "3600"})
+        assert _retry_delay(big, 0) == NCBI_RETRY_MAX_DELAY
+        date = httpx.Response(429, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"})
+        assert _retry_delay(date, 1) == 1.0

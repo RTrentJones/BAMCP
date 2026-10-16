@@ -20,10 +20,17 @@ DEFAULT_CACHE_DIR = Path.home() / ".cache" / "bamcp"
 # Genomics operation defaults
 DEFAULT_MAX_READS = 10_000
 DEFAULT_WINDOW_SIZE = 500
-DEFAULT_MIN_VAF = 0.02
+# Candidate-detection operating point. Tuned so a newcomer's first get_variants on real
+# short-read data returns real variants rather than sequencing noise: a 10 kb BRCA1 window
+# at MAPQ0/BQ0/no-alt-count floor returned ~40 candidates, ~39 of them single-read errors.
+# Every response echoes these in applied_filters, and callers can loosen them per call.
+DEFAULT_MIN_VAF = 0.10
 DEFAULT_MIN_DEPTH = 2
-DEFAULT_MIN_MAPQ = 0
-DEFAULT_MIN_BASEQ = 0
+DEFAULT_MIN_MAPQ = 20
+DEFAULT_MIN_BASEQ = 13
+# Minimum number of alt-supporting reads for a BAMCP candidate (VCF records are never
+# dropped by it). One or two reads carrying a base is the signature of a sequencing error.
+DEFAULT_MIN_ALT_COUNT = 3
 
 # Candidate indel detection runs a pysam pileup pass (costlier than count_coverage).
 # Skip it above this region size so large visualize_region requests stay responsive;
@@ -97,10 +104,29 @@ DEFAULT_MAX_INDEX_CACHE_BYTES = 512 * 1024 * 1024
 
 # Timeout for BAM/CRAM parsing operations (seconds)
 BAM_PARSE_TIMEOUT_SECONDS = 30.0
+# First use of a not-yet-seen remote BAM/CRAM or reference FASTA: opening it fetches the remote
+# header and the FASTA's .fai/.gzi, which on a cold server can by itself exceed the parse budget.
+# That one-off open runs under this separate, larger budget; once it succeeds the input is
+# "warm" and later calls get the normal BAM_PARSE_TIMEOUT_SECONDS. Index (.bai/.crai) downloads
+# never count against either budget.
+COLD_START_TIMEOUT_SECONDS = 90.0
+# How many warm remote inputs to remember (bounded: the prod server is an open demo).
+WARM_INPUTS_MAX_ENTRIES = 1024
 
-# Whole-contig variant scanning
-SCAN_VARIANTS_TIMEOUT_SECONDS = 120.0
-SCAN_VARIANTS_CHUNK_SIZE = 50_000
+# Whole-contig variant scanning. The scan runs chunk by chunk against a soft deadline; when it
+# hits, the chunks completed so far are returned with ``truncated: true`` (and the region that
+# was actually scanned) instead of a timeout error. The deadline sits under common MCP client
+# request timeouts (~60s) so the partial answer reaches the caller. The hard timeout is the
+# backstop for a single hung chunk (a C call the soft deadline can't interrupt).
+SCAN_VARIANTS_DEADLINE_SECONDS = 40.0
+SCAN_VARIANTS_TIMEOUT_SECONDS = 50.0
+SCAN_VARIANTS_CHUNK_SIZE = 50_000  # largest chunk
+# Chunks start small and grow (doubling, up to SCAN_VARIANTS_CHUNK_SIZE) while each one finishes
+# under SCAN_VARIANTS_CHUNK_TARGET_SECONDS, shrinking again when one is slow. A remote,
+# very-deep contig (chrM at thousands-x) then still completes chunks before the deadline instead
+# of spending the whole budget inside one 50 kb chunk and returning nothing.
+SCAN_VARIANTS_MIN_CHUNK_SIZE = 1_000
+SCAN_VARIANTS_CHUNK_TARGET_SECONDS = 2.0
 SCAN_VARIANTS_MAX_REGION = 250_000_000
 SCAN_VARIANTS_MAX_RESULTS = 500
 

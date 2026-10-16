@@ -16,6 +16,7 @@ from .constants import (
     DEFAULT_MAX_INDEX_CACHE_BYTES,
     DEFAULT_MAX_READS,
     DEFAULT_MAX_REMOTE_INDEX_BYTES,
+    DEFAULT_MIN_ALT_COUNT,
     DEFAULT_MIN_BASEQ,
     DEFAULT_MIN_DEPTH,
     DEFAULT_MIN_MAPQ,
@@ -75,6 +76,20 @@ def _env_float(name: str, default: float) -> float:
         raise ValueError(f"{name}={raw!r} is not a number") from None
 
 
+def _env_api_key(name: str) -> str | None:
+    """Read an API-key env var strictly: unset/blank is None; otherwise alphanumeric only.
+
+    A stray quote or space (``BAMCP_NCBI_API_KEY=" abc"``) would be sent to NCBI verbatim and
+    rejected on every call; fail at startup instead. The value itself is never echoed.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    if not raw.isascii() or not raw.isalnum() or len(raw) > 128:
+        raise ValueError(f"{name} is not a valid API key (expected 1-128 letters/digits)")
+    return raw
+
+
 def _ensure_cache_dir(explicit: str | None) -> str:
     """Create the cache directory, tolerating a read-only home.
 
@@ -127,6 +142,7 @@ class BAMCPConfig:
     min_depth: int = DEFAULT_MIN_DEPTH
     min_mapq: int = DEFAULT_MIN_MAPQ
     min_baseq: int = DEFAULT_MIN_BASEQ
+    min_alt_count: int = DEFAULT_MIN_ALT_COUNT
 
     # Transport settings
     transport: str = DEFAULT_TRANSPORT
@@ -180,6 +196,10 @@ class BAMCPConfig:
     telemetry_path: str = ""  # JSONL file path; empty disables file output
     telemetry_otel_enabled: bool = False
 
+    # Startup prewarm (HTTP transports only): fetch the demo datasets' indexes/headers and open
+    # their reference .fai in the background so the first demo call isn't a cold start.
+    prewarm: bool = True
+
     def __post_init__(self) -> None:
         """Validate config values and set defaults."""
         # Set default cache_dir if not provided
@@ -201,6 +221,9 @@ class BAMCPConfig:
 
         if not 0 <= self.min_baseq <= 255:
             raise ValueError(f"min_baseq must be between 0 and 255, got {self.min_baseq}")
+
+        if self.min_alt_count < 1:
+            raise ValueError(f"min_alt_count must be at least 1, got {self.min_alt_count}")
 
         if self.default_window < 1:
             raise ValueError(f"default_window must be at least 1, got {self.default_window}")
@@ -277,6 +300,7 @@ class BAMCPConfig:
             min_depth=_env_int("BAMCP_MIN_DEPTH", DEFAULT_MIN_DEPTH),
             min_mapq=_env_int("BAMCP_MIN_MAPQ", DEFAULT_MIN_MAPQ),
             min_baseq=_env_int("BAMCP_MIN_BASEQ", DEFAULT_MIN_BASEQ),
+            min_alt_count=_env_int("BAMCP_MIN_ALT_COUNT", DEFAULT_MIN_ALT_COUNT),
             transport=env.get("BAMCP_TRANSPORT", DEFAULT_TRANSPORT),
             host=env.get("BAMCP_HOST", DEFAULT_HOST),
             port=_env_int("BAMCP_PORT", DEFAULT_PORT),
@@ -287,7 +311,7 @@ class BAMCPConfig:
             token_expiry=_env_int("BAMCP_TOKEN_EXPIRY", DEFAULT_TOKEN_EXPIRY_SECONDS),
             verify_token=env.get("BAMCP_VERIFY_TOKEN") or None,
             allow_dynamic_registration=_env_bool("BAMCP_ALLOW_DYNAMIC_REGISTRATION", False),
-            ncbi_api_key=env.get("BAMCP_NCBI_API_KEY"),
+            ncbi_api_key=_env_api_key("BAMCP_NCBI_API_KEY"),
             clinvar_enabled=_env_bool("BAMCP_CLINVAR_ENABLED", True),
             gnomad_enabled=_env_bool("BAMCP_GNOMAD_ENABLED", True),
             gnomad_dataset=env.get("BAMCP_GNOMAD_DATASET", DEFAULT_GNOMAD_DATASET),
@@ -323,4 +347,5 @@ class BAMCPConfig:
             telemetry_enabled=_env_bool("BAMCP_TELEMETRY_ENABLED", False),
             telemetry_path=env.get("BAMCP_TELEMETRY_PATH", ""),
             telemetry_otel_enabled=_env_bool("BAMCP_TELEMETRY_OTEL", False),
+            prewarm=_env_bool("BAMCP_PREWARM", True),
         )

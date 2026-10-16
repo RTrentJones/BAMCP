@@ -30,6 +30,18 @@ provenance:
 # planted indels fall inside it; nothing else should be called here.
 detection_region: chr1:3000-3100
 
+# Pinned detection operating point (the pre-2026-10 server defaults). The server now
+# defaults to a noise-suppressing point (min_mapq 20, min_baseq 13, min_vaf 0.10,
+# min_alt_count 3) that would filter the planted low-MAPQ / low-depth artifact sites
+# out before curation could flag them; this set measures detection + artifact
+# scoring at the sensitivity point it was designed for. CLI flags still override.
+operating_point:
+  min_vaf: 0.02
+  min_depth: 2
+  min_mapq: 0
+  min_baseq: 0
+  min_alt_count: 1
+
 # Positive truth: VCF-style anchored indel alleles (1-based positions, the
 # coordinate get_variants reports). ref/alt are exactly what detect_indels emits.
 variant_sites:

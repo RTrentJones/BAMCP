@@ -22,6 +22,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..config import BAMCPConfig
+from ..core.errors import ReferenceUnavailableError
 from ..core.serialization import build_enhanced_variants
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,7 @@ def _observation_from_variant(
     fetch_error: str | None = None,
     applied_filters: dict[str, Any] | None = None,
     alt_reads_seen: int | None = None,
+    probe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Shape the BAM observation block from an evidence-enhanced variant.
 
@@ -162,6 +164,10 @@ def _observation_from_variant(
     - ``status="not_called"`` (``detected=False``): the reads were read but no call
       matched under ``applied_filters``; ``alt_reads_seen`` counts alt-supporting reads
       that were present anyway (a variant below min_vaf/min_depth is NOT an absence).
+    - ``status="below_filters"`` (``detected=False``): no call under ``applied_filters``, but
+      the requested site was probed anyway (min_baseq=0, no VAF/alt floor — see
+      :func:`bamcp.core.tools.probe_site`): its read-level evidence and artifact risk are
+      reported with ``passes_filters=False`` and the ``failed_filters``.
     - ``status="observed"`` (``detected=True``): the call and its read-level evidence.
     """
     if fetch_error is not None:
@@ -169,6 +175,19 @@ def _observation_from_variant(
             "status": "unavailable",
             "detected": None,
             "reason": fetch_error,
+        }
+    if target is None and probe is not None:
+        return {
+            "status": "below_filters",
+            "detected": False,
+            **_evidence_fields(probe["variant"]),
+            "passes_filters": False,
+            "failed_filters": probe["filter_check"]["failed_filters"],
+            "filter_check": probe["filter_check"],
+            "alt_reads_seen": alt_reads_seen,
+            "applied_filters": applied_filters,
+            "note": "Not called under the applied filters; evaluated at the requested site "
+            "anyway so its evidence can be judged.",
         }
     if target is None:
         block: dict[str, Any] = {
@@ -181,10 +200,19 @@ def _observation_from_variant(
         if alt_reads_seen is not None:
             block["alt_reads_seen"] = alt_reads_seen
         return block
-    artifact = target.get("artifact_risk", {})
     return {
         "status": "observed",
         "detected": True,
+        **_evidence_fields(target),
+        "passes_filters": True,
+        "applied_filters": applied_filters,
+    }
+
+
+def _evidence_fields(target: dict[str, Any]) -> dict[str, Any]:
+    """The read-level evidence fields of an evidence-enhanced (0-based) variant."""
+    artifact = target.get("artifact_risk", {})
+    return {
         "depth": target.get("depth"),
         "alt_count": target.get("alt_count"),
         "vaf": target.get("vaf"),
@@ -196,7 +224,6 @@ def _observation_from_variant(
         "artifact_likelihood": artifact.get("artifact_likelihood"),
         "artifact_risk_score": artifact.get("risk_score"),
         "artifact_concerns": [r.get("type") for r in artifact.get("risks", [])],
-        "applied_filters": applied_filters,
     }
 
 
@@ -278,7 +305,12 @@ async def assemble_evidence(
         a ``status`` of ``observed``/``not_called``/``unavailable`` (see
         :func:`_observation_from_variant`).
     """
-    from ..core.tools import _applied_filters, _fetch_region_with_timeout
+    from ..core.tools import (
+        _applied_filters,
+        _fetch_region_with_timeout,
+        probe_site,
+        site_filter_check,
+    )
 
     # Validation accepts lowercase alleles; calls and the external sources use uppercase.
     ref = ref.upper()
@@ -324,6 +356,7 @@ async def assemble_evidence(
 
     target: dict | None = None
     alt_reads_seen: int | None = None
+    probe: dict[str, Any] | None = None
     if data is not None:
         enhanced, _ = build_enhanced_variants(data)
         # data.variants carry pysam's 0-based position; pos is 1-based.
@@ -335,8 +368,25 @@ async def assemble_evidence(
             ):
                 target = v
                 break
+        if target is not None and not site_filter_check(target, config)["passes_filters"]:
+            target = None  # called by the parser but under the alt-read floor
         if target is None:
-            alt_reads_seen = _count_alt_reads(data, pos - 1, ref, alt)
+            # Evaluate the requested site anyway (min_baseq=0, no VAF/alt floor).
+            try:
+                probe = await probe_site(file_path, data, pos - 1, ref, alt, ref_path, config)
+            except (asyncio.TimeoutError, TimeoutError):
+                logger.warning("Site probe timed out during fusion")
+            except ReferenceUnavailableError:
+                # No reference base to verify REF against: don't probe (it could count ordinary
+                # reads as ALT); the site is reported as not called from the calls we have.
+                probe = None
+            alt_reads_seen = (
+                probe["filter_check"].get("unfiltered", probe["filter_check"]["at_filters"])[
+                    "alt_count"
+                ]
+                if probe
+                else _count_alt_reads(data, pos - 1, ref, alt)
+            )
 
     clinvar_block = _external_block(
         clinvar_result,
@@ -366,8 +416,11 @@ async def assemble_evidence(
         "observation": _observation_from_variant(
             target,
             fetch_error=fetch_error,
-            applied_filters=_applied_filters(config, {}, include_max_reads=True),
+            applied_filters=_applied_filters(
+                config, {}, include_max_reads=True, min_alt_count=config.min_alt_count
+            ),
             alt_reads_seen=alt_reads_seen,
+            probe=probe,
         ),
         "clinvar": clinvar_block,
         "population_frequency": pop_block,

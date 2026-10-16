@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from ..config import BAMCPConfig
 
@@ -32,6 +33,14 @@ class ToolInputError(Exception):
 
     Raise it with a message built only from caller-supplied values and static text —
     never from operator config (paths, hosts, tokens).
+    """
+
+
+class ReferenceUnavailableError(ToolInputError):
+    """A check needed the reference base and none was available (no reference resolved).
+
+    Distinct from a wrong REF: callers that have a safe fallback (e.g. classify reporting
+    the site as not called) may catch this one specifically.
     """
 
 
@@ -92,3 +101,30 @@ def sanitize_tool_exception(
         )
     logger.exception("%s: unexpected error", tool, exc_info=exc)
     return ToolInputError(f"Internal error while running {tool}.")
+
+
+def format_argument_error(
+    tool: str, exc: Exception, schema: dict[str, Any], arguments: dict[str, Any] | None
+) -> str:
+    """A short, caller-actionable message for arguments that failed schema validation.
+
+    FastMCP renders a pydantic ``ValidationError`` verbatim — a multi-line dump ending in an
+    ``errors.pydantic.dev`` URL that never names the parameters the tool actually takes. List
+    the missing / unexpected / mistyped arguments and the tool's expected parameters instead.
+    """
+    props: dict[str, Any] = schema.get("properties") or {}
+    required = set(schema.get("required") or [])
+    problems: list[str] = []
+    errors = exc.errors() if hasattr(exc, "errors") else []
+    for err in errors:
+        loc = ".".join(str(p) for p in err.get("loc", ()) if p is not None) or "arguments"
+        if err.get("type") == "missing":
+            problems.append(f"missing required '{loc}'")
+        else:
+            problems.append(f"'{loc}': {err.get('msg', 'invalid value')}")
+    unexpected = sorted(set(arguments or {}) - set(props))
+    if unexpected:
+        problems.append("unexpected " + ", ".join(f"'{u}'" for u in unexpected))
+    expected = ", ".join(f"{name}{' (required)' if name in required else ''}" for name in props)
+    detail = "; ".join(problems) or "invalid arguments"
+    return f"Invalid arguments for {tool}: {detail}. Expected parameters: {expected or 'none'}."

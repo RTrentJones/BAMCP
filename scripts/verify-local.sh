@@ -38,6 +38,7 @@ if [[ "${VERIFY_SKIP_VIEWER:-0}" != "1" ]]; then
     npm test
     npm run build
   )
+  python -m bamcp.viewer_build
 elif [[ ! -f src/bamcp/static/dist/viewer.html ]]; then
   echo "VERIFY_SKIP_VIEWER=1 but dist/viewer.html is missing; test_resources will fail" >&2
 fi
@@ -55,6 +56,12 @@ python -m pytest tests/ --ignore=tests/e2e -q --cov=bamcp --cov-fail-under=85 --
 step "eval-smoke (deterministic ship-gate)"
 python -m bamcp.eval.truthset --manifest tests/eval/datasets/synthetic_v1/manifest.yaml
 python -m bamcp.eval.truthset --manifest tests/eval/datasets/indel_v1/manifest.yaml --min-precision 1.0
+
+step "eval-visual-dry (visual-vs-text eval: fixtures, stimuli, leak-lint, grader self-tests)"
+if [[ -z "${PLAYWRIGHT_CHROMIUM_EXECUTABLE:-}" && -x /opt/pw-browsers/chromium ]]; then
+  export PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/pw-browsers/chromium
+fi
+python -m bamcp.eval.visual dry --out .eval-results/visual-dry
 
 if [[ "${VERIFY_E2E:-0}" == "1" ]]; then
   step "e2e (playwright, needs a built viewer + chromium)"

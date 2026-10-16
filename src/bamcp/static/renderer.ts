@@ -1,11 +1,13 @@
 import { StateManager } from "./state";
 import { Read } from "./types";
+import { ReadLayout, cachedLayout } from "./layout";
 import {
     BASE_COLORS,
     COLOR_PALETTES,
     DISPLAY_MODE_CONFIGS,
     DV_CHANNEL_COUNT,
     DV_PALETTE,
+    INDEL_COLORS,
     INSERT_SIZE_THRESHOLDS,
     SOFT_CLIP_STYLE,
     displayPos,
@@ -14,6 +16,13 @@ import {
     svColor,
     svTypeLabel,
 } from "./constants";
+
+/** Read opacity for a MAPQ: linear 0..60 → 0.2..1, clamped (255 = unavailable). */
+function mapqOpacity(mapq: number): number {
+    const v = Number(mapq);
+    if (!Number.isFinite(v) || v >= 255) return 1;
+    return Math.min(1, Math.max(v / 60, 0.2));
+}
 
 // Layout constants
 const RULER_HEIGHT = 20;
@@ -48,6 +57,10 @@ export class Renderer {
 
     private state: StateManager;
 
+    /** Called after every render() so the app can sync DOM chrome (mode select,
+     *  region box, banners, hidden-reads indicator) with what was just drawn. */
+    public onRendered: (() => void) | null = null;
+
     constructor(state: StateManager) {
         this.state = state;
 
@@ -65,7 +78,7 @@ export class Renderer {
     /**
      * Get read dimensions based on current display mode setting.
      */
-    private getReadDimensions(): { height: number; gap: number; showLabels: boolean } {
+    public getReadDimensions(): { height: number; gap: number; showLabels: boolean } {
         const mode = this.state.settings.displayMode;
         const config = DISPLAY_MODE_CONFIGS[mode] || DISPLAY_MODE_CONFIGS.compact;
         return {
@@ -198,6 +211,12 @@ export class Renderer {
         this.renderReference();
         this.renderCoverage();
         this.renderReads();
+        this.onRendered?.();
+    }
+
+    /** Packed rows actually drawn (rows past the backing-store cap are dropped). */
+    public get drawnRowCount(): number {
+        return Math.max(0, this.state.packedRows.length - this.rowsHidden);
     }
 
     private getScale(): number {
@@ -613,14 +632,22 @@ export class Renderer {
 
                 // Determine styling based on colorBy setting
                 let color = this.getReadColor(read);
-                let opacity = Math.max(read.mapping_quality / 60, 0.2);
+                // MAPQ fade: alpha scales with MAPQ (clamped — MAPQ 255 means
+                // "unavailable", and an out-of-range globalAlpha is silently ignored).
+                const mapqAlpha = mapqOpacity(read.mapping_quality);
+                let opacity = mapqAlpha;
                 let stroke = false;
+                // Alpha for base-level painting: MAPQ fade unless hover emphasises
+                // (1) or dims (0.1) the read.
+                let baseAlpha = mapqAlpha;
 
                 // Low MAPQ logic - always show MAPQ=0 reads distinctly
                 if (read.mapping_quality === 0) {
                     color = '#fff';
                     stroke = true;
                     opacity = 1;
+                    ctx.strokeStyle = '#6b7280';
+                    ctx.lineWidth = 1;
                 }
 
                 // Selection / Hover logic
@@ -636,6 +663,7 @@ export class Renderer {
                         ctx.lineWidth = 2;
                         stroke = true;
                         opacity = 1;
+                        baseAlpha = 1;
 
                         // Check if mate is off-screen and draw indicator
                         const mate = this.state.mateIndex.get(`${read.name}:${read.position}`);
@@ -689,6 +717,7 @@ export class Renderer {
                         ctx.lineWidth = 1.5;
                         stroke = true;
                         opacity = 1;
+                        baseAlpha = 1;
 
                         // Draw connector line
                         const midX = x1 + w / 2; // Current read (mate) center
@@ -737,64 +766,52 @@ export class Renderer {
                     } else {
                         // Dim unrelated reads
                         opacity = 0.1;
+                        baseAlpha = 0.1;
                     }
                 }
 
-                // Draw Read Body
-                ctx.fillStyle = read.mapping_quality === 0 ? '#fff' : color;
-                ctx.globalAlpha = opacity;
+                // Base level: paint CIGAR-aligned bases. The body polygon would be
+                // fully covered, so strand + MAPQ are carried by a strand stripe, an
+                // arrowhead and the base alpha instead (see renderReadBases).
+                const baseMode = scale >= 10 && !!read.sequence;
+                const layout = cachedLayout(read);
 
-                // Arrow shape
-                ctx.beginPath();
-                if (read.is_reverse) {
-                    ctx.moveTo(x1 + 5, y);
-                    ctx.lineTo(x2, y);
-                    ctx.lineTo(x2, y + READ_HEIGHT);
-                    ctx.lineTo(x1 + 5, y + READ_HEIGHT);
-                    ctx.lineTo(x1, y + READ_HEIGHT / 2);
-                } else {
-                    ctx.moveTo(x1, y);
-                    ctx.lineTo(x2 - 5, y);
-                    ctx.lineTo(x2, y + READ_HEIGHT / 2);
-                    ctx.lineTo(x2 - 5, y + READ_HEIGHT);
-                    ctx.lineTo(x1, y + READ_HEIGHT);
+                if (!baseMode) {
+                    // Draw Read Body
+                    ctx.fillStyle = read.mapping_quality === 0 ? '#fff' : color;
+                    ctx.globalAlpha = opacity;
+
+                    // Arrow shape
+                    ctx.beginPath();
+                    if (read.is_reverse) {
+                        ctx.moveTo(x1 + 5, y);
+                        ctx.lineTo(x2, y);
+                        ctx.lineTo(x2, y + READ_HEIGHT);
+                        ctx.lineTo(x1 + 5, y + READ_HEIGHT);
+                        ctx.lineTo(x1, y + READ_HEIGHT / 2);
+                    } else {
+                        ctx.moveTo(x1, y);
+                        ctx.lineTo(x2 - 5, y);
+                        ctx.lineTo(x2, y + READ_HEIGHT / 2);
+                        ctx.lineTo(x2 - 5, y + READ_HEIGHT);
+                        ctx.lineTo(x1, y + READ_HEIGHT);
+                    }
+                    ctx.closePath();
+                    ctx.fill();
+
+                    if (stroke) {
+                        ctx.globalAlpha = 1;
+                        ctx.stroke();
+                    }
+
+                    ctx.globalAlpha = 1; // Reset
                 }
-                ctx.closePath();
-                ctx.fill();
-
-                if (stroke) {
-                    ctx.globalAlpha = 1;
-                    ctx.stroke();
-                }
-
-                ctx.globalAlpha = 1; // Reset
 
                 // Render soft clips if enabled
                 this.renderSoftClips(ctx, read, x1, x2, y, READ_HEIGHT, scale);
 
-                // High Zoom: Render Bases
-                if (scale >= 10 && read.sequence) {
-                    ctx.font = '10px monospace';
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'middle';
-
-                    const seq = read.sequence;
-                    // Draw each base with colored background and contrasting text
-                    for (let i = 0; i < seq.length; i++) {
-                        const baseX = x1 + (i * scale);
-                        if (baseX + scale < 0 || baseX > width) continue;
-
-                        const base = seq[i].toUpperCase();
-                        const bgColor = BASE_COLORS[base] || '#374151';
-
-                        // Draw colored background for the base
-                        ctx.fillStyle = bgColor;
-                        ctx.fillRect(baseX, y, Math.max(scale - 0.5, 1), READ_HEIGHT);
-
-                        // Draw white text on colored background for contrast
-                        ctx.fillStyle = '#fff';
-                        ctx.fillText(base, baseX + scale / 2, y + READ_HEIGHT / 2);
-                    }
+                if (baseMode) {
+                    this.renderReadBases(ctx, read, layout, x1, x2, y, READ_HEIGHT, scale, width, baseAlpha, stroke);
                 }
                 // Medium Zoom: Draw Mismatches
                 else if (scale > 0.5) {
@@ -805,6 +822,11 @@ export class Renderer {
                             ctx.fillRect(mx, y, Math.max(scale, 1), READ_HEIGHT);
                         }
                     }
+                }
+
+                // Deletions / reference skips / insertions from the CIGAR.
+                if (scale > 0.5) {
+                    this.renderIndelMarks(ctx, layout, y, READ_HEIGHT, scale, width);
                 }
             }
         }
@@ -819,6 +841,123 @@ export class Renderer {
         this.renderSvSpans(ctx, scale, width);
 
         this.drawRowClipIndicator(ctx);
+    }
+
+    /**
+     * Base-level painting of one read: each CIGAR-aligned base as a coloured cell
+     * (with its letter when tall enough), a strand-coloured stripe along the bottom
+     * and a strand arrowhead past the 3' end. Everything is drawn at `alpha`, so the
+     * MAPQ fade stays visible even though the bases cover the read body.
+     */
+    private renderReadBases(
+        ctx: CanvasRenderingContext2D,
+        read: Read,
+        layout: ReadLayout,
+        x1: number,
+        x2: number,
+        y: number,
+        h: number,
+        scale: number,
+        width: number,
+        alpha: number,
+        stroke: boolean,
+    ): void {
+        const seq = read.sequence ?? '';
+        const vpStart = this.state.viewport.start;
+        const stripeH = Math.max(2, Math.round(h * 0.2));
+        // 1px separation between bases and stripe only when the row has room.
+        const baseH = Math.max(1, h - stripeH - (h >= 10 ? 1 : 0));
+        const strandColor = read.is_reverse
+            ? COLOR_PALETTES.strand.reverse
+            : COLOR_PALETTES.strand.forward;
+
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        const showText = baseH >= 7;
+        if (showText) {
+            ctx.font = `${Math.min(10, baseH)}px monospace`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+        }
+        for (const { refPos, qpos } of layout.bases) {
+            const bx = (refPos - vpStart) * scale;
+            if (bx + scale < 0) continue;
+            if (bx > width) break;
+            const base = (seq[qpos] ?? 'N').toUpperCase();
+            ctx.fillStyle = BASE_COLORS[base] || '#374151';
+            ctx.fillRect(bx, y, Math.max(scale - 0.5, 1), baseH);
+            if (showText) {
+                ctx.fillStyle = '#fff';
+                ctx.fillText(base, bx + scale / 2, y + baseH / 2);
+            }
+        }
+
+        // Strand stripe along the bottom of the read.
+        ctx.fillStyle = strandColor;
+        ctx.fillRect(x1, y + h - stripeH, Math.max(x2 - x1, 1), stripeH);
+
+        // Strand arrowhead just past the read's 3' end (packing leaves >= 1 base gap).
+        const aw = Math.min(6, Math.max(3, scale * 0.5));
+        ctx.beginPath();
+        if (read.is_reverse) {
+            ctx.moveTo(x1, y);
+            ctx.lineTo(x1 - aw, y + h / 2);
+            ctx.lineTo(x1, y + h);
+        } else {
+            ctx.moveTo(x2, y);
+            ctx.lineTo(x2 + aw, y + h / 2);
+            ctx.lineTo(x2, y + h);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+
+        if (stroke) {
+            // strokeStyle/lineWidth were set by the MAPQ-0 / hover logic.
+            ctx.strokeRect(x1, y, Math.max(x2 - x1, 1), h);
+        }
+    }
+
+    /**
+     * CIGAR indel marks: a deletion clears the read body over the deleted span and
+     * draws a dark bar; a reference skip (N) draws a thin grey line; an insertion
+     * draws a purple I-beam at the junction.
+     */
+    private renderIndelMarks(
+        ctx: CanvasRenderingContext2D,
+        layout: ReadLayout,
+        y: number,
+        h: number,
+        scale: number,
+        width: number,
+    ): void {
+        if (!layout.deletions.length && !layout.insertions.length) return;
+        const vpStart = this.state.viewport.start;
+        for (const d of layout.deletions) {
+            const dx1 = (d.start - vpStart) * scale;
+            const dx2 = (d.end - vpStart) * scale;
+            if (dx2 < 0 || dx1 > width) continue;
+            const w = Math.max(dx2 - dx1, 1);
+            ctx.clearRect(dx1, y, w, h);
+            if (d.skip) {
+                ctx.fillStyle = INDEL_COLORS.skip;
+                ctx.fillRect(dx1, y + h / 2 - 0.5, w, 1);
+            } else {
+                const t = Math.max(2, Math.round(h * 0.18));
+                ctx.fillStyle = INDEL_COLORS.deletion;
+                ctx.fillRect(dx1, y + (h - t) / 2, w, t);
+            }
+        }
+        ctx.fillStyle = INDEL_COLORS.insertion;
+        for (const ins of layout.insertions) {
+            const ix = (ins.refPos - vpStart) * scale;
+            if (ix < -4 || ix > width + 4) continue;
+            ctx.fillRect(ix - 1, y, 2, h);
+            if (scale >= 4) {
+                ctx.fillRect(ix - 3, y, 6, 2);
+                ctx.fillRect(ix - 3, y + h - 2, 6, 2);
+            }
+        }
     }
 
     /**
@@ -960,7 +1099,7 @@ export class Renderer {
      */
     private renderVariantMarkers(ctx: CanvasRenderingContext2D, scale: number, width: number): void {
         const data = this.state.data;
-        if (!data || !data.variants.length) return;
+        if (!data || !data.variants?.length) return;
 
         // Only show markers if zoomed in enough
         if (scale < 0.5) return;
@@ -1146,18 +1285,15 @@ export class Renderer {
         const ctx = this.readsCtx;
         const stripH = Math.floor(readHeight / DV_CHANNEL_COUNT);
 
-        const len = this.readPositionLength(read);
         const mismatchSet = this.buildMismatchSet(read);
 
-        // Iterate every reference position the read covers.
-        for (let i = 0; i < len; i++) {
-            const xi = x1 + i * scale;
-            const refPos = read.position + i;
+        // Iterate every CIGAR-aligned reference position the read covers.
+        for (const { refPos, qpos } of cachedLayout(read).bases) {
+            const xi = x1 + (refPos - read.position) * scale;
             if (xi + baseW < 0) continue;
             if (xi > this.logicalWidth) break;
 
-            const base = (read.sequence && i < read.sequence.length) ? read.sequence[i].toUpperCase() : 'N';
-            const qual = (read.qualities && i < read.qualities.length) ? read.qualities[i] : 0;
+            const { base, qual } = this.baseAndQual(read, qpos);
             const mapq = read.mapping_quality;
             const supportsVariant = this.classifyVariantSupport(refPos, base, activePos, activeAlt);
             const isMismatch = mismatchSet.has(refPos);
@@ -1210,17 +1346,14 @@ export class Renderer {
         activeAlt: string | null,
     ): void {
         const ctx = this.readsCtx;
-        const len = this.readPositionLength(read);
         const mismatchSet = this.buildMismatchSet(read);
 
-        for (let i = 0; i < len; i++) {
-            const xi = x1 + i * scale;
-            const refPos = read.position + i;
+        for (const { refPos, qpos } of cachedLayout(read).bases) {
+            const xi = x1 + (refPos - read.position) * scale;
             if (xi + baseW < 0) continue;
             if (xi > this.logicalWidth) break;
 
-            const base = (read.sequence && i < read.sequence.length) ? read.sequence[i].toUpperCase() : 'N';
-            const qual = (read.qualities && i < read.qualities.length) ? read.qualities[i] : 0;
+            const { base, qual } = this.baseAndQual(read, qpos);
             const support = this.classifyVariantSupport(refPos, base, activePos, activeAlt);
             const supportTone = support === 'alt' ? 1.0 : support === 'ref' ? 0.45 : 0.0;
 
@@ -1237,13 +1370,38 @@ export class Renderer {
                 ctx.fillRect(xi, y, baseW, Math.max(1, Math.floor(readHeight / 4)));
             }
         }
+
+        // Strand cue: the composite RGB has no strand channel, so draw a
+        // strand-coloured stripe along the bottom edge plus a 3'-end arrowhead.
+        const x2 = (read.end_position - this.state.viewport.start) * scale;
+        const stripeH = Math.max(1, Math.floor(readHeight / 4));
+        ctx.fillStyle = read.is_reverse ? DV_PALETTE.strandReverse : DV_PALETTE.strandForward;
+        ctx.fillRect(x1, y + readHeight - stripeH, Math.max(x2 - x1, 1), stripeH);
+        if (scale >= 2) {
+            const aw = Math.min(4, Math.max(2, scale * 0.5));
+            ctx.beginPath();
+            if (read.is_reverse) {
+                ctx.moveTo(x1, y);
+                ctx.lineTo(x1 - aw, y + readHeight / 2);
+                ctx.lineTo(x1, y + readHeight);
+            } else {
+                ctx.moveTo(x2, y);
+                ctx.lineTo(x2 + aw, y + readHeight / 2);
+                ctx.lineTo(x2, y + readHeight);
+            }
+            ctx.closePath();
+            ctx.fill();
+        }
     }
 
-    private readPositionLength(read: Read): number {
-        // Use sequence length when available; otherwise fall back to the
-        // end-position span so the read still draws (no per-base channels).
-        if (read.sequence) return read.sequence.length;
-        return Math.max(1, read.end_position - read.position);
+    /** Read base + PHRED quality at query index `qpos` ('N' / 0 when absent). */
+    private baseAndQual(read: Read, qpos: number): { base: string; qual: number } {
+        const seq = read.sequence;
+        const quals = read.qualities;
+        return {
+            base: seq && qpos < seq.length ? seq[qpos].toUpperCase() : 'N',
+            qual: quals && qpos < quals.length ? quals[qpos] : 0,
+        };
     }
 
     private buildMismatchSet(read: Read): Set<number> {

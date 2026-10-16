@@ -7,14 +7,17 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
+from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from . import __version__
 from .analysis.acmg import handle_classify_variant
 from .analysis.curation import handle_get_variant_curation_summary
 from .config import BAMCPConfig
-from .core.errors import sanitize_tool_exception
+from .core.errors import format_argument_error, sanitize_tool_exception
 from .core.tools import (
     handle_cleanup_cache,
     handle_get_coverage,
@@ -28,8 +31,10 @@ from .core.tools import (
     handle_search_gene,
     handle_visualize_region,
 )
+from .demos import resolve_demo_alias
+from .prompts import SERVER_INSTRUCTIONS, register_demo_surface
 from .resources import get_viewer_html
-from .tool_specs import REGION_FORMAT_NOTE
+from .tool_specs import AUTO_REFERENCE_NOTE, DETECTION_DEFAULTS_NOTE, REGION_FORMAT_NOTE
 
 _VIEWER_URI = "ui://bamcp/viewer"
 _VIEWER_META: dict = {"ui": {"resourceUri": _VIEWER_URI}}
@@ -55,6 +60,33 @@ def _viewer_result(result: dict) -> CallToolResult:
     )
 
 
+def _install_argument_error_mapping(mcp: FastMCP) -> None:
+    """Map schema-validation failures to a short message naming the expected parameters.
+
+    Argument validation runs inside FastMCP (before ``_run``), which renders the raw pydantic
+    dump (with an errors.pydantic.dev URL) as the tool error. Wrap the tool manager's
+    ``call_tool`` so that one failure mode gets the same client-friendly envelope as the rest.
+    """
+    manager = mcp._tool_manager
+    original = manager.call_tool
+
+    async def call_tool(
+        name: str, arguments: dict[str, Any], context: Any = None, convert_result: bool = False
+    ) -> Any:
+        try:
+            return await original(name, arguments, context=context, convert_result=convert_result)
+        except ToolError as e:
+            cause = e.__cause__
+            tool = manager.get_tool(name)
+            if isinstance(cause, ValidationError) and tool is not None:
+                raise ToolError(
+                    format_argument_error(name, cause, tool.parameters, arguments)
+                ) from None
+            raise
+
+    manager.call_tool = call_tool  # type: ignore[method-assign]
+
+
 def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     """Create and configure the BAMCP MCP server."""
     if config is None:
@@ -62,6 +94,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     kwargs: dict = {
         "name": "bamcp",
+        "instructions": SERVER_INSTRUCTIONS,
         "host": config.host,
         "port": config.port,
     }
@@ -87,13 +120,15 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         kwargs["auth"] = build_auth_settings(config)
 
     mcp = FastMCP(**kwargs)
+    # serverInfo.version: BAMCP's own version, not the mcp SDK's (FastMCP's default fallback).
+    mcp._mcp_server.version = __version__
 
     async def _run(tool: str, handler: _Handler, args: dict[str, Any]) -> dict:
         """Run a handler under the one error envelope: any failure surfaces as an MCP error
         result (isError=true) with a sanitized message — never raw pysam/OS text that could
         carry operator paths (see core/errors.py)."""
         try:
-            return await handler(args, config)
+            return await handler(resolve_demo_alias(args), config)
         except Exception as e:  # noqa: BLE001 — every failure goes through the sanitizer
             raise sanitize_tool_exception(e, tool, config) from e
 
@@ -106,6 +141,11 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         description=(
             "Detect and return candidate variants in a genomic region. "
             + REGION_FORMAT_NOTE
+            + " Each variant carries artifact_risk, confidence, concerns and a plain-language "
+            "interpretation (with a zygosity hint). "
+            + DETECTION_DEFAULTS_NOTE
+            + " "
+            + AUTO_REFERENCE_NOTE
             + " variant_source: 'auto' (BAMCP candidates, VCF overlaid if given), "
             "'vcf' (the VCF is authoritative — BAMCP attaches read-level evidence at "
             "each site; requires vcf_path), or 'bamcp' (BAMCP candidates only)."
@@ -119,6 +159,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         variant_source: str = "auto",
         min_vaf: float | None = None,
         min_depth: int | None = None,
+        min_alt_count: int | None = None,
     ) -> str:
         args = _args(
             file_path=file_path,
@@ -128,6 +169,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             variant_source=variant_source,
             min_vaf=min_vaf,
             min_depth=min_depth,
+            min_alt_count=min_alt_count,
         )
         return _text(await _run("get_variants", handle_get_variants, args))
 
@@ -144,30 +186,32 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     @mcp.tool(
         description=(
-            "List chromosomes/contigs in a BAM/CRAM file and detect genome build. "
-            "Use this first on new BAM files to determine whether reference is GRCh37 or GRCh38. "
-            "Returns detected build, confidence, and suggested public reference URL if available."
+            "Detect a BAM/CRAM's genome build (GRCh37 vs GRCh38) and contig naming style, and "
+            "list its primary chromosomes. Use this first on new BAM files. The summary (build, "
+            "style, suggested public reference URL, contig counts) comes first; alt/decoy/HLA/"
+            "unplaced contigs are counted, not listed, unless include_all=true."
         ),
     )
     async def list_contigs(
         file_path: str,
         reference: str | None = None,
+        include_all: bool = False,
     ) -> str:
-        args = _args(file_path=file_path, reference=reference)
+        args = _args(file_path=file_path, reference=reference, include_all=include_all)
         return _text(await _run("list_contigs", handle_list_contigs, args))
 
     @mcp.tool(
         description=(
             "Jump to a specific genomic position and view surrounding reads. "
-            "position is 1-based (VCF/samtools convention). If contig is omitted, the "
-            "BAM's first contig is used."
+            "contig and position are both required; position is 1-based (VCF/samtools "
+            "convention). Contig names follow the BAM (call list_contigs: 'chr17' vs '17')."
         ),
         meta=_VIEWER_META,
     )
     async def jump_to(
         file_path: str,
+        contig: str,
         position: int,
-        contig: str | None = None,
         window: int | None = None,
         reference: str | None = None,
         vcf_path: str | None = None,
@@ -212,7 +256,8 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     @mcp.tool(
         description=(
             "Get a text summary of a genomic region "
-            "(read count, coverage, candidate variants) for LLM reasoning. " + REGION_FORMAT_NOTE
+            "(read count, coverage, candidate variants each with a plain-language "
+            "interpretation) for LLM reasoning. " + REGION_FORMAT_NOTE + " " + AUTO_REFERENCE_NOTE
         ),
     )
     async def get_region_summary(
@@ -221,6 +266,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         reference: str | None = None,
         vcf_path: str | None = None,
         variant_source: str = "auto",
+        min_alt_count: int | None = None,
     ) -> str:
         args = _args(
             file_path=file_path,
@@ -228,6 +274,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             reference=reference,
             vcf_path=vcf_path,
             variant_source=variant_source,
+            min_alt_count=min_alt_count,
         )
         return _text(await _run("get_region_summary", handle_get_region_summary, args))
 
@@ -275,7 +322,9 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         description=(
             "Get a detailed curation summary for a specific variant with artifact risk "
             "assessment, quality metrics, and recommendations for clinical interpretation. "
-            "Use this for in-depth variant review by genetic curators. Set format='rubric' "
+            "Use this for in-depth variant review by genetic curators. The named site is "
+            "evaluated even when it fails the calling filters (filter_check says which), so a "
+            "filtered-out artifact is scored, not 'not found'. Set format='rubric' (or 'json') "
             "for machine-scorable JSON; include_clinical=true adds ClinVar/gnomAD context."
         ),
     )
@@ -362,25 +411,32 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     @mcp.tool(
         description=(
-            "Scan an entire contig for candidate variants using fast coverage-based detection. "
-            "Requires a reference genome. Returns up to 500 candidate variants ranked by VAF. "
-            "If contig is omitted, the BAM's first contig is scanned. "
-            "Use list_contigs first to detect genome build and get a reference URL."
+            "Scan a contig (or a 1-based region 'contig:start-end') for candidate SNVs using "
+            "fast coverage-based detection. Requires a reference genome ("
+            + AUTO_REFERENCE_NOTE
+            + ") Returns up to 500 candidates (the highest-VAF ones when capped) sorted by "
+            "position. A scan that hits its time budget returns partial results with "
+            "truncated=true and next_region: pass that as region to continue. If contig and "
+            "region are omitted, the BAM's first contig is scanned. " + DETECTION_DEFAULTS_NOTE
         ),
     )
     async def scan_variants(
         file_path: str,
         contig: str | None = None,
+        region: str | None = None,
         reference: str | None = None,
         min_vaf: float | None = None,
         min_depth: int | None = None,
+        min_alt_count: int | None = None,
     ) -> str:
         args = _args(
             file_path=file_path,
             contig=contig,
+            region=region,
             reference=reference,
             min_vaf=min_vaf,
             min_depth=min_depth,
+            min_alt_count=min_alt_count,
         )
         return _text(await _run("scan_variants", handle_scan_variants, args))
 
@@ -405,6 +461,9 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     )
     def viewer() -> str:
         return get_viewer_html()
+
+    register_demo_surface(mcp)
+    _install_argument_error_mapping(mcp)
 
     # -- Deploy identity -----------------------------------------------------
     # Greenlight's verify gate compares the commit the image was built from (GREENLIGHT_SHA, baked

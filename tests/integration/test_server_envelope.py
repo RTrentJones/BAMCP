@@ -58,10 +58,11 @@ async def test_jump_to_validates_region_like_visualize_region():
 
 
 @pytest.mark.integration
-async def test_jump_to_defaults_to_first_bam_contig():
+async def test_jump_to_requires_contig():
+    # A bare position must not silently land on the first contig (chr1 for a chr17 locus).
     result = await _call(BAMCPConfig(), "jump_to", {"file_path": SMALL_BAM, "position": 100})
-    assert not result.isError
-    assert result.structuredContent["contig"] == "chr1"
+    assert result.isError
+    assert "contig" in _text(result)
 
 
 @pytest.mark.integration
@@ -156,3 +157,38 @@ async def test_cleanup_cache_is_noop_on_shared_http_server(tmp_path):
     assert "disabled on shared" in _text(result)
     assert index.exists()
     assert "this session" not in _text(result)
+
+
+@pytest.mark.integration
+async def test_wrong_parameter_name_lists_expected_parameters():
+    # 'position' instead of 'pos': a short message, no raw pydantic dump or docs URL.
+    result = await _call(
+        BAMCPConfig(),
+        "lookup_clinvar",
+        {"chrom": "17", "position": 43099914, "ref": "G", "alt": "A"},
+    )
+    assert result.isError
+    text = _text(result)
+    assert "pydantic" not in text
+    assert "missing required 'pos'" in text
+    assert "unexpected 'position'" in text
+    assert "Expected parameters: chrom (required), pos (required)" in text
+
+
+@pytest.mark.integration
+async def test_mistyped_parameter_is_named():
+    result = await _call(
+        BAMCPConfig(), "lookup_gnomad", {"chrom": "17", "pos": "abc", "ref": "G", "alt": "A"}
+    )
+    assert result.isError
+    assert "'pos':" in _text(result)
+    assert "pydantic" not in _text(result)
+
+
+@pytest.mark.integration
+async def test_server_info_reports_bamcp_version():
+    from bamcp import __version__
+
+    opts = create_server(BAMCPConfig())._mcp_server.create_initialization_options()
+    assert opts.server_name == "bamcp"
+    assert opts.server_version == __version__

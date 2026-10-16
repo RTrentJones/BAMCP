@@ -33,9 +33,20 @@ async def test_assemble_evidence_detects_fixture_variant(offline_cfg, comprehens
 
 @pytest.mark.unit
 async def test_assemble_evidence_absent_variant_not_detected(offline_cfg, comprehensive_bam_path):
-    # A position with no planted variant should report not-detected, no crash.
-    ev = await assemble_evidence("chr1", 1500, "A", "G", comprehensive_bam_path, offline_cfg)
+    # A position with no planted variant should report not-detected, no crash. REF is the
+    # real reference base there (C): a wrong REF is rejected, see the test below.
+    ev = await assemble_evidence("chr1", 1500, "C", "G", comprehensive_bam_path, offline_cfg)
     assert ev["observation"]["detected"] is False
+
+
+@pytest.mark.unit
+async def test_assemble_evidence_rejects_ref_mismatch(offline_cfg, comprehensive_bam_path):
+    # A REF that isn't the reference base would make the site probe count ordinary reads as
+    # alt support (and the ClinVar/gnomAD lookups would query the wrong allele): caller error.
+    from bamcp.core.errors import ToolInputError
+
+    with pytest.raises(ToolInputError, match="does not match the reference"):
+        await assemble_evidence("chr1", 1500, "A", "G", comprehensive_bam_path, offline_cfg)
 
 
 @pytest.mark.unit
@@ -91,20 +102,20 @@ async def test_handle_classify_variant_offline(offline_cfg, comprehensive_bam_pa
 
 @pytest.mark.unit
 async def test_handle_classify_variant_rejects_bad_input(offline_cfg, comprehensive_bam_path):
-    import json
+    from bamcp.core.errors import ToolInputError
 
-    result = await handle_classify_variant(
-        {
-            "file_path": comprehensive_bam_path,
-            "chrom": "chr1",
-            "pos": -5,
-            "ref": "A",
-            "alt": "T",
-        },
-        offline_cfg,
-    )
-    payload = json.loads(result["content"][0]["text"])
-    assert "error" in payload
+    # Invalid input is a tool error (isError), never a success payload carrying "error".
+    with pytest.raises(ToolInputError, match="Position must be positive"):
+        await handle_classify_variant(
+            {
+                "file_path": comprehensive_bam_path,
+                "chrom": "chr1",
+                "pos": -5,
+                "ref": "A",
+                "alt": "T",
+            },
+            offline_cfg,
+        )
 
 
 @pytest.mark.unit
@@ -350,7 +361,8 @@ async def test_assemble_evidence_failed_read_is_unavailable(offline_cfg, monkeyp
 async def test_assemble_evidence_filtered_variant_echoes_filters(
     comprehensive_ref_fasta_path, comprehensive_bam_path
 ):
-    """A real variant dropped by min_vaf must not read as a reference call."""
+    """A real variant dropped by min_vaf must not read as a reference call: the requested
+    site is evaluated anyway and reported as below_filters with the filter it fails."""
     cfg = BAMCPConfig(
         reference=comprehensive_ref_fasta_path,
         clinvar_enabled=False,
@@ -359,16 +371,19 @@ async def test_assemble_evidence_filtered_variant_echoes_filters(
     )
     ev = await assemble_evidence("chr1", 1051, "A", "T", comprehensive_bam_path, cfg)
     obs = ev["observation"]
-    assert obs["status"] == "not_called"
+    assert obs["status"] == "below_filters"
     assert obs["detected"] is False
+    assert obs["passes_filters"] is False
+    assert obs["failed_filters"] == ["min_vaf"]
     assert obs["applied_filters"]["min_vaf"] == 0.95
     assert obs["alt_reads_seen"] == 8
+    assert obs["alt_count"] == 8 and obs["artifact_likelihood"] is not None
 
     from bamcp.analysis.acmg import _format_classify_text
 
     text = _format_classify_text(ev, build_acmg_scaffold(ev))
     assert "min_vaf=0.95" in text
-    assert "ARE present" in text
+    assert "NOT CALLED under the applied filters (fails min_vaf)" in text
 
 
 @pytest.mark.unit
@@ -554,3 +569,30 @@ async def test_bam_build_routes_lookups_to_the_bams_assembly(monkeypatch):
     monkeypatch.setattr(tools, "get_clinvar_client", lambda config: _Client())
     await fusion._lookup_clinvar_safe(cfg, "17", 7579472, "G", "C", "GRCh37")
     assert seen["build"] == "GRCh37"
+
+
+@pytest.mark.unit
+def test_gnomad_caution_is_direction_neutral_and_not_repeated():
+    from bamcp.analysis.acmg import _benign_frequency_caveat, _format_classify_text
+
+    pop = {
+        "global_af": 0.207,
+        "max_pop_af": 0.235,
+        "filters": ["joint:discrepant_frequencies"],
+        "frequency_reliable": False,
+        "warnings": ["site fails gnomAD QC filters in joint (['joint:discrepant_frequencies'])"],
+    }
+    ev = {
+        "variant": {"location": "chr17:43099914", "change": "G>A"},
+        "observation": {"status": "observed", "detected": True},
+        "clinvar": None,
+        "population_frequency": pop,
+    }
+    text = _format_classify_text(ev, build_acmg_scaffold(ev))
+    caution = next(line for line in text.splitlines() if "CAUTION" in line)
+    # A common (AF 0.2) site must not be cautioned about "rarity".
+    assert "NOT evidence of rarity" not in caution
+    assert "unreliable in either direction" in caution
+    # The failed-QC reason appears once, not restated by gnomAD's own warning.
+    assert caution.count("discrepant_frequencies") == 1
+    assert _benign_frequency_caveat(pop).count("discrepant_frequencies") == 1

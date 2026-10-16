@@ -1,6 +1,8 @@
 """BAM/CRAM file parsing using pysam."""
 
-from collections.abc import Sequence
+import os
+from collections import OrderedDict
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -200,7 +202,7 @@ def extract_soft_clips(read: pysam.AlignedSegment) -> list[SoftClip]:
     return clips
 
 
-def parse_region(region: str) -> tuple[str, int, int]:
+def parse_region(region: str, max_size: int | None = MAX_REGION_SIZE) -> tuple[str, int, int]:
     """
     Parse a 1-based, inclusive (samtools-style) region string into internal coordinates.
 
@@ -216,6 +218,7 @@ def parse_region(region: str) -> tuple[str, int, int]:
         - chr1:1,000-2,000
         - 1:1000-2000
         - HLA-A*01:01:01:01:100-200 (contig names containing ':' split on the last ':')
+        - chr1:1000 (a single 1-based base, the same as chr1:1000-1000)
 
     The end is NOT clamped here (no header is available); the fetchers clamp it to
     the contig length once the file is open (see :func:`_clamp_end`).
@@ -223,19 +226,23 @@ def parse_region(region: str) -> tuple[str, int, int]:
     Returns:
         Tuple of (contig, start0, end) — 0-based half-open.
 
+    ``max_size`` caps the span (default MAX_REGION_SIZE; None for no cap — scan_variants
+    bounds its own work by time instead).
+
     Raises:
-        ValueError: If region format is invalid or exceeds MAX_REGION_SIZE.
+        ValueError: If region format is invalid or exceeds ``max_size``.
     """
     region = region.replace(",", "")
     try:
         contig, coords = region.rsplit(":", 1)
-        start_str, end_str = coords.split("-")
+        # A bare position ("chr17:43099914") is the single base N-N, as samtools reads it.
+        start_str, end_str = coords.split("-") if "-" in coords else (coords, coords)
         start1 = int(start_str)
         end = int(end_str)
     except (ValueError, AttributeError) as e:
         raise ValueError(
             f"Invalid region format: '{region}'. Expected 1-based inclusive "
-            f"'chr1:1000-2000' (samtools-style)"
+            f"'chr1:1000-2000' (samtools-style) or a single base 'chr1:1000'"
         ) from e
     if not contig:
         raise ValueError(f"Invalid region format: '{region}'. Missing contig name")
@@ -249,9 +256,9 @@ def parse_region(region: str) -> tuple[str, int, int]:
 
     start = start1 - 1
     region_size = end - start
-    if region_size > MAX_REGION_SIZE:
+    if max_size is not None and region_size > max_size:
         raise ValueError(
-            f"Region size {region_size:,}bp exceeds maximum allowed {MAX_REGION_SIZE:,}bp. "
+            f"Region size {region_size:,}bp exceeds maximum allowed {max_size:,}bp. "
             f"Please request a smaller region."
         )
 
@@ -268,11 +275,29 @@ def format_region(contig: str, start0: int, end: int) -> str:
     return f"{contig}:{start0 + 1}-{end}"
 
 
+def contig_not_found_message(contig: str, names: Iterable[str]) -> str:
+    """A caller-safe "contig not found" message that names the other-style spelling.
+
+    A BAM using ``13`` rejects ``chr13`` (and vice versa) — the commonest wrong-contig error,
+    usually from coordinates copied out of a differently-styled source. Built only from the
+    caller's contig and the file's own header names (never operator config).
+    """
+    from .reference import map_contig_to_style
+
+    msg = f"Contig '{contig}' not found in the alignment header"
+    alt = map_contig_to_style(contig, frozenset(names))
+    if alt is not None and alt != contig:
+        msg += f"; this file names it '{alt}' — retry with '{alt}'"
+    else:
+        msg += "; check contig names with list_contigs"
+    return msg
+
+
 def _clamp_end(lengths: dict[str, int], contig: str, start: int, end: int) -> int:
     """Clamp ``end`` to the contig length; raise a clear error for unknown contigs/starts."""
     length = lengths.get(contig)
     if length is None:
-        raise ValueError(f"Contig '{contig}' not found in the alignment header")
+        raise ValueError(contig_not_found_message(contig, lengths))
     if start >= length:
         raise ValueError(
             f"Region start {start + 1} is past the end of {contig} (length {length:,})"
@@ -299,6 +324,33 @@ def _open_alignment(
     )
 
 
+# Locally cached .fai/.gzi for remote reference FASTAs (url -> (fai, gzi)), registered by
+# core.tools._ensure_reference_indexes. Without them every FastaFile open of a remote bgzip FASTA
+# re-downloads its .fai and .gzi (seconds per call on the public 1000 Genomes server). Bounded LRU.
+_REFERENCE_INDEXES: OrderedDict[str, tuple[str, str | None]] = OrderedDict()
+_REFERENCE_INDEXES_MAX = 32
+
+
+def register_reference_index(reference_url: str, fai: str, gzi: str | None) -> None:
+    """Record local index files for a remote reference (see :func:`open_fasta`)."""
+    _REFERENCE_INDEXES[reference_url] = (fai, gzi)
+    _REFERENCE_INDEXES.move_to_end(reference_url)
+    while len(_REFERENCE_INDEXES) > _REFERENCE_INDEXES_MAX:
+        _REFERENCE_INDEXES.popitem(last=False)
+
+
+def open_fasta(reference_path: str) -> pysam.FastaFile:
+    """Open a reference FASTA, using locally cached .fai/.gzi for a remote one when present."""
+    cached = _REFERENCE_INDEXES.get(reference_path)
+    if cached is not None:
+        fai, gzi = cached
+        if os.path.exists(fai) and (gzi is None or os.path.exists(gzi)):
+            return pysam.FastaFile(
+                reference_path, filepath_index=fai, filepath_index_compressed=gzi
+            )
+    return pysam.FastaFile(reference_path)
+
+
 def fetch_reference_sequence(reference_path: str, region: str) -> str:
     """Fetch the reference sequence for a 1-based inclusive region string.
 
@@ -306,7 +358,7 @@ def fetch_reference_sequence(reference_path: str, region: str) -> str:
     a slice that runs past the contig end, matching the alignment-side clamp.
     """
     contig, start, end = parse_region(region)
-    with pysam.FastaFile(reference_path) as fasta:
+    with open_fasta(reference_path) as fasta:
         return fasta.fetch(contig, start, end)
 
 
@@ -365,7 +417,7 @@ def fetch_candidate_variants_only(
     )
     cov_A, cov_C, cov_G, cov_T = counts
     coverage = (np.array(cov_A) + np.array(cov_C) + np.array(cov_G) + np.array(cov_T)).tolist()
-    with pysam.FastaFile(reference_path) as fasta:
+    with open_fasta(reference_path) as fasta:
         ref_seq = fasta.fetch(contig, start, end)
     indels, gap_depth = _detect_indels_if_small(
         bam_path,
@@ -745,7 +797,7 @@ def fetch_region(
 
         ref_seq: str | None = None
         if reference_path:
-            with pysam.FastaFile(reference_path) as fasta:
+            with open_fasta(reference_path) as fasta:
                 ref_seq = fasta.fetch(contig, start, end)
 
         read_count = 0
@@ -889,6 +941,7 @@ def detect_variants(
     min_vaf: float = 0.1,
     min_depth: int = 10,
     gap_depth: Sequence[int] | None = None,
+    min_alt_count: int = 1,
 ) -> list[dict]:
     """
     Detect candidate SNVs from coverage counts (A, C, G, T).
@@ -905,6 +958,9 @@ def detect_variants(
             count_coverage only tallies A/C/G/T, so at deletion-heavy loci the naive
             ``sum(A,C,G,T)`` denominator understates depth and inflates VAF. Adding
             gap_depth restores the true spanning depth.
+        min_alt_count: Minimum alt-supporting reads (1 = no floor). The tool layer applies
+            the configured floor itself; scan_contig passes it here so its result cap
+            counts only candidates that survive it.
 
     Returns:
         List of candidate variant dicts (contig, position, ref, alt, vaf, depth,
@@ -941,7 +997,7 @@ def detect_variants(
             if base == ref_base:
                 continue
 
-            if count == 0:
+            if count == 0 or count < min_alt_count:
                 continue
 
             vaf = count / total
@@ -1203,6 +1259,7 @@ def scan_contig(
     min_baseq: int = 0,
     max_region: int = 250_000_000,
     index_filename: str | None = None,
+    min_alt_count: int = 1,
 ) -> ScanResult:
     """Scan a contig for SNV candidates using fast coverage-based detection.
 
@@ -1220,13 +1277,14 @@ def scan_contig(
     all_variants: list[dict] = []
 
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        contig_length = _header_lengths(samfile).get(contig)
+        header_lengths = _header_lengths(samfile)
+        contig_length = header_lengths.get(contig)
         if contig_length is None:
-            raise ValueError(f"Contig '{contig}' not found in the alignment header")
+            raise ValueError(contig_not_found_message(contig, header_lengths))
 
         scan_end = min(contig_length, max_region)
 
-        with pysam.FastaFile(reference_path) as fasta:
+        with open_fasta(reference_path) as fasta:
             for chunk_start in range(0, scan_end, chunk_size):
                 chunk_end = min(chunk_start + chunk_size, scan_end)
 
@@ -1247,6 +1305,7 @@ def scan_contig(
                     chunk_start,
                     min_vaf,
                     min_depth,
+                    min_alt_count=min_alt_count,
                 )
                 if chunk_variants:
                     gaps = _deletion_depth_at(

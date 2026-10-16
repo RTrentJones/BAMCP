@@ -23,6 +23,7 @@ from .ncbi import (
     TokenBucketRateLimiter,
     check_esearch,
     check_esummary,
+    ncbi_get,
     ncbi_rate_limiter,
     response_json,
 )
@@ -183,11 +184,10 @@ class GeneClient:
         self._client = httpx.AsyncClient(timeout=timeout)
 
     async def _get(self, url: str, params: dict, what: str) -> object:
-        await self._rate_limiter.acquire()
         if self.api_key:
             params["api_key"] = self.api_key
         try:
-            resp = await self._client.get(url, params=params)
+            resp = await ncbi_get(self._client, url, params, self._rate_limiter)
             resp.raise_for_status()
         except httpx.HTTPError as e:
             raise GeneLookupError(f"{what}: NCBI request failed ({type(e).__name__})") from e

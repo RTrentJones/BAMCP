@@ -25,6 +25,10 @@ def _add_build_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--instances", type=int, default=3, help="seeded instances per case type")
     p.add_argument("--fixture-dir", default=None, help="default: tests/fixtures")
+    _add_png_args(p)
+
+
+def _add_png_args(p: argparse.ArgumentParser) -> None:
     png = p.add_mutually_exclusive_group()
     png.add_argument(
         "--png",
@@ -104,6 +108,7 @@ def _parser() -> argparse.ArgumentParser:
     br.add_argument("--conditions", nargs="+", default=list(PILOT_CONDITIONS), choices=CONDITIONS)
     br.add_argument("--models", nargs="+", default=["model"])
     br.add_argument("--repeats", type=int, default=1)
+    _add_png_args(br)
 
     d = sub.add_parser("dry", help="hermetic gate: build + lint + selftest")
     d.add_argument("--out", default=".eval-results/visual-dry")
@@ -193,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
             conditions=args.conditions,
             models=args.models,
             repeats=args.repeats,
+            png=args.png,
         )
         print(
             f"built {res.n_stimuli} stimuli for {res.n_items} items, {res.n_runs} runs → {res.out}"

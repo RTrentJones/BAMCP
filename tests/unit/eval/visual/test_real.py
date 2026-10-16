@@ -468,3 +468,23 @@ def test_pick_honours_zero_and_small_quotas():
     assert real._pick(list(pool), 0, rng, taken) == [] and taken == []
     got = real._pick(list(pool), 2, rng, taken)
     assert len(got) == 2 and taken == got
+
+
+@pytest.mark.parametrize(("flag", "expect"), [([], None), (["--png"], True), (["--no-png"], False)])
+def test_build_real_cli_forwards_png_mode(monkeypatch, tmp_path, flag, expect):
+    """A registered real-tier build can require the PNG step, like the synthetic `build`."""
+    from types import SimpleNamespace
+
+    from bamcp.eval.visual import cli
+
+    seen: dict = {}
+
+    def fake_build(out, sites, **kw):
+        seen.update(kw)
+        return SimpleNamespace(n_stimuli=0, n_items=0, n_runs=0, out=tmp_path)
+
+    monkeypatch.setattr(real, "build_real_run_set", fake_build)
+    monkeypatch.setattr(cli, "_lint", lambda *_: True)
+    argv = ["build-real", "--out", str(tmp_path), "--sites", "s.jsonl", "--seed", "3", *flag]
+    assert cli.main(argv) == 0
+    assert seen["png"] is expect

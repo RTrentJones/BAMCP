@@ -389,6 +389,22 @@ async def render_pngs(jobs: list[tuple[dict[str, Any], Path]]) -> None:
             out_path.write_bytes(png)
 
 
+def _viewer_hash() -> str:
+    from ...viewer_build import viewer_source_hash
+
+    return viewer_source_hash()
+
+
+def viewer_bundle_problem() -> str | None:
+    """Why ``dist/viewer.html`` must not be used for stimuli, or None when it is current.
+
+    PNG stimuli are only meaningful for the viewer they claim to show: a bundle built from
+    older sources renders the old encoding while ``VIEWER_KEY`` describes the new one."""
+    from ..render_cli import _check_rebuild_needed
+
+    return _check_rebuild_needed()
+
+
 async def chromium_available() -> str | None:
     """None when a headless Chromium can be launched, else the reason it cannot."""
     bundle = Path(__file__).resolve().parents[2] / "static" / "dist" / "viewer.html"
@@ -408,23 +424,26 @@ async def chromium_available() -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def caption_text(item: Item) -> str:
+SYNTHETIC_SAMPLE_LINE = "simulated diploid sample on a synthetic GRCh38-like reference"
+
+
+def caption_text(item: Item, sample_line: str = SYNTHETIC_SAMPLE_LINE) -> str:
     start0, end0 = window(item, WIDE_BP)
     poi = ", ".join(f"{item.contig}:{s + 1}" for s in item.sites)
     return (
         "# Site\n\n"
         f"- Region: {region_1based(item.contig, start0, end0)} (1-based, inclusive)\n"
         f"- Position(s) of interest: {poi}\n"
-        "- Sample: simulated diploid sample on a synthetic GRCh38-like reference\n"
+        f"- Sample: {sample_line}\n"
     )
 
 
-def prompt_text(files: list[str]) -> str:
+def prompt_text(files: list[str], sample_kind: str = "simulated") -> str:
     listed = "\n".join(f"- `{f}` — {FILE_DESCRIPTIONS[f]}" for f in files)
     key = f"\n\n{VIEWER_KEY}" if any(f.endswith(".png") for f in files) else ""
     return (
         "# Task\n\n"
-        "You are reviewing sequencing evidence for one site in a simulated sample. Use ONLY "
+        f"You are reviewing sequencing evidence for one site in a {sample_kind} sample. Use ONLY "
         "the files in this directory listed below; do not open any other file. Decide "
         "whether the sample truly carries a variant at the position(s) of interest and "
         "whether any non-reference signal there is a technical artifact.\n\n"
@@ -507,12 +526,50 @@ def build_run_set(
     unknown = [c for c in conditions if c not in CONDITIONS]
     if unknown:
         raise ValueError(f"unknown condition(s): {unknown}; choose from {CONDITIONS}")
-    out = Path(out)
     paths = ensure_fixtures(seed, fixture_dir, instances)
-    bam, ref = str(paths["bam"]), str(paths["reference"])
     plan = build_plan(seed, instances)
-    items = select_items(plan, n_items)
+    return build_items_run_set(
+        out,
+        bam=str(paths["bam"]),
+        ref=str(paths["reference"]),
+        items=select_items(plan, n_items),
+        label_records=[label_record(it) for it in plan.items],
+        seed=seed,
+        conditions=conditions,
+        models=models,
+        repeats=repeats,
+        png=png,
+        log=log,
+        meta={"tier": "synthetic", "instances": instances},
+    )
 
+
+def build_items_run_set(
+    out: str | Path,
+    *,
+    bam: str,
+    ref: str,
+    items: list[Item],
+    label_records: list[dict[str, Any]],
+    seed: int,
+    conditions: tuple[str, ...] | list[str] = CONDITIONS,
+    models: tuple[str, ...] | list[str] = ("model",),
+    repeats: int = 1,
+    png: bool | None = None,
+    log: Any = print,
+    meta: dict[str, Any] | None = None,
+    sample_line: str = SYNTHETIC_SAMPLE_LINE,
+    sample_kind: str = "simulated",
+) -> BuildResult:
+    """Stimuli, labels and the runs manifest for ``items`` read from ``bam``/``ref``.
+
+    Shared by the synthetic tier (:func:`build_run_set`) and the real-data tier
+    (:mod:`.real`); ``label_records`` is written verbatim to ``labels/labels.jsonl``.
+    """
+    unknown = [c for c in conditions if c not in CONDITIONS]
+    if unknown:
+        raise ValueError(f"unknown condition(s): {unknown}; choose from {CONDITIONS}")
+    out = Path(out)
     skipped: list[str] = []
     want_png = any(c in VISUAL_CONDITIONS for c in conditions)
     if want_png and png is not True:
@@ -524,6 +581,10 @@ def build_run_set(
                 f"{', '.join(skipped)}. Set PLAYWRIGHT_CHROMIUM_EXECUTABLE to render them."
             )
             want_png = False
+    if want_png:
+        problem = viewer_bundle_problem()
+        if problem:
+            raise RuntimeError(f"refusing to render stimuli from this viewer bundle: {problem}")
     active = [c for c in conditions if c not in skipped]
 
     for sub in ("stim", "labels", "answers"):
@@ -572,20 +633,20 @@ def build_run_set(
         shutil.rmtree(tmp_png, ignore_errors=True)
 
     with (out / "labels" / "labels.jsonl").open("w") as f:
-        for it in plan.items:
-            f.write(json.dumps(label_record(it), sort_keys=True) + "\n")
+        for rec in label_records:
+            f.write(json.dumps(rec, sort_keys=True) + "\n")
 
     n_stim = 0
     runs: list[dict[str, Any]] = []
     for it in items:
-        cap = caption_text(it)
+        cap = caption_text(it, sample_line)
         for cond in active:
             sid = stim_id(seed, it.item_id, cond)
             d = out / "stim" / sid
             d.mkdir()
             files = condition_files(cond)
             (d / "caption.md").write_text(cap)
-            (d / "prompt.md").write_text(prompt_text(files))
+            (d / "prompt.md").write_text(prompt_text(files, sample_kind))
             for name in files:
                 content = evidence[it.item_id][name]
                 if isinstance(content, bytes):
@@ -615,17 +676,18 @@ def build_run_set(
     with (out / "runs.jsonl").open("w") as f:
         for r in runs:
             f.write(json.dumps(r, sort_keys=True) + "\n")
-    meta = {
+    build_meta = {
+        **(meta or {}),
         "seed": seed,
-        "instances": instances,
         "conditions": active,
         "skipped_conditions": skipped,
         "models": list(models),
         "repeats": repeats,
         "n_items": len(items),
         "pngs": bool(png_jobs),
+        "viewer_sources": _viewer_hash() if png_jobs else None,
         "bam": bam,
         "reference": ref,
     }
-    (out / "build.json").write_text(json.dumps(meta, indent=2) + "\n")
+    (out / "build.json").write_text(json.dumps(build_meta, indent=2) + "\n")
     return BuildResult(out, len(items), n_stim, len(runs), bool(png_jobs), skipped)

@@ -1,0 +1,339 @@
+"""Real-data tier: truth classification, candidate scanning, blinding, and the run set.
+
+Hermetic: a tiny local "GIAB" (reference, BAM with a het SNV, a noisy non-variant site and
+duplicate reads, a bgzipped truth VCF, BEDs) stands in for the public files.
+"""
+
+from __future__ import annotations
+
+import gzip
+import json
+import random
+from pathlib import Path
+
+import pysam
+import pytest
+
+from bamcp.eval.visual import real
+from bamcp.eval.visual.grade import grade_run_set
+from bamcp.eval.visual.leaklint import lint_run_set
+
+pytestmark = pytest.mark.unit
+
+CHROM = "chr20"
+LEN = 12_000
+HET = 3000  # 0-based truth het SNV
+NOISY = 6000  # 0-based: 4 of ~40 reads carry a non-ref base, no truth variant
+DUP_SITE = 9000  # 0-based: alt carried only by duplicate-flagged reads
+
+
+def _ref() -> str:
+    rng = random.Random(5)  # noqa: S311
+    seq = []
+    while len(seq) < LEN:
+        b = rng.choice("ACGT")
+        if len(seq) >= 2 and seq[-1] == seq[-2] == b:
+            continue
+        seq.append(b)
+    return "".join(seq)
+
+
+def _other(b: str) -> str:
+    return {"A": "C", "C": "G", "G": "T", "T": "A"}[b]
+
+
+@pytest.fixture(scope="module")
+def giab(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    d = tmp_path_factory.mktemp("giab")
+    ref = _ref()
+    fa = d / "ref.fa"
+    fa.write_text(f">{CHROM}\n{ref}\n")
+    pysam.faidx(str(fa))
+
+    header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": CHROM, "LN": LEN}]}
+    rows = []
+    rng = random.Random(9)  # noqa: S311
+    n = 0
+    for site, kind in ((HET, "het"), (NOISY, "noisy"), (DUP_SITE, "dup")):
+        for i in range(40):
+            start = site - 140 + rng.randint(0, 130)
+            seq = list(ref[start : start + 150])
+            flag = 16 if i % 2 else 0
+            if (kind == "het" and i % 2 == 0) or (kind == "noisy" and i < 4):
+                seq[site - start] = _other(ref[site])
+            if kind == "dup" and i < 6:
+                seq[site - start] = _other(ref[site])
+                flag |= 1024
+            rows.append((start, f"read{n}", flag, "".join(seq)))
+            n += 1
+    rows.sort()
+    bam = d / "sample.bam"
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as out:
+        for start, name, flag, seq in rows:
+            a = pysam.AlignedSegment(out.header)
+            a.query_name = name
+            a.query_sequence = seq
+            a.flag = flag
+            a.reference_id = 0
+            a.reference_start = start
+            a.mapping_quality = 60
+            a.cigartuples = [(0, 150)]
+            a.query_qualities = pysam.qualitystring_to_array("I" * 150)
+            out.write(a)
+    pysam.index(str(bam))
+
+    vcf_txt = d / "truth.vcf"
+    vcf_txt.write_text(
+        "##fileformat=VCFv4.2\n"
+        f"##contig=<ID={CHROM},length={LEN}>\n"
+        '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tHG002\n"
+        f"{CHROM}\t{HET + 1}\t.\t{ref[HET]}\t{_other(ref[HET])}\t50\tPASS\t.\tGT\t0|1\n"
+    )
+    vcf = d / "truth.vcf.gz"
+    pysam.tabix_compress(str(vcf_txt), str(vcf), force=True)
+    pysam.tabix_index(str(vcf), preset="vcf", force=True)
+
+    conf = d / "conf.bed"
+    conf.write_text(f"{CHROM}\t1000\t11000\n")
+    rep = d / "rep.bed.gz"
+    with gzip.open(rep, "wt") as fh:
+        fh.write(f"{CHROM}\t200\t300\n")
+    return {"ref": fa, "bam": bam, "vcf": vcf, "conf": conf, "rep": rep}
+
+
+# --- truth classification ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("ref", "alt", "gt", "expect"),
+    [
+        ("A", "G", (0, 1), ("SNV", "G", "het", 0)),
+        ("A", "G", (1, 1), ("SNV", "G", "hom_alt", 0)),
+        ("ACT", "A", (0, 1), ("del", "CT", "het", 1)),
+        ("A", "AGG", (1, 1), ("ins", "GG", "hom_alt", 0)),
+    ],
+)
+def test_classify_record(ref, alt, gt, expect):
+    got = real.classify_record(ref, alt, gt)
+    lab = got["label"]
+    assert (lab["variant_type"], lab["alt_allele"], lab["zygosity"], got["offset"]) == expect
+    assert lab["artifact_verdict"] == "real" and lab["artifact_type"] == "none"
+
+
+@pytest.mark.parametrize(
+    ("ref", "alt", "gt"),
+    [
+        ("A", "G", (1, 2)),  # multi-allelic genotype
+        ("A", "G", (0, None)),  # missing call
+        ("AC", "GT", (0, 1)),  # MNV / complex
+        ("A" + "C" * 11, "A", (0, 1)),  # deletion over MAX_INDEL
+        ("A", "G", (0, 0)),  # hom-ref
+    ],
+)
+def test_classify_record_rejects(ref, alt, gt):
+    assert real.classify_record(ref, alt, gt) is None
+
+
+def test_intervals_merge_and_lookup():
+    iv = real.Intervals([(10, 20), (15, 30), (40, 50)])
+    assert len(iv) == 2
+    assert iv.contains(10) and iv.contains(29) and not iv.contains(30)
+    assert iv.overlaps(28, 45) and not iv.overlaps(30, 40)
+    assert iv.covers(12, 30) and not iv.covers(25, 45)
+
+
+def test_load_bed_plain_and_gz(giab):
+    assert real.load_bed(giab["conf"], CHROM).covers(1000, 11000)
+    assert real.load_bed(giab["rep"], CHROM).contains(250)
+    assert len(real.load_bed(giab["conf"], "chr1")) == 0
+
+
+# --- scanning --------------------------------------------------------------------------
+
+
+def test_scan_window_finds_each_kind(giab):
+    conf = real.load_bed(giab["conf"], CHROM)
+    rep = real.load_bed(giab["rep"], CHROM)
+    with (
+        pysam.AlignmentFile(str(giab["bam"])) as bam,
+        pysam.FastaFile(str(giab["ref"])) as fa,
+        pysam.VariantFile(str(giab["vcf"])) as vcf,
+    ):
+        pools = real.scan_window(bam, fa, vcf, CHROM, 1000, 11000, conf, rep)
+    het = pools["real_snv_het"]
+    assert [s.site0 for s in het] == [HET]
+    assert het[0].label["zygosity"] == "het" and het[0].vcf_pos == HET + 1
+    noisy = {s.site0: s for s in pools["real_noisy_negative"]}
+    assert NOISY in noisy and noisy[NOISY].alt_reads == 4
+    assert noisy[NOISY].label["artifact_type"] == "unknown"
+    # Duplicate-flagged alt reads are not evidence: that site is not a noisy candidate,
+    # and the truth het's neighbourhood never yields negatives.
+    assert DUP_SITE not in noisy
+    assert all(abs(s - HET) > real.NEG_CLEAR_BP for s in noisy)
+    clean = pools["real_clean_negative"]
+    assert clean and all(s.label["artifact_type"] == "none" for s in clean)
+
+
+def test_select_sites_draws_quotas(giab):
+    quotas = {"real_snv_het": 1, "real_noisy_negative": 1, "real_clean_negative": 1}
+    sites = real.select_sites(
+        3,
+        chrom=CHROM,
+        bam_path=str(giab["bam"]),
+        ref_path=str(giab["ref"]),
+        vcf_path=str(giab["vcf"]),
+        confident_bed=giab["conf"],
+        repeat_bed=giab["rep"],
+        quotas=quotas,
+        max_windows=40,
+        pool_factor=1,
+        log=lambda *_: None,
+    )
+    assert sorted(s.case_type for s in sites) == sorted(quotas)
+    again = real.select_sites(
+        3,
+        chrom=CHROM,
+        bam_path=str(giab["bam"]),
+        ref_path=str(giab["ref"]),
+        vcf_path=str(giab["vcf"]),
+        confident_bed=giab["conf"],
+        repeat_bed=giab["rep"],
+        quotas=quotas,
+        max_windows=40,
+        pool_factor=1,
+        log=lambda *_: None,
+    )
+    assert [s.site0 for s in sites] == [s.site0 for s in again]  # deterministic
+
+
+def test_select_sites_fails_loudly_when_a_stratum_is_short(giab):
+    with pytest.raises(ValueError, match="real_snv_hom"):
+        real.select_sites(
+            3,
+            chrom=CHROM,
+            bam_path=str(giab["bam"]),
+            ref_path=str(giab["ref"]),
+            vcf_path=str(giab["vcf"]),
+            confident_bed=giab["conf"],
+            repeat_bed=giab["rep"],
+            quotas={"real_snv_hom": 1},
+            max_windows=5,
+            log=lambda *_: None,
+        )
+
+
+# --- blinding + run set ------------------------------------------------------------------
+
+
+def _sites(giab) -> list[real.RealSite]:
+    het_label = real.classify_record("A", "C", (0, 1))["label"]
+    with pysam.FastaFile(str(giab["ref"])) as fa:
+        r = fa.fetch(CHROM, HET, HET + 1)
+    het_label = {**het_label, "alt_allele": _other(r)}
+    return [
+        real.RealSite("real_snv_het", CHROM, HET, het_label, False, vcf_pos=HET + 1),
+        real.RealSite(
+            "real_noisy_negative",
+            CHROM,
+            NOISY,
+            {**real.NEGATIVE_LABEL, "artifact_type": "unknown"},
+            False,
+            alt_reads=4,
+            depth=40,
+        ),
+        real.RealSite(
+            "real_clean_negative",
+            CHROM,
+            DUP_SITE,
+            {**real.NEGATIVE_LABEL, "artifact_type": "none"},
+            False,
+        ),
+    ]
+
+
+def _counts(bam_path: str, contig: str, pos0: int) -> tuple[int, int]:
+    with pysam.AlignmentFile(bam_path) as bam:
+        for col in bam.pileup(contig, pos0, pos0 + 1, truncate=True, stepper="nofilter"):
+            bases = [
+                p.alignment.query_sequence[p.query_position]
+                for p in col.pileups
+                if p.query_position is not None
+            ]
+            return len(bases), len(set(bases))
+    return 0, 0
+
+
+def test_write_real_fixtures_blinds_and_preserves_evidence(giab, tmp_path):
+    sites = _sites(giab)
+    paths, items, mapping = real.write_real_fixtures(
+        sites, tmp_path, 3, bam_path=str(giab["bam"]), ref_path=str(giab["ref"])
+    )
+    by_type = {it.case_type: it for it in items}
+    het = by_type["real_snv_het"]
+    assert het.contig.startswith("chr") and het.contig != CHROM
+    depth, n_alleles = _counts(str(paths["bam"]), het.contig, het.site)
+    assert depth >= 30 and n_alleles == 2
+    with pysam.FastaFile(str(paths["reference"])) as new, pysam.FastaFile(str(giab["ref"])) as old:
+        assert new.fetch(het.contig, het.site - 20, het.site + 20) == old.fetch(
+            CHROM, HET - 20, HET + 20
+        )
+    with pysam.AlignmentFile(str(paths["bam"])) as bam:
+        reads = list(bam.fetch(until_eof=True))
+    assert not any(r.query_name.startswith("read") for r in reads)  # names hashed
+    assert not any(r.is_duplicate for r in reads)
+    assert all(r.get_tags() == [] for r in reads)
+    # The duplicate-only alt signal is gone: the "clean" site shows one allele.
+    clean = by_type["real_clean_negative"]
+    assert _counts(str(paths["bam"]), clean.contig, clean.site)[1] == 1
+    assert {m["source"] for m in mapping} == {f"{CHROM}:{s.site0 + 1}" for s in sites}
+
+
+def test_build_real_run_set_lints_and_grades(giab, tmp_path):
+    sites_path = tmp_path / "sites.jsonl"
+    digest = real.sites_to_jsonl(_sites(giab), sites_path)
+    assert len(digest) == 64
+    assert [s.site0 for s in real.sites_from_jsonl(sites_path)] == [HET, NOISY, DUP_SITE]
+    out = tmp_path / "run"
+    res = real.build_real_run_set(
+        out,
+        sites_path,
+        seed=3,
+        conditions=["Traw", "Tjson"],
+        models=["m"],
+        png=False,
+        bam_path=str(giab["bam"]),
+        ref_path=str(giab["ref"]),
+        log=lambda *_: None,
+    )
+    assert res.n_items == 3 and res.n_runs == 6
+    report = lint_run_set(out)
+    assert report.ok, report.problems
+    meta = json.loads((out / "build.json").read_text())
+    assert meta["tier"] == "real" and meta["sites_sha256"] == digest
+    caption = next((out / "stim").iterdir()) / "caption.md"
+    assert real.SAMPLE_LINE in caption.read_text()
+    assert (out / "labels" / "mapping.jsonl").exists()
+
+    labels = {
+        json.loads(x)["item"]: json.loads(x)
+        for x in (out / "labels" / "labels.jsonl").read_text().splitlines()
+    }
+    for run in (json.loads(x) for x in (out / "runs.jsonl").read_text().splitlines()):
+        lab = labels[run["item"]]
+        ans = {k: lab[k] for k in real.NEGATIVE_LABEL} | {
+            "variant_type": lab["variant_type"],
+            "alt_allele": lab["alt_allele"],
+            "zygosity": lab["zygosity"],
+            "artifact_type": "low_baseq" if lab["artifact_type"] == "unknown" else "none",
+            "confidence": 0.9,
+            "rationale": "oracle",
+        }
+        (out / run["answer_path"]).write_text(json.dumps(ans))
+    summary = grade_run_set(out, charts=False)
+    g = summary["groups"]["m|Traw"]
+    assert g["primary_joint_accuracy"] == 1.0
+    # The negative's artifact_type is "unknown" and is not scored, so an arbitrary type
+    # answer there costs nothing.
+    assert g["field_accuracy"]["artifact_type"] == 1.0
+    assert "unknown" not in g["artifact_type_confusion"]

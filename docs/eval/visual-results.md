@@ -7,7 +7,7 @@ any model run). Harness: `python -m bamcp.eval.visual build|grade|lint|dry`.
 seven artifact classes, clean negatives). Three Claude model tiers (small/mid/large), one blind run
 per item × condition × model. Each run was a fresh subagent allowed only to read its own stimulus
 files and return the fixed answer schema; labels were sealed until all runs finished. Transcript
-audit: 0 violations across 468 runs. Metric: joint accuracy (every answer field correct), pooled
+audit: 0 violations across 468 runs. Metric: joint accuracy (both "is a variant present" and "real or artifact" answered correctly), pooled
 over models, 95% CIs by item-cluster bootstrap.
 
 ## Pilot (pre-registered, original viewer) — 312 runs

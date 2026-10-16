@@ -61,6 +61,7 @@ def run_set(tmp_path_factory: pytest.TempPathFactory, fixture_dir: Path) -> Path
         return None
 
     mp.setattr(stimuli, "chromium_available", _available)
+    mp.setattr(stimuli, "viewer_bundle_problem", lambda: None)
     try:
         build_run_set(
             out,

@@ -73,8 +73,15 @@ def grade_run(run: dict[str, Any], label: dict[str, Any], answer_file: Path) -> 
     return Graded(run, label, "valid", answer=v.answer, correct=correct)
 
 
+UNSCORED_TYPE = "unknown"  # real-tier negatives: truth says reference, not why reads disagree
+
+
 def _applicable(g: Graded, f: str) -> bool:
-    return f != "phase" or g.label["phase"] != "na"
+    if f == "phase":
+        return bool(g.label["phase"] != "na")
+    if f == "artifact_type":
+        return bool(g.label["artifact_type"] != UNSCORED_TYPE)
+    return True
 
 
 def _clusters(rows: list[Graded], key: Any) -> dict[str, list[float]]:
@@ -96,8 +103,9 @@ def summarize_group(rows: list[Graded], seed: int = 0) -> dict[str, Any]:
     tp = sum(t and p for t, p in zip(truth_art, pred_art, strict=True))
     fp = sum(p and not t for t, p in zip(truth_art, pred_art, strict=True))
     fn = sum(t and not p for t, p in zip(truth_art, pred_art, strict=True))
-    t_types = [g.label["artifact_type"] for g in rows]
-    p_types = [g.answer["artifact_type"] if g.answer else INVALID for g in rows]
+    typed = [g for g in rows if _applicable(g, "artifact_type")]
+    t_types = [g.label["artifact_type"] for g in typed]
+    p_types = [g.answer["artifact_type"] if g.answer else INVALID for g in typed]
     f1 = f1_scores(t_types, p_types)
     confusion: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for t, p in zip(t_types, p_types, strict=True):

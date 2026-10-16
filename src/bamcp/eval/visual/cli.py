@@ -8,6 +8,8 @@ Subcommands::
     selftest  oracle = 100%, random ≈ chance, invalid = wrong
     grade     grade a directory of answers → results.csv, summary.json, charts
     dry       build (all conditions) + lint + selftest — the hermetic CI gate
+    select-real  scan GIAB HG002 (network) and freeze the real-tier site manifest
+    build-real   blinded fixtures + stimuli + labels + runs.jsonl from a site manifest
 """
 
 from __future__ import annotations
@@ -88,6 +90,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     g.add_argument("--no-charts", action="store_true")
 
+    sr = sub.add_parser("select-real", help="freeze the real-tier site manifest (network)")
+    sr.add_argument("--out", required=True, help="sites .jsonl to write")
+    sr.add_argument("--seed", type=int, required=True)
+    sr.add_argument("--confident-bed", required=True, help="local copy of the GIAB benchmark BED")
+    sr.add_argument("--repeat-bed", required=True, help="local copy of the repeat stratification")
+    sr.add_argument("--chrom", default="chr20")
+
+    br = sub.add_parser("build-real", help="build the real-tier run set from a site manifest")
+    br.add_argument("--out", required=True)
+    br.add_argument("--sites", required=True)
+    br.add_argument("--seed", type=int, required=True)
+    br.add_argument("--conditions", nargs="+", default=list(PILOT_CONDITIONS), choices=CONDITIONS)
+    br.add_argument("--models", nargs="+", default=["model"])
+    br.add_argument("--repeats", type=int, default=1)
+
     d = sub.add_parser("dry", help="hermetic gate: build + lint + selftest")
     d.add_argument("--out", default=".eval-results/visual-dry")
     _add_build_args(d)
@@ -152,6 +169,35 @@ def main(argv: list[str] | None = None) -> int:
         ok &= _selftest(str(res.out), charts=True)
         print("eval-visual-dry: OK" if ok else "eval-visual-dry: FAILED")
         return 0 if ok else 1
+
+    if args.cmd == "select-real":
+        from .real import select_sites, sites_to_jsonl
+
+        sites = select_sites(
+            args.seed,
+            chrom=args.chrom,
+            confident_bed=args.confident_bed,
+            repeat_bed=args.repeat_bed,
+        )
+        digest = sites_to_jsonl(sites, args.out)
+        print(f"{len(sites)} sites → {args.out} (sha256 {digest})")
+        return 0
+
+    if args.cmd == "build-real":
+        from .real import build_real_run_set
+
+        res = build_real_run_set(
+            args.out,
+            args.sites,
+            seed=args.seed,
+            conditions=args.conditions,
+            models=args.models,
+            repeats=args.repeats,
+        )
+        print(
+            f"built {res.n_stimuli} stimuli for {res.n_items} items, {res.n_runs} runs → {res.out}"
+        )
+        return 0 if _lint(str(res.out)) else 1
 
     if args.cmd == "lint":
         return 0 if _lint(args.run_dir, args.bam) else 1

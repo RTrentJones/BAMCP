@@ -277,6 +277,33 @@ def test_chromium_unavailable_without_bundle(monkeypatch, tmp_path: Path) -> Non
     assert "viewer bundle missing" in (asyncio.run(stimuli.chromium_available()) or "")
 
 
+def test_stale_viewer_bundle_refuses_png_stimuli(monkeypatch, fixture_dir: Path, tmp_path: Path):
+    """PNGs from a bundle built from older sources would show the old encoding while the
+    prompt's VIEWER_KEY describes the new one, so the build stops instead."""
+
+    async def _available() -> None:
+        return None
+
+    monkeypatch.setattr(stimuli, "chromium_available", _available)
+    monkeypatch.setattr(stimuli, "viewer_bundle_problem", lambda: "content hash mismatch")
+    with pytest.raises(RuntimeError, match="content hash mismatch"):
+        stimuli.build_run_set(
+            tmp_path,
+            seed=7,
+            instances=1,
+            conditions=["V"],
+            fixture_dir=fixture_dir,
+            log=lambda *_: None,
+        )
+
+
+def test_viewer_bundle_problem_reports_stale_sources(monkeypatch) -> None:
+    from bamcp.eval import render_cli
+
+    monkeypatch.setattr(render_cli, "_check_rebuild_needed", lambda: "WARNING: stale")
+    assert stimuli.viewer_bundle_problem() == "WARNING: stale"
+
+
 def test_select_items_stratified() -> None:
     from bamcp.eval.visual.fixtures import build_plan
 

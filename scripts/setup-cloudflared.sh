@@ -367,10 +367,7 @@ cat > "$CONTAINER_JSON_FILE" <<JSONEOF
       "BAMCP_RATE_LIMIT": "60",
       "BAMCP_RATE_LIMIT_TRUSTED_PROXIES": "127.0.0.1,::1",
       "BAMCP_MAX_READS": "10000",
-      "BAMCP_DEFAULT_WINDOW": "500",
-      "BAMCP_MIN_VAF": "0.1",
-      "BAMCP_MIN_DEPTH": "10",
-      "BAMCP_MIN_MAPQ": "0"
+      "BAMCP_DEFAULT_WINDOW": "500"
     }
   },
   {

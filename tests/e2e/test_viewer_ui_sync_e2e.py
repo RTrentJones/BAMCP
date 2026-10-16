@@ -77,6 +77,21 @@ def hydrate(page: Page, payload: dict, mode: str = "compact") -> None:
     page.wait_for_timeout(100)
 
 
+def _lum(px: dict) -> float:
+    """WCAG relative luminance of a sampled pixel."""
+
+    def chan(v: int) -> float:
+        c = v / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * chan(px["r"]) + 0.7152 * chan(px["g"]) + 0.0722 * chan(px["b"])
+
+
+def _contrast(a: dict, b: dict) -> float:
+    la, lb = sorted((_lum(a), _lum(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
 class TestLegend:
     def test_legend_outside_viewer_and_explains_encodings(self, viewer_page: Page):
         inside = viewer_page.evaluate("() => !!document.querySelector('#viewer #legend')")
@@ -258,12 +273,14 @@ class TestBaseZoomCues:
         assert rev["r"] > rev["b"] + 60, f"reverse stripe should be red: {rev}"
 
     def test_mapq_fade_at_base_zoom(self, viewer_page: Page):
+        # The fade is an opaque blend toward white (theme-independent contrast), so a
+        # low-MAPQ read's matching-base tiles are much lighter, not transparent.
         payload = _payload([_read("hi", 100, mapq=60), _read("lo", 105, mapq=6)])
         hydrate(viewer_page, payload)
         hi = pixel_in_cell(viewer_page, 121, self.BASE_Y)
         lo = pixel_in_cell(viewer_page, 121, 14 + self.BASE_Y)
-        assert hi["a"] == 255
-        assert 0 < lo["a"] < 128, f"low-MAPQ bases should be faded: {lo}"
+        assert hi["a"] == 255 and lo["a"] == 255
+        assert _lum(lo) > _lum(hi) + 0.15, f"low-MAPQ bases should be faded: hi={hi} lo={lo}"
 
     def test_dv_composite_keeps_strand_stripe(self, viewer_page: Page):
         payload = _payload([_read("fwd", 100), _read("rev", 105, reverse=True)])
@@ -287,3 +304,66 @@ class TestBaseZoomCues:
         # Top edge inside the deletion: cleared (no base painted there).
         top = sample_pixel_at_genomic(viewer_page, "reads-canvas", 122, 1)
         assert top["a"] == 0, top
+
+
+class TestMismatchLegibility:
+    """Pilot-eval regressions: every base colour must stand out on both strands, and
+    low-base-quality mismatches must look different from confident ones."""
+
+    # 200 bp in 1024 px → ~5 px/base: wide zoom (ticks), not base tiles.
+    WIDE = {"start": 50, "end": 250}
+    BODY_Y = 5
+
+    def _wide_read(self, name, reverse, alt, qual=None):
+        # Reference at 120 is "A" (ACGTACGTAC repeat from 50); the read carries `alt`.
+        r = _read(name, 60, length=120, reverse=reverse)
+        r["mismatches"] = [{"pos": 120, "ref": "A", "alt": alt}]
+        if qual is not None:
+            q = [35] * 120
+            q[120 - 60] = qual
+            r["qualities"] = q
+        return r
+
+    def _tick_and_body(self, page: Page, row: int) -> tuple[dict, dict]:
+        y = row * 14 + self.BODY_Y
+        return pixel_in_cell(page, 120, y, dx=2), pixel_in_cell(page, 100, y, dx=2)
+
+    @pytest.mark.parametrize("alt", ["A", "C", "G", "T"])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_every_base_visible_on_both_strands(self, viewer_page: Page, alt, reverse):
+        hydrate(viewer_page, _payload([self._wide_read("r", reverse, alt)], **self.WIDE))
+        tick, body = self._tick_and_body(viewer_page, 0)
+        assert _contrast(tick, body) >= 3, (
+            f"{alt} tick on {'rev' if reverse else 'fwd'}: {tick} vs {body}"
+        )
+
+    def test_low_base_quality_tick_is_hollow(self, viewer_page: Page):
+        reads = [
+            self._wide_read("hiq", False, "C", qual=35),
+            {**self._wide_read("loq", False, "C", qual=8), "position": 60},
+        ]
+        hydrate(viewer_page, _payload(reads, **self.WIDE))
+        rows = viewer_page.evaluate("() => viewer.state.packedRows.map(r => r[0].name)")
+        hi_row, lo_row = rows.index("hiq"), rows.index("loq")
+        hi_centre = pixel_in_cell(viewer_page, 120, hi_row * 14 + 6, dx=2)
+        lo_centre = pixel_in_cell(viewer_page, 120, lo_row * 14 + 6, dx=2)
+        lo_cap = pixel_in_cell(viewer_page, 120, lo_row * 14 + 1, dx=2)
+        # Confident: solid blue. Low BQ: pale centre, but its border keeps the colour.
+        assert lo_centre["b"] > 200 and _lum(lo_centre) > _lum(hi_centre) + 0.3, (
+            hi_centre,
+            lo_centre,
+        )
+        assert lo_cap["b"] > lo_cap["r"] + 80, f"low-BQ border should stay blue: {lo_cap}"
+
+    def test_base_zoom_matches_grey_mismatches_coloured(self, viewer_page: Page):
+        r = _read("r", 100)
+        r["mismatches"] = [{"pos": 120, "ref": "A", "alt": "C"}]
+        r["sequence"] = r["sequence"][:20] + "C" + r["sequence"][21:]
+        hydrate(viewer_page, _payload([r]))
+        match = pixel_in_cell(viewer_page, 110, 1)
+        mism = pixel_in_cell(viewer_page, 120, 1)
+        assert (
+            max(match["r"], match["g"], match["b"]) - min(match["r"], match["g"], match["b"]) < 30
+        ), match
+        assert mism["b"] > mism["r"] + 100, f"C mismatch tile should be blue: {mism}"
+        assert _contrast(mism, match) >= 3

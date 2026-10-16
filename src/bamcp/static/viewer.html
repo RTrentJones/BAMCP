@@ -31,15 +31,20 @@
             --color-danger: #ef4444;
 
             /* Colors - Nucleotides */
-            --color-base-a: #22c55e;
-            --color-base-t: #ef4444;
-            --color-base-g: #f97316;
-            --color-base-c: #3b82f6;
+            /* Must match BASE_COLORS in constants.ts */
+            --color-base-a: #15803d;
+            --color-base-t: #dc2626;
+            --color-base-g: #b45309;
+            --color-base-c: #2563eb;
+            --color-base-n: #4b5563;
 
             /* Colors - Reads */
             /* Must match COLOR_PALETTES.strand / INDEL_COLORS in constants.ts */
             --color-read-forward: #3b82f6;
             --color-read-reverse: #ef4444;
+            /* Must match READ_BODY / READ_EDGE in palette.ts */
+            --color-read-body: #d1d5db;
+            --color-read-edge: #9ca3af;
             --color-soft-clip: #f59e0b;
             --color-insertion: #9333ea;
             --color-deletion: #1f2937;
@@ -206,14 +211,26 @@
         .color-box.base-t { background: var(--color-base-t); }
         .color-box.base-g { background: var(--color-base-g); }
         .color-box.base-c { background: var(--color-base-c); }
-        .color-box.read-forward { background: var(--color-read-forward); }
-        .color-box.read-reverse { background: var(--color-read-reverse); }
-        .color-box.base-n { background: #9ca3af; }
-        .color-box.read-forward { clip-path: polygon(0 0, 65% 0, 100% 50%, 65% 100%, 0 100%); border: none; }
-        .color-box.read-reverse { clip-path: polygon(35% 0, 100% 0, 100% 100%, 35% 100%, 0 50%); border: none; }
-        .color-box.mapq-fade { background: linear-gradient(to right, rgba(59,130,246,1), rgba(59,130,246,0.2)); width: 28px; }
-        .color-box.mapq-zero { background: #fff; border: 1px solid #6b7280; }
-        .color-box.mismatch { background: linear-gradient(to right, transparent 35%, var(--color-base-t) 35%, var(--color-base-t) 65%, transparent 65%), var(--color-read-forward); opacity: 0.9; }
+        .color-box.base-n { background: var(--color-base-n); }
+        /* Reads: neutral grey body for both strands; strand = coloured bottom stripe + tip. */
+        .color-box.read-forward {
+            width: 20px; border: none;
+            background: linear-gradient(to top, var(--color-read-forward) 25%, transparent 25%),
+                linear-gradient(to right, var(--color-read-body) 70%, var(--color-read-forward) 70%);
+            clip-path: polygon(0 0, 70% 0, 100% 50%, 70% 100%, 0 100%);
+        }
+        .color-box.read-reverse {
+            width: 20px; border: none;
+            background: linear-gradient(to top, var(--color-read-reverse) 25%, transparent 25%),
+                linear-gradient(to left, var(--color-read-body) 70%, var(--color-read-reverse) 70%);
+            clip-path: polygon(30% 0, 100% 0, 100% 100%, 30% 100%, 0 50%);
+        }
+        .color-box.mapq-fade { background: linear-gradient(to right, var(--color-read-body), #f6f7f8); border-color: var(--color-read-edge); width: 28px; }
+        .color-box.mapq-zero { background: #fff; border: 1px dashed #6b7280; }
+        .color-box.mismatch { background: linear-gradient(to right, transparent 35%, var(--color-base-t) 35%, var(--color-base-t) 65%, transparent 65%), var(--color-read-body); }
+        .color-box.mismatch-lowq {
+            background: linear-gradient(to right, transparent 30%, var(--color-base-t) 30%, var(--color-base-t) 38%, #f8d4d4 38%, #f8d4d4 62%, var(--color-base-t) 62%, var(--color-base-t) 70%, transparent 70%), var(--color-read-body);
+        }
         .color-box.variant-dot { border-radius: 50%; background: var(--color-base-t); border: 1px solid #000; }
         .color-box.soft-clip { background: rgba(156, 163, 175, 0.4); border: 1px dashed #6b7280; }
         .color-box.insertion { background: linear-gradient(to right, transparent 40%, var(--color-insertion) 40%, var(--color-insertion) 60%, transparent 60%); border: none; }
@@ -757,19 +774,20 @@
                 <span class="legend-item"><span class="color-box base-c"></span>C</span>
                 <span class="legend-item"><span class="color-box base-n"></span>N</span>
             </span>
-            <span class="legend-section" title="Read colour and arrow direction; at base zoom shown as the bottom stripe and arrowhead">
+            <span class="legend-section" title="Reads are grey on both strands; the strand is the coloured bottom stripe and pointed tip (arrowhead at base zoom)">
                 <span class="legend-title">Strand:</span>
                 <span class="legend-item"><span class="color-box read-forward"></span>Forward</span>
                 <span class="legend-item"><span class="color-box read-reverse"></span>Reverse</span>
             </span>
-            <span class="legend-section" title="Read opacity scales with mapping quality">
+            <span class="legend-section" title="Read bodies (and reference-matching bases at base zoom) fade toward white as mapping quality drops; MAPQ 0 reads are white with a dashed outline">
                 <span class="legend-title">MAPQ:</span>
                 <span class="legend-item"><span class="color-box mapq-fade"></span>60 → 0 (faded = low)</span>
                 <span class="legend-item"><span class="color-box mapq-zero"></span>MAPQ 0</span>
             </span>
             <span class="legend-section">
                 <span class="legend-title">Marks:</span>
-                <span class="legend-item" title="A read base differing from the reference, coloured by the read's base"><span class="color-box mismatch"></span>Mismatch</span>
+                <span class="legend-item" title="A read base differing from the reference, coloured by the read's base (base zoom: coloured tile; matching bases are grey tiles)"><span class="color-box mismatch"></span>Mismatch</span>
+                <span class="legend-item" title="A mismatching base with base quality below 20: drawn hollow (pale centre, base-coloured border)"><span class="color-box mismatch-lowq"></span>Low BQ (&lt;20)</span>
                 <span class="legend-item" title="Read carrying a called variant allele"><span class="color-box variant-dot"></span>Variant</span>
                 <span class="legend-item"><span class="color-box insertion"></span>Insertion</span>
                 <span class="legend-item"><span class="color-box deletion"></span>Deletion</span>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { layoutRead, parseCigar } from "./layout";
+import { layoutRead, qposAt, parseCigar } from "./layout";
 
 describe("parseCigar", () => {
   it("parses a multi-op CIGAR", () => {
@@ -51,5 +51,18 @@ describe("layoutRead — CIGAR-aware base placement", () => {
     expect(l.bases.map(b => b.refPos)).toEqual([7, 8, 9]);
     expect(l.insertions).toEqual([]);
     expect(l.deletions).toEqual([]);
+  });
+});
+
+describe("qposAt", () => {
+  it("maps a reference position to its query index across clips and indels", () => {
+    // 2S 3M 1I 2M 2D 3M from position 100
+    const layout = layoutRead({ cigar: "2S3M1I2M2D3M", position: 100, end_position: 110 });
+    expect(qposAt(layout, 100)).toBe(2);
+    expect(qposAt(layout, 103)).toBe(6); // after the 1bp insertion
+    expect(qposAt(layout, 105)).toBeNull(); // deleted
+    expect(qposAt(layout, 107)).toBe(8);
+    expect(qposAt(layout, 99)).toBeNull();
+    expect(qposAt(layout, 110)).toBeNull();
   });
 });

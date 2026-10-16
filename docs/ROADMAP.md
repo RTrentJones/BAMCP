@@ -35,7 +35,12 @@ six parallel implementation packages → QA acceptance against real public BAMs 
   wired (`--vision`); pre-registered visual-vs-text eval
   ([`eval/visual-preregistration.md`](eval/visual-preregistration.md)) with leak-free
   synthetic fixtures, leak-lint, deterministic grader, `make eval-visual-dry` CI gate.
-- [ ] **Open:** visual-vs-text pilot results (subagent-run); GRCh37 demo cold latency (~27 s);
+- [x] **Visual-vs-text eval run** ([`eval/visual-results.md`](eval/visual-results.md)): the
+  pre-registered contrast (image + text vs text) is not significant at the ceiling (+0.038,
+  p = 0.375). Image-only failures traced to rendering; the legibility fix (neutral read bodies,
+  colour only on mismatches, hollow low-BQ tiles) raised image-only accuracy 0.82 → 0.91
+  (exploratory, same items).
+- [ ] **Open:** pre-registered confirmation of the fixed viewer on fresh + GIAB items; GRCh37 demo cold latency (~27 s);
   dependabot python 3.14 / mcp<3 (lockfile + API work); real-data (GIAB) eval tier.
 
 ## Biological correctness (peer-review round) — closed

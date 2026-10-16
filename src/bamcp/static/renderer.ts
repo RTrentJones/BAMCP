@@ -1,6 +1,18 @@
 import { StateManager } from "./state";
 import { Read } from "./types";
-import { ReadLayout, cachedLayout } from "./layout";
+import { ReadLayout, cachedLayout, qposAt } from "./layout";
+import {
+    LOW_BQ_WASH,
+    MAPQ_ZERO_EDGE,
+    MATCH_LETTER,
+    READ_BODY,
+    READ_EDGE,
+    fadeToWhite,
+    isLowBaseQuality,
+    mapqOpacity,
+    mixColor,
+    tickColor,
+} from "./palette";
 import {
     BASE_COLORS,
     COLOR_PALETTES,
@@ -17,11 +29,11 @@ import {
     svTypeLabel,
 } from "./constants";
 
-/** Read opacity for a MAPQ: linear 0..60 → 0.2..1, clamped (255 = unavailable). */
-function mapqOpacity(mapq: number): number {
-    const v = Number(mapq);
-    if (!Number.isFinite(v) || v >= 255) return 1;
-    return Math.min(1, Math.max(v / 60, 0.2));
+/** Outline drawn around a read (MAPQ-0 dashed edge, hover / mate emphasis, plain edge). */
+interface ReadOutline {
+    color: string;
+    width: number;
+    dash: number[];
 }
 
 // Layout constants
@@ -630,25 +642,19 @@ export class Renderer {
                 // Skip if off-screen
                 if (x2 < 0 || x1 > width) continue;
 
-                // Determine styling based on colorBy setting
-                let color = this.getReadColor(read);
-                // MAPQ fade: alpha scales with MAPQ (clamped — MAPQ 255 means
-                // "unavailable", and an out-of-range globalAlpha is silently ignored).
+                // Determine styling. `opacity` is the body fade (MAPQ, or hover
+                // emphasis / dimming); it is applied by blending toward white so every
+                // fill stays opaque and the palette contrast holds on any page theme.
                 const mapqAlpha = mapqOpacity(read.mapping_quality);
                 let opacity = mapqAlpha;
-                let stroke = false;
-                // Alpha for base-level painting: MAPQ fade unless hover emphasises
-                // (1) or dims (0.1) the read.
+                // Mismatch ticks are never MAPQ-faded (the body carries that cue);
+                // only hover-dimming of unrelated reads fades them.
+                let tickOpacity = 1;
+                let outline: ReadOutline | null = read.mapping_quality === 0
+                    ? { color: MAPQ_ZERO_EDGE, width: 1, dash: [3, 2] }
+                    : null;
+                // Alpha-equivalent for base-level painting (follows `opacity`).
                 let baseAlpha = mapqAlpha;
-
-                // Low MAPQ logic - always show MAPQ=0 reads distinctly
-                if (read.mapping_quality === 0) {
-                    color = '#fff';
-                    stroke = true;
-                    opacity = 1;
-                    ctx.strokeStyle = '#6b7280';
-                    ctx.lineWidth = 1;
-                }
 
                 // Selection / Hover logic
                 if (this.state.hoveredRead) {
@@ -659,9 +665,7 @@ export class Renderer {
                         this.state.mateIndex.get(`${read.name}:${read.position}`) === hovered;
 
                     if (read === hovered) {
-                        ctx.strokeStyle = '#000';
-                        ctx.lineWidth = 2;
-                        stroke = true;
+                        outline = { color: '#000000', width: 2, dash: [] };
                         opacity = 1;
                         baseAlpha = 1;
 
@@ -713,9 +717,7 @@ export class Renderer {
                     } else if (isMate) {
                         // Get insert-size-based color for mate pair
                         const arcColor = this.getInsertSizeColor(hovered);
-                        ctx.strokeStyle = arcColor;
-                        ctx.lineWidth = 1.5;
-                        stroke = true;
+                        outline = { color: arcColor, width: 1.5, dash: [] };
                         opacity = 1;
                         baseAlpha = 1;
 
@@ -764,62 +766,59 @@ export class Renderer {
 
                         ctx.restore();
                     } else {
-                        // Dim unrelated reads
+                        // Dim unrelated reads (ticks too, so they don't float free)
                         opacity = 0.1;
                         baseAlpha = 0.1;
+                        tickOpacity = 0.1;
                     }
                 }
 
                 // Base level: paint CIGAR-aligned bases. The body polygon would be
                 // fully covered, so strand + MAPQ are carried by a strand stripe, an
-                // arrowhead and the base alpha instead (see renderReadBases).
+                // arrowhead and the base fade instead (see renderReadBases).
                 const baseMode = scale >= 10 && !!read.sequence;
                 const layout = cachedLayout(read);
+                const strandColor = read.is_reverse
+                    ? COLOR_PALETTES.strand.reverse
+                    : COLOR_PALETTES.strand.forward;
+                // Strand colouring keeps the body neutral grey (palette.ts); other
+                // colour-by modes tint the body and halo the ticks instead.
+                const neutralBody = this.state.settings.colorBy === 'strand';
+                const bodyBase = neutralBody ? READ_BODY : this.getReadColor(read);
+                const isZero = read.mapping_quality === 0;
+                const stripeAlpha = isZero ? Math.min(opacity, 0.2) : opacity;
 
                 if (!baseMode) {
-                    // Draw Read Body
-                    ctx.fillStyle = read.mapping_quality === 0 ? '#fff' : color;
-                    ctx.globalAlpha = opacity;
-
-                    // Arrow shape
-                    ctx.beginPath();
-                    if (read.is_reverse) {
-                        ctx.moveTo(x1 + 5, y);
-                        ctx.lineTo(x2, y);
-                        ctx.lineTo(x2, y + READ_HEIGHT);
-                        ctx.lineTo(x1 + 5, y + READ_HEIGHT);
-                        ctx.lineTo(x1, y + READ_HEIGHT / 2);
-                    } else {
-                        ctx.moveTo(x1, y);
-                        ctx.lineTo(x2 - 5, y);
-                        ctx.lineTo(x2, y + READ_HEIGHT / 2);
-                        ctx.lineTo(x2 - 5, y + READ_HEIGHT);
-                        ctx.lineTo(x1, y + READ_HEIGHT);
-                    }
-                    ctx.closePath();
-                    ctx.fill();
-
-                    if (stroke) {
-                        ctx.globalAlpha = 1;
-                        ctx.stroke();
-                    }
-
-                    ctx.globalAlpha = 1; // Reset
+                    this.drawReadBody(
+                        ctx, read, x1, x2, y, READ_HEIGHT,
+                        isZero ? '#ffffff' : fadeToWhite(bodyBase, opacity),
+                        fadeToWhite(strandColor, stripeAlpha),
+                        outline ?? { color: fadeToWhite(READ_EDGE, opacity), width: 1, dash: [] },
+                    );
                 }
 
                 // Render soft clips if enabled
                 this.renderSoftClips(ctx, read, x1, x2, y, READ_HEIGHT, scale);
 
                 if (baseMode) {
-                    this.renderReadBases(ctx, read, layout, x1, x2, y, READ_HEIGHT, scale, width, baseAlpha, stroke);
+                    this.renderReadBases(
+                        ctx, read, layout, x1, x2, y, READ_HEIGHT, scale, width,
+                        baseAlpha, tickOpacity, neutralBody ? READ_BODY : bodyBase,
+                        fadeToWhite(strandColor, stripeAlpha), outline,
+                    );
                 }
                 // Medium Zoom: Draw Mismatches
                 else if (scale > 0.5) {
                     for (const m of read.mismatches) {
                         const mx = (m.pos - this.state.viewport.start) * scale;
                         if (mx >= x1 && mx <= x2) {
-                            ctx.fillStyle = BASE_COLORS[m.alt] || '#000';
-                            ctx.fillRect(mx, y, Math.max(scale, 1), READ_HEIGHT);
+                            const qpos = qposAt(layout, m.pos);
+                            const qual = qpos != null ? read.qualities?.[qpos] : undefined;
+                            this.drawMismatchTick(
+                                ctx, mx, y, Math.max(scale, 1), READ_HEIGHT,
+                                fadeToWhite(tickColor(m.alt), tickOpacity),
+                                isLowBaseQuality(qual), !neutralBody,
+                            );
                         }
                     }
                 }
@@ -844,10 +843,114 @@ export class Renderer {
     }
 
     /**
-     * Base-level painting of one read: each CIGAR-aligned base as a coloured cell
-     * (with its letter when tall enough), a strand-coloured stripe along the bottom
-     * and a strand arrowhead past the 3' end. Everything is drawn at `alpha`, so the
-     * MAPQ fade stays visible even though the bases cover the read body.
+     * Wide-zoom read body: a neutral (or colour-by) pentagon pointing in the
+     * alignment direction, a strand-coloured stripe along its bottom edge and a
+     * strand-coloured tip, then its outline.
+     */
+    private drawReadBody(
+        ctx: CanvasRenderingContext2D,
+        read: Read,
+        x1: number,
+        x2: number,
+        y: number,
+        h: number,
+        fill: string,
+        strandFill: string,
+        outline: ReadOutline,
+    ): void {
+        const tip = Math.min(5, Math.max(0, x2 - x1));
+        const path = new Path2D();
+        if (read.is_reverse) {
+            path.moveTo(x1 + tip, y);
+            path.lineTo(x2, y);
+            path.lineTo(x2, y + h);
+            path.lineTo(x1 + tip, y + h);
+            path.lineTo(x1, y + h / 2);
+        } else {
+            path.moveTo(x1, y);
+            path.lineTo(x2 - tip, y);
+            path.lineTo(x2, y + h / 2);
+            path.lineTo(x2 - tip, y + h);
+            path.lineTo(x1, y + h);
+        }
+        path.closePath();
+        ctx.fillStyle = fill;
+        ctx.fill(path);
+
+        // Strand stripe (bottom ~20%) + filled tip triangle.
+        const stripeH = Math.max(2, Math.round(h * 0.2));
+        ctx.fillStyle = strandFill;
+        const sx = read.is_reverse ? x1 + tip : x1;
+        ctx.fillRect(sx, y + h - stripeH, Math.max(x2 - x1 - tip, 0), stripeH);
+        if (tip >= 2) {
+            ctx.beginPath();
+            if (read.is_reverse) {
+                ctx.moveTo(x1 + tip, y);
+                ctx.lineTo(x1, y + h / 2);
+                ctx.lineTo(x1 + tip, y + h);
+            } else {
+                ctx.moveTo(x2 - tip, y);
+                ctx.lineTo(x2, y + h / 2);
+                ctx.lineTo(x2 - tip, y + h);
+            }
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        this.strokeOutline(ctx, outline, () => ctx.stroke(path));
+    }
+
+    private strokeOutline(ctx: CanvasRenderingContext2D, outline: ReadOutline | null, draw: () => void): void {
+        if (!outline) return;
+        ctx.save();
+        ctx.strokeStyle = outline.color;
+        ctx.lineWidth = outline.width;
+        ctx.setLineDash(outline.dash);
+        draw();
+        ctx.restore();
+    }
+
+    /**
+     * One mismatch tick at wide zoom. Solid in the base colour; a low-base-quality
+     * base (< LOW_BASE_QUALITY) is drawn hollow — a pale centre inside a
+     * base-coloured border (top/bottom caps, plus sides when the tick is wide
+     * enough) — so it stays visible but reads as low-confidence. On a tinted
+     * (non-neutral) body a white halo keeps the tick separable from the body.
+     */
+    private drawMismatchTick(
+        ctx: CanvasRenderingContext2D,
+        x: number,
+        y: number,
+        w: number,
+        h: number,
+        color: string,
+        lowQuality: boolean,
+        halo: boolean,
+    ): void {
+        if (halo) {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(x - 1, y, w + 2, h);
+        }
+        ctx.fillStyle = color;
+        if (!lowQuality) {
+            ctx.fillRect(x, y, w, h);
+            return;
+        }
+        ctx.fillRect(x, y, w, h);
+        const cap = Math.max(1, Math.round(h * 0.25));
+        const side = w >= 4 ? 1 : 0;
+        ctx.fillStyle = mixColor(color, '#ffffff', LOW_BQ_WASH);
+        ctx.fillRect(x + side, y + cap, w - 2 * side, h - 2 * cap);
+    }
+
+    /**
+     * Base-level painting of one read: each CIGAR-aligned base as a cell (with its
+     * letter when tall enough), a strand-coloured stripe along the bottom and a
+     * strand arrowhead past the 3' end. Bases that match the reference are drawn
+     * in the read-body grey with a dark letter (faded with MAPQ); bases that
+     * differ are drawn in their base colour with a white letter — or hollow (pale
+     * centre, coloured border and letter) when their base quality is low. Without
+     * a reference every base is drawn in its base colour (nothing to compare to).
      */
     private renderReadBases(
         ctx: CanvasRenderingContext2D,
@@ -860,22 +963,28 @@ export class Renderer {
         scale: number,
         width: number,
         alpha: number,
-        stroke: boolean,
+        tickOpacity: number,
+        bodyColor: string,
+        strandFill: string,
+        outline: ReadOutline | null,
     ): void {
         const seq = read.sequence ?? '';
+        const quals = read.qualities;
         const vpStart = this.state.viewport.start;
         const stripeH = Math.max(2, Math.round(h * 0.2));
         // 1px separation between bases and stripe only when the row has room.
         const baseH = Math.max(1, h - stripeH - (h >= 10 ? 1 : 0));
-        const strandColor = read.is_reverse
-            ? COLOR_PALETTES.strand.reverse
-            : COLOR_PALETTES.strand.forward;
+        const haveRef = !!this.state.data?.reference_sequence;
+        const mismatches = haveRef ? this.buildMismatchSet(read) : null;
+        const matchFill = fadeToWhite(bodyColor, alpha);
+        const matchLetter = fadeToWhite(MATCH_LETTER, alpha);
+        const cellW = Math.max(scale - 0.5, 1);
+        const border = Math.max(1, Math.min(2, Math.round(scale * 0.1)));
 
         ctx.save();
-        ctx.globalAlpha = alpha;
         const showText = baseH >= 7;
         if (showText) {
-            ctx.font = `${Math.min(10, baseH)}px monospace`;
+            ctx.font = `bold ${Math.min(10, baseH)}px monospace`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
         }
@@ -884,16 +993,32 @@ export class Renderer {
             if (bx + scale < 0) continue;
             if (bx > width) break;
             const base = (seq[qpos] ?? 'N').toUpperCase();
-            ctx.fillStyle = BASE_COLORS[base] || '#374151';
-            ctx.fillRect(bx, y, Math.max(scale - 0.5, 1), baseH);
+            const differs = mismatches === null || mismatches.has(refPos);
+            let letter: string;
+            if (!differs) {
+                ctx.fillStyle = matchFill;
+                ctx.fillRect(bx, y, cellW, baseH);
+                letter = matchLetter;
+            } else {
+                const c = fadeToWhite(tickColor(base), tickOpacity);
+                ctx.fillStyle = c;
+                ctx.fillRect(bx, y, cellW, baseH);
+                if (haveRef && isLowBaseQuality(quals?.[qpos])) {
+                    ctx.fillStyle = mixColor(c, '#ffffff', LOW_BQ_WASH);
+                    ctx.fillRect(bx + border, y + border, cellW - 2 * border, baseH - 2 * border);
+                    letter = c;
+                } else {
+                    letter = fadeToWhite('#ffffff', tickOpacity);
+                }
+            }
             if (showText) {
-                ctx.fillStyle = '#fff';
+                ctx.fillStyle = letter;
                 ctx.fillText(base, bx + scale / 2, y + baseH / 2);
             }
         }
 
         // Strand stripe along the bottom of the read.
-        ctx.fillStyle = strandColor;
+        ctx.fillStyle = strandFill;
         ctx.fillRect(x1, y + h - stripeH, Math.max(x2 - x1, 1), stripeH);
 
         // Strand arrowhead just past the read's 3' end (packing leaves >= 1 base gap).
@@ -912,10 +1037,7 @@ export class Renderer {
         ctx.fill();
         ctx.restore();
 
-        if (stroke) {
-            // strokeStyle/lineWidth were set by the MAPQ-0 / hover logic.
-            ctx.strokeRect(x1, y, Math.max(x2 - x1, 1), h);
-        }
+        this.strokeOutline(ctx, outline, () => ctx.strokeRect(x1, y, Math.max(x2 - x1, 1), h));
     }
 
     /**

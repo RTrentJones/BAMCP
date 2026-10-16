@@ -498,3 +498,42 @@ def test_build_real_cli_forwards_png_mode(monkeypatch, tmp_path, flag, expect):
     argv = ["build-real", "--out", str(tmp_path), "--sites", "s.jsonl", "--seed", "3", *flag]
     assert cli.main(argv) == 0
     assert seen["png"] is expect
+
+
+def test_same_pos_truth_records_block_each_other(giab, tmp_path):
+    """Two truth records at one POS are not 'isolated' just because they share a start."""
+    with pysam.FastaFile(str(giab["ref"])) as fa:
+        r = fa.fetch(CHROM, HET, HET + 2)
+    vcf = _vcf_with(
+        tmp_path, giab, [(HET + 1, r[0], _other(r[0])), (HET + 1, r, r[0])]
+    )  # an SNV and a 1 bp deletion anchored at the same base
+    conf = real.load_bed(giab["conf"], CHROM)
+    rep = real.load_bed(giab["rep"], CHROM)
+    with (
+        pysam.AlignmentFile(str(giab["bam"])) as bam,
+        pysam.FastaFile(str(giab["ref"])) as fa,
+        pysam.VariantFile(str(vcf)) as v,
+    ):
+        pools = real.scan_window(bam, fa, v, CHROM, 1000, 11000, conf, rep)
+    assert pools["real_snv_het"] == [] and pools["real_indel_het"] == []
+
+
+def test_rejected_window_draws_do_not_count_as_scans(giab):
+    """With room for only a few non-overlapping windows, max_windows still means scans."""
+    lines: list[str] = []
+    with pytest.raises(ValueError):  # the fixture has no hom SNV, so the pools never fill
+        real.select_sites(
+            3,
+            chrom=CHROM,
+            bam_path=str(giab["bam"]),
+            ref_path=str(giab["ref"]),
+            vcf_path=str(giab["vcf"]),
+            confident_bed=giab["conf"],
+            repeat_bed=giab["rep"],
+            quotas={"real_snv_hom": 1},
+            max_windows=3,
+            pool_factor=1,
+            log=lines.append,
+        )
+    summary = lines[-1]
+    assert summary.startswith("scanned 3 windows in ") and "draws" in summary

@@ -264,16 +264,22 @@ def scan_window(
     spans = [(r.pos - 1, r.pos - 1 + max(len(r.ref), 1)) for r in truth]
 
     def near_truth(s0: int, e0: int, bp: int, exclude: int | None = None) -> bool:
-        """Does any truth span (other than the one starting at ``exclude``) come within
-        ``bp`` of [s0, e0)?"""
-        return any(start < e0 + bp and end > s0 - bp for start, end in spans if start != exclude)
+        """Does any truth span (other than record index ``exclude``) come within ``bp`` of
+        [s0, e0)? By index, so a second record at the same POS still counts."""
+        return any(
+            start < e0 + bp and end > s0 - bp
+            for i, (start, end) in enumerate(spans)
+            if i != exclude
+        )
 
-    for rec in truth:
+    for idx, rec in enumerate(truth):
         p0 = rec.pos - 1
         if not (a <= p0 < b) or len(rec.alts or ()) != 1:
             continue
         span_end = p0 + max(len(rec.ref), 1)
-        if not confident.covers(p0, span_end) or near_truth(p0, span_end, ISOLATION_BP, exclude=p0):
+        if not confident.covers(p0, span_end) or near_truth(
+            p0, span_end, ISOLATION_BP, exclude=idx
+        ):
             continue
         gt = next(iter(rec.samples.values()))["GT"]
         cls = classify_record(rec.ref, rec.alts[0], tuple(gt))
@@ -419,24 +425,31 @@ def select_sites(
         pysam.FastaFile(ref_path) as fasta,
         pysam.VariantFile(vcf_path) as vcf,
     ):
-        for n in range(max_windows):
+        # Only scanned windows count toward max_windows; a start that overlaps an earlier
+        # window is redrawn (attempts are capped so a crowded contig cannot loop forever).
+        scanned = attempts = 0
+        full = False
+        while scanned < max_windows and attempts < 20 * max_windows:
+            attempts += 1
             s, e = rng.choice(big)
             a = rng.randint(s, e - WINDOW_BP)
             if any(abs(a - u) < WINDOW_BP for u in used):
                 continue
             used.append(a)
+            scanned += 1
             for k, v in scan_window(
                 bam, fasta, vcf, chrom, a, a + WINDOW_BP, confident, repeats
             ).items():
                 pools.setdefault(k, []).extend(v)
-            if (n + 1) % 50 == 0:
-                log(f"{n + 1} windows: { {k: len(v) for k, v in pools.items()} }")
+            if scanned % 50 == 0:
+                log(f"{scanned} windows: { {k: len(v) for k, v in pools.items()} }")
             if _pools_full(pools, quotas, pool_factor):
-                log(f"pools full after {n + 1} windows")
+                log(f"pools full after {scanned} windows ({attempts} draws)")
+                full = True
                 break
-        else:
+        if not full:
             sizes = {k: len(v) for k, v in pools.items()}
-            log(f"scanned {max_windows} windows; pool sizes: {sizes}")
+            log(f"scanned {scanned} windows in {attempts} draws; pool sizes: {sizes}")
 
     chosen: list[RealSite] = []
     pick_rng = _derive_rng(seed, "real-pick")

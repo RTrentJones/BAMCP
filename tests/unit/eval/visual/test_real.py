@@ -394,3 +394,60 @@ def test_noisy_negatives_must_split_across_repeat_context(giab):
             pool_factor=1,
             log=lambda *_: None,
         )
+
+
+def test_snv_next_to_a_repeat_is_not_in_it(giab, tmp_path):
+    """An SNV's repeat context is its own base: a repeat starting one base later does not
+    move it into real_snv_in_repeat."""
+    rep_path = tmp_path / "adjacent.bed.gz"
+    with gzip.open(rep_path, "wt") as fh:
+        fh.write(f"{CHROM}\t{HET + 1}\t{HET + 20}\n")
+    conf = real.load_bed(giab["conf"], CHROM)
+    rep = real.load_bed(rep_path, CHROM)
+    with (
+        pysam.AlignmentFile(str(giab["bam"])) as bam,
+        pysam.FastaFile(str(giab["ref"])) as fa,
+        pysam.VariantFile(str(giab["vcf"])) as vcf,
+    ):
+        pools = real.scan_window(bam, fa, vcf, CHROM, 1000, 11000, conf, rep)
+    assert [s.site0 for s in pools["real_snv_het"]] == [HET]
+    assert pools["real_snv_in_repeat"] == []
+
+
+def _site(case: str, in_repeat: bool) -> real.RealSite:
+    return real.RealSite(case, CHROM, 0, {}, in_repeat)
+
+
+def test_pools_full_needs_both_noisy_subpools():
+    quotas = {"real_noisy_negative": 4, "real_clean_negative": 1}
+    clean = [_site("real_clean_negative", False)]
+    lopsided = {"real_noisy_negative": [_site("n", False)] * 8, "real_clean_negative": clean}
+    assert not real._pools_full(lopsided, quotas, 2)  # 8 >= 2x4 overall, but none in repeats
+    split = {
+        "real_noisy_negative": [_site("n", True)] * 4 + [_site("n", False)] * 4,
+        "real_clean_negative": clean,
+    }
+    assert not real._pools_full(split, quotas, 2)  # clean pool short of 2x1
+    split["real_clean_negative"] = clean * 2
+    assert real._pools_full(split, quotas, 2)
+
+
+def test_selftest_oracle_passes_on_a_real_run_set(giab, tmp_path):
+    from bamcp.eval.visual.selftest import run_selftests
+
+    sites_path = tmp_path / "sites.jsonl"
+    real.sites_to_jsonl(_sites(giab), sites_path)
+    out = tmp_path / "run"
+    real.build_real_run_set(
+        out,
+        sites_path,
+        seed=3,
+        conditions=["Traw", "Tjson"],
+        models=["m"],
+        png=False,
+        bam_path=str(giab["bam"]),
+        ref_path=str(giab["ref"]),
+        log=lambda *_: None,
+    )
+    results = {r.name: r for r in run_selftests(out, charts=False)}
+    assert results["oracle = 100%"].ok, results["oracle = 100%"].detail

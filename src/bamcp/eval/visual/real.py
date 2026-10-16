@@ -280,7 +280,10 @@ def scan_window(
         if cls is None:
             continue
         label = cls["label"]
-        in_rep = repeats.overlaps(p0, span_end + 1)
+        # The variant's own reference span; an insertion also touches the base after its
+        # anchor (the inserted bases sit between the two).
+        is_ins = label["variant_type"] == "ins"
+        in_rep = repeats.overlaps(p0, span_end + 1 if is_ins else span_end)
         if label["variant_type"] != "SNV":  # real indels sit mostly in repeats: any context
             stratum = "real_indel_het" if label["zygosity"] == "het" else "real_indel_hom"
         elif in_rep:
@@ -356,6 +359,20 @@ def _pick(
     return chosen
 
 
+def _pools_full(pools: dict[str, list[RealSite]], quotas: dict[str, int], factor: int) -> bool:
+    """Every stratum's pool holds ``factor`` x its quota; noisy negatives need that inside
+    and outside repeats separately, since they are drawn half from each."""
+    for k, q in quotas.items():
+        pool = pools.get(k, [])
+        if k == "real_noisy_negative":
+            inside = sum(s.in_repeat for s in pool)
+            if inside < factor * (q // 2) or len(pool) - inside < factor * (q - q // 2):
+                return False
+        elif len(pool) < factor * q:
+            return False
+    return True
+
+
 def select_sites(
     seed: int,
     *,
@@ -401,7 +418,7 @@ def select_sites(
                 pools.setdefault(k, []).extend(v)
             if (n + 1) % 50 == 0:
                 log(f"{n + 1} windows: { {k: len(v) for k, v in pools.items()} }")
-            if all(len(pools.get(k, [])) >= pool_factor * q for k, q in quotas.items()):
+            if _pools_full(pools, quotas, pool_factor):
                 log(f"pools full after {n + 1} windows")
                 break
         else:

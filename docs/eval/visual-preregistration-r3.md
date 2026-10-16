@@ -121,3 +121,11 @@ re-run with the identical prompt. No item is dropped after seeing results.
   The frozen manifest was checked against the truth VCF: none of its 10 negatives lies within
   10 bp of any truth span, and its noisy negatives are 4 inside / 4 outside repeats, so the
   registered item set and every reported result are unchanged.
+- **2026-10-16, after the runs (second review round; no effect on the data).** (3) An SNV's
+  repeat flag was computed over its own base plus the next one, so an SNV directly before a
+  repeat could be counted as inside it; it now uses the variant's own span (insertions also
+  the base after the anchor). All four `real_snv_in_repeat` sites overlap a repeat on their
+  own base and no other selected SNV is adjacent to one. (4) Scanning could stop when the
+  combined noisy-negative pool was full but one repeat sub-pool was short; the stop rule now
+  checks both. (5) The self-test oracle answered the unscored `unknown` type, which is not a
+  valid answer value; it now answers `none`. The oracle self-test passes on the real run set.

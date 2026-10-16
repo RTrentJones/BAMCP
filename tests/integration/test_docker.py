@@ -116,16 +116,26 @@ class TestDockerfileProd:
 
     @pytest.mark.unit
     def test_env_vars_declared(self):
-        """All 6 config env vars should have defaults in the Dockerfile."""
+        """Non-threshold config env vars should have defaults in the Dockerfile."""
         for var in [
             "BAMCP_REFERENCE",
             "BAMCP_MAX_READS",
             "BAMCP_DEFAULT_WINDOW",
+        ]:
+            assert var in self.content, f"Missing ENV declaration for {var}"
+
+    @pytest.mark.unit
+    def test_calling_thresholds_not_overridden(self):
+        """The image must not pin calling thresholds: the code defaults are the source of truth.
+        An ENV BAMCP_MIN_MAPQ="0" here once silently disabled the MAPQ filter in prod."""
+        for var in [
             "BAMCP_MIN_VAF",
             "BAMCP_MIN_DEPTH",
             "BAMCP_MIN_MAPQ",
+            "BAMCP_MIN_BASEQ",
+            "BAMCP_MIN_ALT_COUNT",
         ]:
-            assert var in self.content, f"Missing ENV declaration for {var}"
+            assert f"ENV {var}" not in self.content, f"Dockerfile pins {var}"
 
     @pytest.mark.unit
     def test_workdir_set(self):
@@ -518,16 +528,17 @@ class TestDockerConsistency:
         config = BAMCPConfig()
 
         env_map = {
-            "BAMCP_REFERENCE": config.reference,
+            "BAMCP_REFERENCE": config.reference or "",
             "BAMCP_MAX_READS": str(config.max_reads),
             "BAMCP_DEFAULT_WINDOW": str(config.default_window),
-            "BAMCP_MIN_VAF": str(config.min_vaf),
-            "BAMCP_MIN_DEPTH": str(config.min_depth),
-            "BAMCP_MIN_MAPQ": str(config.min_mapq),
         }
 
-        for var, _expected_default in env_map.items():
-            assert var in dockerfile, f"Dockerfile missing ENV {var}"
+        # Values, not just names: an image default that differs from the code default silently
+        # changes behavior in prod (it once pinned BAMCP_MIN_MAPQ="0" against a code default of 20).
+        for var, expected in env_map.items():
+            match = re.search(rf'^ENV {var}="([^"]*)"', dockerfile, re.MULTILINE)
+            assert match, f"Dockerfile missing ENV {var}"
+            assert match.group(1) == expected, f"ENV {var}={match.group(1)!r} != code {expected!r}"
 
     @pytest.mark.unit
     def test_python_version_consistent(self):

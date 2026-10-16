@@ -87,13 +87,12 @@ RUN groupadd -r bamcp && useradd -r -g bamcp -m -d /home/bamcp bamcp \
 ENV HOME=/home/bamcp
 USER bamcp
 
-# Default env vars (can be overridden)
+# Default env vars (can be overridden). Calling thresholds (BAMCP_MIN_VAF/_DEPTH/_MAPQ/_BASEQ/
+# _ALT_COUNT) are deliberately NOT set here: the code defaults in constants.py are the single
+# source of truth, and an image-level override silently disabled the MAPQ filter in prod.
 ENV BAMCP_REFERENCE=""
 ENV BAMCP_MAX_READS="10000"
 ENV BAMCP_DEFAULT_WINDOW="500"
-ENV BAMCP_MIN_VAF="0.1"
-ENV BAMCP_MIN_DEPTH="10"
-ENV BAMCP_MIN_MAPQ="0"
 ENV BAMCP_TRANSPORT="sse"
 ENV BAMCP_HOST="0.0.0.0"
 ENV BAMCP_PORT="8000"

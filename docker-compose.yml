@@ -83,9 +83,6 @@ services:
       - BAMCP_REFERENCE=/data/reference.fa
       - BAMCP_MAX_READS=10000
       - BAMCP_DEFAULT_WINDOW=500
-      - BAMCP_MIN_VAF=0.1
-      - BAMCP_MIN_DEPTH=10
-      - BAMCP_MIN_MAPQ=0
       - BAMCP_TRANSPORT=sse
       - BAMCP_HOST=0.0.0.0
       - BAMCP_PORT=8000
@@ -131,9 +128,6 @@ services:
       - BAMCP_REFERENCE=/data/reference.fa
       - BAMCP_MAX_READS=10000
       - BAMCP_DEFAULT_WINDOW=500
-      - BAMCP_MIN_VAF=0.1
-      - BAMCP_MIN_DEPTH=10
-      - BAMCP_MIN_MAPQ=0
       - BAMCP_TRANSPORT=streamable-http
       - BAMCP_HOST=0.0.0.0
       - BAMCP_PORT=8000

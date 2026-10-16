@@ -80,7 +80,7 @@ N_CONTIGS = 3
 SLOT_BP = 3000
 CONTIG_PAD = 1000
 READ_HALF_SPAN = 450  # keep reads overlapping site +/- this many bp
-MIN_SPACING = 1000  # between selected sites; > 2 * READ_HALF_SPAN
+MIN_SPACING = 1000  # between selected sites; reads near two sites go to the first only
 SAMPLE_LINE = "sequenced human sample (Illumina short reads); coordinates are re-indexed"
 
 
@@ -526,6 +526,8 @@ def write_real_fixtures(
     records: list[tuple[int, int, str, int, str, Any, Any, int]] = []
     items: list[Item] = []
     mapping: list[dict[str, Any]] = []
+    # A read is copied into one item only: two nearby sites must never share evidence.
+    assigned: set[tuple[str | None, bool, int, bool]] = set()
     with pysam.AlignmentFile(bam_path) as bam, pysam.FastaFile(ref_path) as fasta:
         for idx, (site, (contig, slot0)) in enumerate(zip(sites, layout, strict=True)):
             src0 = site.site0 - SLOT_BP // 2
@@ -533,7 +535,7 @@ def write_real_fixtures(
             seq = fasta.fetch(site.chrom, src0, src0 + SLOT_BP).upper()
             refs[contig][slot0 : slot0 + len(seq)] = list(seq)
             item_id = "i" + opaque_id(seed, "real", site.chrom, site.site0)
-            n = 0
+            n = shared = 0
             for r in bam.fetch(
                 site.chrom, site.site0 - READ_HALF_SPAN, site.site0 + READ_HALF_SPAN
             ):
@@ -541,6 +543,11 @@ def write_real_fixtures(
                     continue
                 if r.reference_start < src0 or r.reference_end > src0 + SLOT_BP:
                     continue
+                key = (r.query_name, bool(r.is_read1), r.reference_start, bool(r.is_reverse))
+                if key in assigned:
+                    shared += 1
+                    continue
+                assigned.add(key)
                 name = hashlib.sha1(f"{seed}:{item_id}:{n}".encode()).hexdigest()[:16]  # noqa: S324
                 n += 1
                 records.append(
@@ -574,6 +581,7 @@ def write_real_fixtures(
                     "blinded": f"{contig}:{new_site + 1}",
                     "vcf": [site.vcf_pos, site.vcf_ref, site.vcf_alt],
                     "reads": n,
+                    "shared_reads_dropped": shared,
                 }
             )
 

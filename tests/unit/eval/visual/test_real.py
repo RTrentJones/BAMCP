@@ -537,3 +537,33 @@ def test_rejected_window_draws_do_not_count_as_scans(giab):
         )
     summary = lines[-1]
     assert summary.startswith("scanned 3 windows in ") and "draws" in summary
+
+
+def test_nearby_sites_never_share_reads(giab, tmp_path):
+    """Two sites closer than their read windows plus a read length: each read is copied into
+    one item only, and the second item records how many it gave up."""
+    het_label = real.classify_record("A", "C", (0, 1))["label"]
+    sites = [
+        real.RealSite("real_snv_het", CHROM, HET, het_label, False),
+        real.RealSite(
+            "real_clean_negative",
+            CHROM,
+            HET + 500,
+            {**real.NEGATIVE_LABEL, "artifact_type": "none"},
+            False,
+        ),
+    ]
+    paths, items, mapping = real.write_real_fixtures(
+        sites, tmp_path, 3, bam_path=str(giab["bam"]), ref_path=str(giab["ref"])
+    )
+    with pysam.AlignmentFile(str(giab["bam"])) as src:
+        near = {
+            r.query_name
+            for r in src.fetch(CHROM, HET - real.READ_HALF_SPAN, HET + 500 + real.READ_HALF_SPAN)
+            if not r.is_duplicate
+        }
+    with pysam.AlignmentFile(str(paths["bam"])) as out:
+        written = sum(1 for _ in out.fetch(until_eof=True))
+    assert written == len(near)  # every source read once, none twice
+    assert mapping[0]["shared_reads_dropped"] == 0
+    assert mapping[1]["shared_reads_dropped"] > 0

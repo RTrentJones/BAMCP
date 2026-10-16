@@ -259,22 +259,21 @@ def scan_window(
     """Candidate sites in [a, b) for every stratum (truth from ``vcf``, signal from ``bam``)."""
     pools: dict[str, list[RealSite]] = {k: [] for k in QUOTAS}
     truth = list(vcf.fetch(chrom, max(0, a - 100), b + 100))
-    truth_pos = sorted(r.pos - 1 for r in truth)
+    # Whole reference spans, not anchors: a long deletion anchored far upstream still covers
+    # (and makes non-reference reads at) every base it deletes.
+    spans = [(r.pos - 1, r.pos - 1 + max(len(r.ref), 1)) for r in truth]
 
-    def near_truth(p0: int, bp: int, exclude: int | None = None) -> bool:
-        i = bisect.bisect_left(truth_pos, p0 - bp)
-        while i < len(truth_pos) and truth_pos[i] <= p0 + bp:
-            if truth_pos[i] != exclude:
-                return True
-            i += 1
-        return False
+    def near_truth(s0: int, e0: int, bp: int, exclude: int | None = None) -> bool:
+        """Does any truth span (other than the one starting at ``exclude``) come within
+        ``bp`` of [s0, e0)?"""
+        return any(start < e0 + bp and end > s0 - bp for start, end in spans if start != exclude)
 
     for rec in truth:
         p0 = rec.pos - 1
         if not (a <= p0 < b) or len(rec.alts or ()) != 1:
             continue
         span_end = p0 + max(len(rec.ref), 1)
-        if not confident.covers(p0, span_end) or near_truth(p0, ISOLATION_BP, exclude=p0):
+        if not confident.covers(p0, span_end) or near_truth(p0, span_end, ISOLATION_BP, exclude=p0):
             continue
         gt = next(iter(rec.samples.values()))["GT"]
         cls = classify_record(rec.ref, rec.alts[0], tuple(gt))
@@ -306,7 +305,7 @@ def scan_window(
     for p0, c in counts.items():
         if not confident.covers(p0 - NEG_CLEAR_BP, p0 + NEG_CLEAR_BP + 1):
             continue
-        if near_truth(p0, NEG_CLEAR_BP):
+        if near_truth(p0, p0 + 1, NEG_CLEAR_BP):
             continue
         ref_base = ref_seq[p0 - a]
         depth = sum(c.values())
@@ -416,8 +415,14 @@ def select_sites(
         if k == "real_noisy_negative":
             rep = [s for s in pool if s.in_repeat]
             non = [s for s in pool if not s.in_repeat]
-            half = _pick(rep, q // 2, pick_rng, chosen)
-            got = half + _pick(non, q - len(half), pick_rng, chosen)
+            in_rep = _pick(rep, q // 2, pick_rng, chosen)
+            out_rep = _pick(non, q - q // 2, pick_rng, chosen)
+            if len(in_rep) < q // 2 or len(out_rep) < q - q // 2:
+                raise ValueError(
+                    f"stratum {k}: need {q // 2} inside repeats and {q - q // 2} outside, "
+                    f"found {len(in_rep)} and {len(out_rep)}"
+                )
+            got = in_rep + out_rep
         else:
             got = _pick(pool, q, pick_rng, chosen)
         if len(got) < q:

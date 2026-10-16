@@ -337,3 +337,60 @@ def test_build_real_run_set_lints_and_grades(giab, tmp_path):
     # answer there costs nothing.
     assert g["field_accuracy"]["artifact_type"] == 1.0
     assert "unknown" not in g["artifact_type_confusion"]
+
+
+def _vcf_with(tmp_path: Path, giab, records: list[tuple[int, str, str]]) -> Path:
+    txt = tmp_path / "t.vcf"
+    body = "".join(f"{CHROM}\t{p}\t.\t{r}\t{a}\t50\tPASS\t.\tGT\t0/1\n" for p, r, a in records)
+    txt.write_text(
+        "##fileformat=VCFv4.2\n"
+        f"##contig=<ID={CHROM},length={LEN}>\n"
+        '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tHG002\n" + body
+    )
+    out = tmp_path / "t.vcf.gz"
+    pysam.tabix_compress(str(txt), str(out), force=True)
+    pysam.tabix_index(str(out), preset="vcf", force=True)
+    return out
+
+
+def test_truth_deletion_span_excludes_negatives_inside_it(giab, tmp_path):
+    """A long truth deletion anchored > NEG_CLEAR_BP upstream still covers the noisy site:
+    reads there reflect the true variant, so the site must not become a 'negative'."""
+    with pysam.FastaFile(str(giab["ref"])) as fa:
+        anchor0 = NOISY - 25
+        ref = fa.fetch(CHROM, anchor0, anchor0 + 41)  # deletes NOISY-24 .. NOISY+15
+    vcf = _vcf_with(tmp_path, giab, [(anchor0 + 1, ref, ref[0])])
+    conf = real.load_bed(giab["conf"], CHROM)
+    rep = real.load_bed(giab["rep"], CHROM)
+    with (
+        pysam.AlignmentFile(str(giab["bam"])) as bam,
+        pysam.FastaFile(str(giab["ref"])) as fa,
+        pysam.VariantFile(str(vcf)) as v,
+    ):
+        pools = real.scan_window(bam, fa, v, CHROM, 1000, 11000, conf, rep)
+    assert NOISY not in {s.site0 for s in pools["real_noisy_negative"]}
+    lo, hi = anchor0 - real.NEG_CLEAR_BP, anchor0 + 41 + real.NEG_CLEAR_BP
+    for k in ("real_noisy_negative", "real_clean_negative"):
+        assert not [s.site0 for s in pools[k] if lo <= s.site0 < hi], k
+    # ...while sites just outside the cleared span are still eligible.
+    assert any(s.site0 == lo - 1 for s in pools["real_clean_negative"])
+
+
+def test_noisy_negatives_must_split_across_repeat_context(giab):
+    """No noisy candidate sits in the repeat BED, so a half-in-repeats quota cannot be met
+    and the selection fails instead of filling from outside repeats."""
+    with pytest.raises(ValueError, match="inside repeats"):
+        real.select_sites(
+            3,
+            chrom=CHROM,
+            bam_path=str(giab["bam"]),
+            ref_path=str(giab["ref"]),
+            vcf_path=str(giab["vcf"]),
+            confident_bed=giab["conf"],
+            repeat_bed=giab["rep"],
+            quotas={"real_noisy_negative": 2},
+            max_windows=40,
+            pool_factor=1,
+            log=lambda *_: None,
+        )

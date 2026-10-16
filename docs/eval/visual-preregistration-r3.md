@@ -113,4 +113,11 @@ re-run with the identical prompt. No item is dropped after seeing results.
 
 ## Amendments
 
-_None._
+- **2026-10-16, after the runs (code review of the selection code; no effect on the data).**
+  Two defects in `real.py` were fixed for future seeds: (1) truth proximity was checked against
+  VCF anchor positions only, so a long truth deletion anchored more than 10 bp upstream could
+  cover a "negative"; it now uses each record's full reference span. (2) The noisy-negative
+  draw could silently fill a short in-repeat pool from outside repeats; it now fails instead.
+  The frozen manifest was checked against the truth VCF: none of its 10 negatives lies within
+  10 bp of any truth span, and its noisy negatives are 4 inside / 4 outside repeats, so the
+  registered item set and every reported result are unchanged.

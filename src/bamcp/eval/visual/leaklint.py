@@ -296,23 +296,41 @@ def lint_sentinel_contig(bam_path: str | None, ref_path: str | None = None) -> l
 # ---------------------------------------------------------------------------
 
 
-def _ks_exact_p(n: int, m: int, d: float) -> float:
-    """P(D >= d) for the two-sample KS statistic under H0 (continuous data), by counting
-    the monotone lattice paths from (0, 0) to (n, m) that stay strictly inside the band."""
+_KS_EXACT_MAX_NM = 250_000  # exact DP is O(n*m)
+
+
+def _ks_exact_p(n: int, m: int, d: float, checkpoints: set[int] | None = None) -> float:
+    """P(D >= d) for the two-sample KS statistic under the permutation null, exact.
+
+    Walks the monotone lattice paths from (0, 0) to (n, m), each interleaving of the two
+    samples equally likely, and sums the probability of the paths that stay strictly inside
+    the band |i/n - j/m| < d. ``checkpoints`` holds the pooled counts ``i + j`` at which the
+    ECDFs are compared, i.e. the end of each block of tied values: with ties ``D`` is only
+    observed there, so constraining every lattice point (the continuous-data null) would
+    overstate the p-value. ``None`` means no ties (every point is a checkpoint).
+    """
     # |i/n - j/m| < d  <=>  |i*m - j*n| < d*n*m; the epsilon keeps the observed D itself
     # outside the band (P(D >= d) includes D == d).
     bound = d * n * m - 1e-9 * n * m
-    row = [0.0] * (m + 1)
+    prev = [0.0] * (m + 1)
     for i in range(n + 1):
+        row = [0.0] * (m + 1)
         for j in range(m + 1):
-            if abs(i * m - j * n) >= bound:
-                row[j] = 0.0
-            elif i == 0 and j == 0:
-                row[j] = 1.0
+            k = i + j
+            if k == 0:
+                val = 1.0
             else:
-                row[j] = (row[j] if i > 0 else 0.0) + (row[j - 1] if j > 0 else 0.0)
-    total = math.comb(n + m, n)
-    return min(1.0, max(0.0, 1.0 - row[m] / total))
+                left = n + m - k + 1  # elements not yet placed before this step
+                val = 0.0
+                if i > 0:
+                    val += prev[j] * (n - i + 1) / left
+                if j > 0:
+                    val += row[j - 1] * (m - j + 1) / left
+            if (checkpoints is None or k in checkpoints) and abs(i * m - j * n) >= bound:
+                val = 0.0
+            row[j] = val
+        prev = row
+    return min(1.0, max(0.0, 1.0 - prev[m]))
 
 
 def _ks_asymptotic_p(n: int, m: int, d: float) -> float:
@@ -328,9 +346,12 @@ def _ks_asymptotic_p(n: int, m: int, d: float) -> float:
 def ks_two_sample(a: Sequence[float], b: Sequence[float]) -> tuple[float, float]:
     """Two-sample Kolmogorov-Smirnov test (two-sided): ``(D, p)``.
 
-    Pure Python. Exact p-value (path counting, as for continuous data) when ``n + m <= 1000``,
-    else the asymptotic Kolmogorov distribution. Tied values are handled in ``D`` (the ECDFs
-    are compared after every distinct value) and make the p-value conservative.
+    Pure Python. Exact permutation p-value when ``n * m <= 250_000``, ties included: the
+    ECDFs are compared after every distinct value, and the null distribution is computed for
+    the same tie blocks (POI offsets are small integers, mostly -1 or 0, so ties are the rule;
+    the continuous-data null would inflate p and let a differing draw pass the lint). Larger
+    samples use the asymptotic Kolmogorov distribution, which ignores ties and is therefore
+    lenient (p too high) when they are present.
     """
     n, m = len(a), len(b)
     if not n or not m:
@@ -338,15 +359,21 @@ def ks_two_sample(a: Sequence[float], b: Sequence[float]) -> tuple[float, float]
     xs, ys = sorted(a), sorted(b)
     d = 0.0
     i = j = 0
+    checkpoints: set[int] = set()
     for v in sorted(set(xs) | set(ys)):
         while i < n and xs[i] <= v:
             i += 1
         while j < m and ys[j] <= v:
             j += 1
+        checkpoints.add(i + j)
         d = max(d, abs(i / n - j / m))
     if d <= 0.0:
         return 0.0, 1.0
-    p = _ks_exact_p(n, m, d) if n + m <= 1000 else _ks_asymptotic_p(n, m, d)
+    if n * m <= _KS_EXACT_MAX_NM:
+        tied = len(checkpoints) < n + m
+        p = _ks_exact_p(n, m, d, checkpoints if tied else None)
+    else:
+        p = _ks_asymptotic_p(n, m, d)
     return d, p
 
 

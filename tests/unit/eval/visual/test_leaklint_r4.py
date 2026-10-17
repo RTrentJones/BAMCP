@@ -254,6 +254,29 @@ def test_ks_rejects_empty():
         ks_two_sample([], [1.0])
 
 
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ([0, 0, 0, -1, -1, 0], [-1, -1, -1, 0, -1]),
+        ([0, 1, 1, 2, 0, -1], [2, 2, 1, 3, 2, 0]),
+        ([0, 0, 0, 0, 0, 0, -1], [0, -1, -1, -1, 0, -1]),
+    ],
+)
+def test_ks_exact_matches_permutation_with_ties(a, b):
+    # Integer POI offsets are heavily tied; the p-value must be the permutation one.
+    assert ks_two_sample(a, b)[1] == pytest.approx(_brute_force_p(a, b), abs=1e-9)
+
+
+def test_lint_poi_offsets_ties_do_not_inflate_p():
+    # 15 vs 15 offsets in {-1, 0} (insertion anchor vs first deleted base): the permutation
+    # p is about 0.14, so the draw must be redone; the continuous-data null gave 0.39.
+    pos = [0] * 10 + [-1] * 5
+    neg = [0] * 5 + [-1] * 10
+    res = lint_poi_offsets(pos, neg)
+    assert res.p == pytest.approx(0.1431, abs=0.002)
+    assert not res.ok and res.problems
+
+
 def test_lint_poi_offsets():
     same = lint_poi_offsets([0, 1, 2, 3, 0, 1, 2, 3], [0, 1, 2, 3, 1, 2, 0, 3])
     assert same.ok and not same.problems and same.p > 0.2

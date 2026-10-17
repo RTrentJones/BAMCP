@@ -1107,3 +1107,19 @@ def test_sv_spans_cover_the_duplicated_copy_of_an_insertion(tmp_path):
     assert bs.contains(W.CHROM, 10000 + 400) and bs.contains(W.CHROM, 10000 - 400)
     assert not bs.contains(W.CHROM, 10000 + 600)
     assert bs.contains(W.CHROM, 20000 + 100) and not bs.contains(W.CHROM, 20000 + 200)
+
+
+def test_anchor_spans_reach_the_whole_poi_run(world):
+    """A truth record 100 bp from the indel can still sit inside a long run holding the
+    POI; the anchoring check used to see only records within 40 bp of the indel."""
+    r = W.resources(world)
+    far = _rec(W.ADJ_DEL + 100, "v5.0q")
+    _inject(r.v5q, far)
+    _inject(r.cmrg, _rec(W.ADJ_DEL - 150, "cmrg_v1.00"))
+    spans = real._anchor_spans(r, W.CHROM, W.ADJ_DEL, W.ADJ_DEL + 4)
+    assert (far.start0, far.end0) in spans
+    assert (W.ADJ_DEL - 150, W.ADJ_DEL - 149) in spans
+    # And anchoring_safe then rejects a POI whose run reaches that record.
+    seq = "C" * 5 + "A" * 120 + "G" * 5
+    fetch = lambda chrom, a, b: seq[max(0, a) : b]  # noqa: E731
+    assert real.anchoring_safe(fetch, W.CHROM, 10, [(110, 111)]) is False

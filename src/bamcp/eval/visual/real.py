@@ -1923,6 +1923,21 @@ def anchoring_safe(fetch: Any, chrom: str, poi0: int, spans: Iterable[tuple[int,
     return not any(a < hi and b > lo for a, b in spans)
 
 
+# anchoring_safe looks at the POI's repeat run within +/-200 bp of it (+2 bp); the POI is
+# at most ADJ_MAX_GAP from the indel span, so truth spans must be gathered this far out.
+ANCHOR_SPAN_BP = 200 + 2 + ADJ_MAX_GAP + 1
+
+
+def _anchor_spans(res: R4Resources, c: str, s: int, e: int) -> list[tuple[int, int]]:
+    """Every truth span (any set, any FILTER) the anchoring rule could reach from a POI
+    next to the indel spanning [s, e)."""
+    return [
+        (o.start0, o.end0)
+        for ts in _truth_sets(res)
+        for o in ts.records_near(c, s, e, ANCHOR_SPAN_BP)
+    ]
+
+
 def _adjacent_problem(
     res: R4Resources,
     c: str,
@@ -2002,9 +2017,7 @@ def iter_indel_adjacent(
             continue
         s, e = ind.start0, ind.end0
         rs, re_, _unit = _span_of(ind, res.fetch)
-        spans = [
-            (o.start0, o.end0) for ts in (res.v421, res.v5q) for o in ts.records_near(c, s, e, 40)
-        ]
+        spans = _anchor_spans(res, c, s, e)
         ctx = {"indel": [s, e], "indel_run": [rs, re_]}
 
         scanned += 1

@@ -526,3 +526,19 @@ def test_cached_rejects_a_short_download(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         T.cached("https://example.org/none.tbi")
     assert len(calls) == 1  # a 404 is not retried
+
+
+def test_trio_recurrence_pools_parents(monkeypatch):
+    """Amendment A4: one read in each parent (2 of 100, 2%) is recurrent; one read is not."""
+    hists = iter([Counter({0: 49, -1: 1}), Counter({0: 49, -1: 1})])
+    monkeypatch.setattr(T, "spanning_hist", lambda *a, **k: next(hists))
+    row = _row(
+        "tr_stutter_neg",
+        100,
+        polarity="neg",
+        context={"run": [100, 112], "unit": "A", "delta": -1},
+    )
+    got = T.trio_recurrence(row, {"HG003": None, "HG004": None})
+    assert got["recurrent"] and got["parents"]["HG003"]["alt"] == 1
+    hists = iter([Counter({0: 49, -1: 1}), Counter({0: 50})])
+    assert not T.trio_recurrence(row, {"HG003": None, "HG004": None})["recurrent"]

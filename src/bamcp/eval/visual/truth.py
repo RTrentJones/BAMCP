@@ -129,6 +129,10 @@ HIFI_STUTTER_MAX_FRAC = 0.25  # candidate length share of HiFi spanning reads (A
 HIFI_MIN_DEPTH = 10
 HIFI_HOM_REF_RATIO = 0.5
 TRIO_RECUR_FRAC = 0.05
+# Amendment A4 (pre-pilot): a 3-5% artifact shows on only 1-2 reads of a 40-60x parent, so
+# the applicable parents' reads also count pooled: >= 2 reads and >= 2% together.
+TRIO_POOLED_MIN_READS = 2
+TRIO_POOLED_MIN_FRAC = 0.02
 SPAN_FLANK = 3  # a read "spans" a repeat run when it aligns this many bp past both ends
 BIN_BP = 1_000_000
 PILOT_FRACTION = 0.25
@@ -789,7 +793,8 @@ def trio_recurrence(
 ) -> dict[str, Any]:
     """The candidate allele's fraction in each parent's 60x Illumina BAM.
 
-    ``recurrent`` is True when at least one *applicable* parent carries it at >= 5%: a
+    ``recurrent`` is True when at least one *applicable* parent carries it at >= 5%, or the
+    applicable parents together carry it on >= 2 reads and >= 2% (amendment A4): a
     parent is applicable where its own v4.2.1 truth is reference at the site, or its BED
     does not cover it (a parent that truly carries the variant says nothing about
     artifacts). Without ``parent_truth`` every parent counts and ``parent_truth`` is
@@ -800,6 +805,7 @@ def trio_recurrence(
     s0, e0 = row["context"]["run"] if kind == "tr" else (site0, site0 + 1)
     out: dict[str, Any] = {"parents": {}}
     recurrent = False
+    pooled_alt = pooled_n = 0
     for name, bam in parents.items():
         applicable: bool | str = "unchecked"
         if parent_truth and name in parent_truth:
@@ -809,14 +815,25 @@ def trio_recurrence(
         if kind == "tr":
             hist = spanning_hist(bam, chrom, s0, e0)
             n = sum(hist.values())
-            frac = hist[int(allele)] / n if n else 0.0
+            alt = hist[int(allele)]
         else:
             c = base_counts(bam, chrom, site0)
             n = sum(c.values())
-            frac = c.get(allele, 0) / n if n else 0.0
-        out["parents"][name] = {"depth": n, "frac": round(frac, 4), "applicable": applicable}
-        if applicable is not False and frac >= TRIO_RECUR_FRAC:
-            recurrent = True
+            alt = c.get(allele, 0)
+        frac = alt / n if n else 0.0
+        out["parents"][name] = {
+            "depth": n,
+            "alt": alt,
+            "frac": round(frac, 4),
+            "applicable": applicable,
+        }
+        if applicable is not False:
+            pooled_alt += alt
+            pooled_n += n
+            if frac >= TRIO_RECUR_FRAC:
+                recurrent = True
+    if pooled_alt >= TRIO_POOLED_MIN_READS and pooled_alt >= TRIO_POOLED_MIN_FRAC * pooled_n:
+        recurrent = True
     out["recurrent"] = recurrent
     out["parent_truth"] = "checked" if parent_truth else "unchecked"
     return out

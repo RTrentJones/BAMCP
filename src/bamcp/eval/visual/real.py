@@ -2328,7 +2328,7 @@ class LabelChecks:
         if row["polarity"] == "neg":
             if res.parents:
                 trio = res.cache.memo(
-                    self._key("trio", row),
+                    self._key("trio-a4", row),  # re-keyed: amendment A4 pools parents
                     lambda: res.retry(lambda: trio_recurrence(row, res.parents, res.parent_truth)),
                 )
                 checks["trio"] = trio

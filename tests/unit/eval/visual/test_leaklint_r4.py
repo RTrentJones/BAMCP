@@ -336,3 +336,9 @@ def test_r4_caption_must_use_the_r4_sample_line(r4_run_set):
     cap.write_text(cap.read_text().replace(stimuli.SAMPLE_LINE_R4, real.SAMPLE_LINE))
     report = lint_run_set(r4_run_set)
     assert any("SAMPLE_LINE_R4" in p for p in report.problems), report.problems
+
+
+def test_mpileup_quality_strings_are_not_vocabulary():
+    body = "chr1\t5\tA\t4\t..,,\tHIFI\tgggg\t3,4,5,6\n"
+    assert r4_vocab_problems("mpileup.txt", "# samtools mpileup\n\n" + body) == []
+    assert r4_vocab_problems("mpileup.txt", "# GIAB\n\n" + body)

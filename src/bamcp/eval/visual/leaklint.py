@@ -236,6 +236,11 @@ def r4_vocab_problems(name: str, text: str) -> list[str]:
         m = TRUTH_VOCAB.search(text)
         return [f"truth-set vocabulary {m.group(0)!r}"] if m else []
     out: list[str] = []
+    if name == "mpileup.txt":
+        # The body is samtools symbols and Phred+33 quality strings, where any word can occur
+        # by chance (``HIFI`` did); only the fixed header and the contig column carry words.
+        rows = text.splitlines()
+        text = "\n".join(r if r.startswith("#") else r.split("\t", 1)[0] for r in rows)
     m = TRUTH_VOCAB.search(text)
     if m:
         out.append(f"truth-set vocabulary {m.group(0)!r}")

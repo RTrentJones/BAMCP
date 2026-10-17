@@ -40,15 +40,33 @@ from .fixtures import Item, Plan, build_plan, ensure_fixtures, opaque_id
 
 CONDITIONS = ("Traw", "Tjson", "Tfull", "V", "V+Traw", "Tfull+V")
 PILOT_CONDITIONS = ("Traw", "Tjson", "V", "V+Traw")
-CONDITIONS_R4 = ("Traw-r4", "Traw-r4+Tcur", "V+Traw-r4")
+# "Tmp*": round-4 raw-input arms -- the baseline is the samtools mpileup text a user without
+# BAMCP would paste; BAMCP's text tools (tcur.md) or viewer are added on top.
+CONDITIONS_R4 = (
+    "Traw-r4",
+    "Traw-r4+Tcur",
+    "V+Traw-r4",
+    "Tmp",
+    "Tmp+Tcur",
+    "V+Tmp",
+)
 ALL_CONDITIONS = CONDITIONS + CONDITIONS_R4
-VISUAL_CONDITIONS = frozenset({"V", "V+Traw", "Tfull+V", "V+Traw-r4"})
+VISUAL_CONDITIONS = frozenset({"V", "V+Traw", "Tfull+V", "V+Traw-r4", "V+Tmp"})
 
 WIDE_BP = 200
 ZOOM_BP = 60
 VIEW_WIDTH = 1024
 
-FILE_ORDER = ("traw.md", "tjson.json", "tfull.md", "tcur.md", "view_wide.png", "view_zoom.png")
+FILE_ORDER = (
+    "traw.md",
+    "mpileup.txt",
+    "tjson.json",
+    "tfull.md",
+    "tcur.md",
+    "view_wide.png",
+    "view_zoom.png",
+)
+MPILEUP_HALF = 30  # mpileup.txt covers the position(s) of interest +/- this many bp
 FILE_DESCRIPTIONS = {
     "traw.md": (
         "Pileup statistics computed from every aligned read overlapping the position(s) "
@@ -69,6 +87,10 @@ FILE_DESCRIPTIONS = {
         "Text returned by the BAMCP MCP tools at their default settings: get_region_summary "
         "for the region, and get_variant_curation_summary for the most frequent "
         "non-reference allele at the position(s) of interest."
+    ),
+    "mpileup.txt": (
+        "Output of samtools mpileup for the reads around the position(s) of interest, with "
+        "no base- or mapping-quality filter; the file's header explains the columns."
     ),
     "view_wide.png": "Screenshot of the read pileup viewer, ~200 bp centred on the site.",
     "view_zoom.png": "Screenshot of the read pileup viewer, ~60 bp centred on the site.",
@@ -833,6 +855,35 @@ def prompt_text(files: list[str], sample_kind: str = "simulated", *, r4: bool = 
     )
 
 
+MPILEUP_ARGS = ("-B", "-Q", "0", "-q", "0", "-s", "--output-BP")
+MPILEUP_HEADER = """\
+# samtools mpileup -f <reference> -r {region} -B -Q 0 -q 0 -s --output-BP <bam>
+#
+# One line per reference position: contig, position (1-based), reference base, read depth,
+# read bases, base qualities, mapping qualities, and each read's position within the read.
+# Read bases: `.` / `,` = matches the reference on the forward / reverse strand; ACGTN /
+# acgtn = a mismatch on the forward / reverse strand; `+3ACG` / `-2tt` = an insertion /
+# deletion of those bases starting after this position; `*` = a base deleted in this read;
+# `^` = start of a read (the next character is its mapping quality + 33); `$` = end of a
+# read. Base and mapping qualities are Phred + 33 ASCII, one character per read, in the
+# same order as the read bases. Default read filters: unmapped, secondary, QC-fail and
+# duplicate reads are skipped.
+"""
+
+
+def mpileup_text(bam_path: str, ref_path: str, item: Item, half: int = MPILEUP_HALF) -> str:
+    """samtools mpileup over the position(s) of interest +/- ``half`` bp (round 4's
+    raw-input baseline: what a user without BAMCP would paste)."""
+    import pysam
+
+    lo = max(0, min(item.sites) - half)
+    hi = max(item.sites) + half + 1
+    region = region_1based(item.contig, lo, hi)
+    body = pysam.mpileup("-f", ref_path, "-r", region, *MPILEUP_ARGS, bam_path)
+    text = body if isinstance(body, str) else "".join(body)
+    return MPILEUP_HEADER.format(region=region) + "\n" + text
+
+
 def condition_files(condition: str) -> list[str]:
     pngs = ["view_wide.png", "view_zoom.png"]
     files = {
@@ -845,6 +896,9 @@ def condition_files(condition: str) -> list[str]:
         "Traw-r4": ["traw.md"],
         "Traw-r4+Tcur": ["traw.md", "tcur.md"],
         "V+Traw-r4": ["traw.md", *pngs],
+        "Tmp": ["mpileup.txt"],
+        "Tmp+Tcur": ["mpileup.txt", "tcur.md"],
+        "V+Tmp": ["mpileup.txt", *pngs],
     }[condition]
     return sorted(files, key=FILE_ORDER.index)
 
@@ -984,6 +1038,8 @@ def build_items_run_set(
         ev = evidence[it.item_id]
         if "traw.md" in needs:
             ev["traw.md"] = (traw_r4_text if r4 else traw_text)(bam, ref, it)
+        if "mpileup.txt" in needs:
+            ev["mpileup.txt"] = mpileup_text(bam, ref, it)
         if "tjson.json" in needs or want_png:
             s0, e0 = window(it, WIDE_BP)
             wide = build_payload(bam, ref, it.contig, s0, e0)

@@ -555,10 +555,13 @@ def test_build_items_run_set_r4(pairs, tmp_path, monkeypatch):
         assert names == sorted(
             ["caption.md", "prompt.md", *stimuli.condition_files(r["condition"])]
         )
-        assert "## Co-occurrence with other non-reference events" in (d / "traw.md").read_text()
+        if "traw.md" in names:
+            assert "## Co-occurrence with other non-reference" in (d / "traw.md").read_text()
+        else:
+            assert (d / "mpileup.txt").read_text().startswith("# samtools mpileup")
         assert stimuli.SAMPLE_LINE_R4 in (d / "caption.md").read_text()
         assert stimuli.ANCHOR_SENTENCE_R4 in (d / "prompt.md").read_text()
-        if r["condition"] == "Traw-r4+Tcur":
+        if r["condition"].endswith("+Tcur"):
             assert "## get_variant_curation_summary(" in (d / "tcur.md").read_text()
     report = lint_run_set(out)
     assert report.ok, report.problems
@@ -579,3 +582,22 @@ def test_r4_flag_and_conditions_must_agree(pairs, tmp_path, conditions, r4):
             conditions=conditions,
             r4=r4,
         )
+
+
+def test_mpileup_text_covers_the_site_window_unfiltered(pairs):
+    item = _item([P])
+    text = stimuli.mpileup_text(*_paths(pairs), item, half=5)
+    header, _, body = text.partition("\n\n")
+    assert "-B -Q 0 -q 0 -s --output-BP" in header
+    lines = [ln.split("\t") for ln in body.splitlines()]
+    assert [int(f[1]) for f in lines] == list(range(P + 1 - 5, P + 1 + 6))  # 1-based
+    site = next(f for f in lines if int(f[1]) == P + 1)
+    assert len(site) == 8  # + mapping qualities (-s) and read positions (--output-BP)
+    assert int(site[3]) == len(site[5]) == len(site[6])  # one quality per read
+
+
+def test_tmp_conditions_list_mpileup_first():
+    assert stimuli.condition_files("Tmp") == ["mpileup.txt"]
+    assert stimuli.condition_files("Tmp+Tcur") == ["mpileup.txt", "tcur.md"]
+    assert stimuli.condition_files("V+Tmp") == ["mpileup.txt", "view_wide.png", "view_zoom.png"]
+    assert "V+Tmp" in stimuli.VISUAL_CONDITIONS

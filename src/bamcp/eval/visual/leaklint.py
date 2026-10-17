@@ -75,6 +75,7 @@ ALLOWED_FILES = frozenset(
         "caption.md",
         "prompt.md",
         "traw.md",
+        "mpileup.txt",
         "tjson.json",
         "tfull.md",
         "tcur.md",
@@ -82,7 +83,8 @@ ALLOWED_FILES = frozenset(
         "view_zoom.png",
     }
 )
-VOCAB_EXEMPT = frozenset({"prompt.md", "tfull.md", "tcur.md"})
+# mpileup.txt: a fixed column key (it says "strand") above symbol-only samtools output.
+VOCAB_EXEMPT = frozenset({"prompt.md", "tfull.md", "tcur.md", "mpileup.txt"})
 _OPAQUE_DIR = re.compile(r"^[0-9a-f]{8}$")
 LEAK_VOCAB = re.compile(
     r"strand|bias|homopolymer|artifact|artefact|mapq_low|low_mapq|low_baseq|low_bq|dup|"

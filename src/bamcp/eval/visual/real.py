@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from .fixtures import Item, _derive_rng, opaque_id
+from .stimuli import SAMPLE_LINE_R4
 
 GIAB_BASE = (
     "https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/AshkenazimTrio/"
@@ -758,15 +759,6 @@ def build_real_run_set(
 # runs the generators and labels each row with its cluster and partition;
 # :func:`select_r4` applies the frozen predicates and draws a split; label checks against
 # HiFi / the parents / gnomAD run lazily, only on rows a draw reaches, and are cached too.
-
-try:  # the stimuli agent owns the round-4 caption line; fall back to the design's text
-    from .stimuli import SAMPLE_LINE_R4  # type: ignore[attr-defined]
-except ImportError:  # pragma: no cover - exercised only before stimuli.py gains it
-    SAMPLE_LINE_R4 = (
-        "sequenced human sample (Illumina short reads, ~60x whole-genome); the sample may "
-        "carry germline variants or variants present in only a fraction of cells (mosaic); "
-        "coordinates are re-indexed"
-    )
 
 R4_CONDITIONS = ("Traw-r4", "Traw-r4+Tcur", "V+Traw-r4")
 NEAR_END_BP = 10

@@ -21,6 +21,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from .cli_r4 import add_r4_analysis_commands, run_r4_analysis
 from .stimuli import CONDITIONS, PILOT_CONDITIONS
 
 
@@ -55,6 +56,7 @@ def _parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = p.add_subparsers(dest="cmd", required=True)
+    add_r4_analysis_commands(sub)
 
     f = sub.add_parser("fixtures", help="write the vt_eval fixtures")
     f.add_argument("--seed", type=int, default=1)
@@ -348,6 +350,9 @@ def _selftest(run_dir: str, charts: bool) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    rc = run_r4_analysis(args)
+    if rc is not None:
+        return rc
 
     if args.cmd == "fixtures":
         from .fixtures import create_visual_eval_fixtures

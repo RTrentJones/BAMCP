@@ -182,3 +182,23 @@ def test_cli_sufficiency(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
         == 0
     )
     assert json.loads(out.read_text())["pairs"]["tr"]["n_pos"] == 40
+
+
+def test_adjudication_proxy_uses_out_of_fold_for_pool_items() -> None:
+    """Mosaic main items sit in the (all-partition) training pool: their posterior must be
+    the out-of-fold prediction, not an in-sample fit that overstates certainty."""
+    pool = make_pool({"mosaic": 0.0}, n=30, seed=3)  # pure noise, 25 features
+    rows = [r for r in pool if r["pair"] == "mosaic"]
+    items = [r for r in rows if r["partition"] == "main"]
+    y = np.array([r["polarity"] == "pos" for r in rows], dtype=float)
+    oof = cv_predictions(feature_matrix(rows), y)
+    expect = {(r["chrom"], r["site0"]): float(v) for r, v in zip(rows, oof, strict=True)}
+    got = adjudication_proxy(pool, items)
+    for it, g in zip(items, got, strict=True):
+        assert g["posterior_real"] == pytest.approx(expect[(it["chrom"], it["site0"])])
+    # On noise an in-sample fit "knows" each item's own label; out-of-fold it does not.
+    xtr, _ = _prepare(feature_matrix(rows), feature_matrix(rows))
+    insample = predict_logistic(fit_logistic(xtr, y), xtr)
+    own_in = np.mean(np.where(y == 1, insample, 1 - insample))
+    own_oof = np.mean(np.where(y == 1, oof, 1 - oof))
+    assert own_in > 0.7 and own_oof < 0.6

@@ -227,6 +227,10 @@ def sufficiency(
     }
 
 
+def _site_key(row: dict[str, Any]) -> tuple[Any, Any]:
+    return row.get("chrom"), row.get("site0")
+
+
 def adjudication_proxy(
     pool: list[dict[str, Any]],
     items: list[dict[str, Any]],
@@ -238,8 +242,11 @@ def adjudication_proxy(
     """Posterior P(real) for each item from its pair's model fitted on the whole pool.
 
     Items outside the hard pairs (anchors), or whose pair cannot be fitted, get ``None``.
+    An item that is itself a row of the pair's training pool (the mosaic pair pools every
+    partition, so its main items are in it) gets its out-of-fold prediction instead: an
+    in-sample posterior is pushed toward 0/1 and would hide undecidable items.
     """
-    models: dict[str, tuple[np.ndarray, np.ndarray] | None] = {}
+    models: dict[str, tuple[np.ndarray, np.ndarray, dict[tuple[Any, Any], float]] | None] = {}
     for pair in PAIRS_R4:
         rows = pair_pool(pool, pair, partition=partition)
         y = np.array([r["polarity"] == "pos" for r in rows], dtype=float)
@@ -247,15 +254,22 @@ def adjudication_proxy(
             models[pair] = None
             continue
         x = feature_matrix(rows, feature_keys)
-        models[pair] = (x, fit_logistic(_prepare(x, x)[0], y, l2=l2))
+        oof: dict[tuple[Any, Any], float] = {}
+        if min(int(y.sum()), int(len(y) - y.sum())) >= N_FOLDS:
+            pred = cv_predictions(x, y, l2=l2)
+            oof = {_site_key(r): float(v) for r, v in zip(rows, pred, strict=True)}
+        models[pair] = (x, fit_logistic(_prepare(x, x)[0], y, l2=l2), oof)
     out = []
     for it in items:
         fitted = models.get(str(it.get("pair")))
         post: float | None = None
         if fitted is not None:
-            train, w = fitted
-            _, xte = _prepare(train, feature_matrix([it], feature_keys))
-            post = float(predict_logistic(w, xte)[0])
+            train, w, oof = fitted
+            if _site_key(it) in oof:
+                post = oof[_site_key(it)]
+            else:
+                _, xte = _prepare(train, feature_matrix([it], feature_keys))
+                post = float(predict_logistic(w, xte)[0])
         out.append(
             {
                 "chrom": it.get("chrom"),

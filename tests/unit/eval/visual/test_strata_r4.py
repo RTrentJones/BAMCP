@@ -442,3 +442,50 @@ def test_pools_report():
     assert m["eligible"]["main"]["alt"] == 26  # alt >= 7 only: 8 and 12
     assert "vaf" in m["feature_means_default"]
     assert rep["anchor_clean_neg"]["main_quota"] == 3
+
+
+def test_matched_negatives_respect_spacing_among_themselves():
+    """Matched negatives 40 bp apart: only one may be drawn (spacing applies as each is
+    taken, not after the whole match)."""
+    pos = [
+        row(
+            "segdup_cmrg_pos",
+            i * 1_000_000,
+            chrom="chr2",
+            cluster=f"c{i}",
+            depth=40,
+            alt_reads=10,
+            vaf=0.25,
+        )
+        for i in range(1, 7)
+    ]
+    negs = [
+        row(
+            "segdup_psv_neg",
+            50_000_000 + 40 * i,
+            chrom="chr3",
+            cluster=f"n{i}",
+            depth=40,
+            alt_reads=6,
+            vaf=0.15,
+        )
+        for i in range(6)
+    ]
+    negs += [
+        row(
+            "segdup_psv_neg",
+            70_000_000 + 1_000_000 * i,
+            chrom="chr3",
+            cluster=f"m{i}",
+            depth=40,
+            alt_reads=6,
+            vaf=0.15,
+        )
+        for i in range(6)
+    ]
+    chosen, rep = real.select_r4(
+        pos + negs, split="pilot", seed=3, pairs=["segdup"], log=lambda *_: None
+    )
+    got = sorted(r["site0"] for r in chosen if r["stratum"] == "segdup_psv_neg")
+    assert sum(50_000_000 <= s < 50_001_000 for s in got) <= 1
+    assert all(b - a >= S.MIN_SPACING_R4 for a, b in zip(got, got[1:], strict=False))

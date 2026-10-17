@@ -494,12 +494,15 @@ def match_negatives(
     *,
     seed: int,
     accept: Callable[[dict[str, Any]], str | None] = lambda r: None,
+    on_take: Callable[[dict[str, Any]], Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """One negative per positive with the same :func:`match_key`, drawn in seeded order.
 
     ``accept(row)`` returns None to take a row or an exclusion reason (lazy label checks,
     spacing); every rejected row is counted. When no exact match remains, the key is
     relaxed one dimension at a time and the row's ``match`` records the level used.
+    ``on_take(row)`` runs as soon as a row is chosen (so spacing state seen by ``accept``
+    includes earlier matches) and its return value replaces the row in the output.
     Returns (chosen, exclusion counts).
     """
     pool = seeded_order(candidates, seed, f"match:{neg_stratum}")
@@ -529,7 +532,7 @@ def match_negatives(
         if got is None:
             counts["unmatched"] += 1
             continue
-        chosen.append(got)
+        chosen.append(on_take(got) if on_take is not None else got)
     return chosen, dict(counts)
 
 

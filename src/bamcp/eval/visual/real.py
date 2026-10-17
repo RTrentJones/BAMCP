@@ -2392,6 +2392,8 @@ def select_r4(
     POI-offset-in-run distributions of strata 3 and 4 differ (KS p <= ``ks_min_p``).
     Returns (manifest rows, report); shortfalls are reported, not raised.
     """
+    import functools
+
     from .strata_r4 import (
         ANCHOR_STRATA,
         MATCHED_TO,
@@ -2505,13 +2507,12 @@ def select_r4(
                             ns,
                             seed=_seed_int(seed, tag, level),
                             accept=accept_fn(excl),
+                            on_take=functools.partial(finalize, level=lvl),
                         )
                         report["matching"][f"{ns}|{level}"] = {
                             **counts,
                             "levels": Counter(g["match"]["level"] for g in got),
                         }
-                        for g in got:
-                            finalize(g, lvl)
                         if len(got) < need:
                             report["short"][f"{ns}|{lvl}|matched"] = {"need": need, "got": len(got)}
             for s in neg_s:

@@ -2428,6 +2428,7 @@ def select_r4(
     knob_overrides: dict[str, str] | None = None,
     param_overrides: dict[str, Any] | None = None,
     pairs: Iterable[str] | None = None,
+    quota_overrides: dict[str, int] | None = None,
     ks_min_p: float = 0.2,
     max_redraws: int = 5,
     log: Any = print,
@@ -2441,6 +2442,8 @@ def select_r4(
     Pilot draws both knob levels (6 default + 4 alt); main uses ``knob_overrides``
     (``{stratum: "alt"}``) on top of the default. The TR pair is redrawn by seed while the
     POI-offset-in-run distributions of strata 3 and 4 differ (KS p <= ``ks_min_p``).
+    ``quota_overrides`` (``{stratum: n}``) replaces a stratum's quota at every knob level of
+    the split (the focused repeat-indel round draws 30 per TR stratum).
     Returns (manifest rows, report); shortfalls are reported, not raised.
     """
     import functools
@@ -2462,6 +2465,10 @@ def select_r4(
     )
 
     q = quotas(split)
+    for level_q in q.values():
+        for stratum, n in (quota_overrides or {}).items():
+            if stratum in level_q:
+                level_q[stratum] = n
     knob_overrides = dict(knob_overrides or {})
     check = checks or (lambda r: None)
     spacing = Spacing()

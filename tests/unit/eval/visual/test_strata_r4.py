@@ -493,3 +493,22 @@ def test_matched_negatives_respect_spacing_among_themselves():
     got = sorted(r["site0"] for r in chosen if r["stratum"] == "segdup_psv_neg")
     assert sum(50_000_000 <= s < 50_001_000 for s in got) <= 1
     assert all(b - a >= S.MIN_SPACING_R4 for a, b in zip(got, got[1:], strict=False))
+
+
+def test_select_quota_overrides_replace_a_stratum_quota():
+    rows = _pool()
+    chosen, _ = real.select_r4(
+        rows,
+        split="pilot",
+        seed=7,
+        pairs=["tr"],
+        quota_overrides={"tr_indel_pos": 3, "tr_stutter_neg": 3},
+        log=lambda *_: None,
+    )
+    n = Counter((r["stratum"], r["knob"]) for r in chosen)
+    assert n == {
+        ("tr_indel_pos", "default"): 3,
+        ("tr_indel_pos", "alt"): 3,
+        ("tr_stutter_neg", "default"): 3,
+        ("tr_stutter_neg", "alt"): 3,
+    }

@@ -133,6 +133,13 @@ def _parser() -> argparse.ArgumentParser:
         help="main split: use the piloted alternative knob for a stratum (repeatable)",
     )
     sr4.add_argument(
+        "--quota",
+        action="append",
+        default=[],
+        metavar="STRATUM=N",
+        help="replace a stratum's quota (repeatable)",
+    )
+    sr4.add_argument(
         "--contamination",
         type=float,
         default=None,
@@ -319,6 +326,7 @@ def _r4_command(args: argparse.Namespace) -> int:
         knob_overrides=knobs,
         param_overrides=params,
         pairs=args.pairs,
+        quota_overrides={k: int(v) for k, _, v in (q.partition("=") for q in args.quota)},
     )
     report["check_failures"] = dict(checks.counts)
     digest = real.manifest_to_jsonl(chosen, args.out)

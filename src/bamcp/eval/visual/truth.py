@@ -39,6 +39,7 @@ import gzip
 import hashlib
 import os
 import shutil
+import urllib.error
 import urllib.request
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
@@ -165,11 +166,32 @@ def cached(url: str | Path, name: str | None = None) -> Path:
     digest = hashlib.sha256(url.encode()).hexdigest()[:10]
     dest = cache_dir() / f"{digest}_{name or url.rsplit('/', 1)[-1]}"
     if not dest.exists():
-        tmp = dest.with_name(dest.name + ".part")
-        with urllib.request.urlopen(url, timeout=600) as resp, tmp.open("wb") as fh:  # noqa: S310
-            shutil.copyfileobj(resp, fh)
+        tmp = dest.with_name(f"{dest.name}.{os.getpid()}.part")  # concurrent runs never share
+        for attempt in range(DOWNLOAD_RETRIES):
+            try:
+                _download(url, tmp)
+                break
+            except OSError as exc:
+                tmp.unlink(missing_ok=True)
+                missing = isinstance(exc, urllib.error.HTTPError) and exc.code == 404
+                if missing or attempt == DOWNLOAD_RETRIES - 1:
+                    raise
         tmp.replace(dest)
     return dest
+
+
+DOWNLOAD_RETRIES = 3
+
+
+def _download(url: str, dest: Path) -> None:
+    """Fetch ``url`` to ``dest``; a short body (fewer bytes than Content-Length, as when a
+    proxy drops the connection) raises instead of leaving a silently truncated file."""
+    with urllib.request.urlopen(url, timeout=600) as resp, dest.open("wb") as fh:  # noqa: S310
+        shutil.copyfileobj(resp, fh)
+        want = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
+    got = dest.stat().st_size
+    if want is not None and int(want) != got:
+        raise OSError(f"short download of {url}: {got} of {want} bytes")
 
 
 def open_bam(path: str, index: str | Path | None = None) -> Any:
@@ -180,6 +202,22 @@ def open_bam(path: str, index: str | Path | None = None) -> Any:
     if index is None and is_remote(path):
         index = cached(path + ".bai")
     return pysam.AlignmentFile(path, index_filename=str(index) if index else None)
+
+
+def fetch_vcf(holder: list[Any], path: str | Path, *args: Any, tries: int = 4) -> list[Any]:
+    """``list(vf.fetch(*args))`` for the VariantFile in ``holder[0]``, re-opening ``path``
+    into ``holder`` and retrying when a remote read drops (``OSError``)."""
+    import time
+
+    for attempt in range(tries):
+        try:
+            return list(holder[0].fetch(*args))
+        except OSError:
+            if attempt == tries - 1 or not is_remote(path):
+                raise
+            time.sleep(2 * (attempt + 1))
+            holder[0] = open_vcf(path)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def open_vcf(path: str | Path) -> Any:
@@ -336,10 +374,12 @@ class TruthSet:
         bed: BedSet | None = None,
         *,
         vcf_handle: Any = None,
+        vcf_path: str | Path | None = None,
     ):
         self.name = name
         self.bed = bed
         self._vf = vcf_handle
+        self._vcf_path = vcf_path
         self.by_chrom: dict[str, list[TruthRecord]] = {}
         self._starts: dict[str, list[int]] = {}
         self._max_len: dict[str, int] = {}
@@ -379,14 +419,21 @@ class TruthSet:
             if want is None:
                 raise ValueError("whole file")
             contigs = set(vf.header.contigs)
+            holder = [vf]
             for c in want:
                 if c in contigs:
-                    records.extend(_record(r, name) for r in vf.fetch(c))
-            handle = vf
+                    records.extend(_record(r, name) for r in fetch_vcf(holder, src, c))
+            handle = vf = holder[0]
         except ValueError:  # unindexed (or all chromosomes wanted): one pass
             records = [_record(r, name) for r in vf if want is None or r.chrom in want]
             vf.close()
-        ts = cls(name, records, BedSet.load(bed) if bed is not None else None, vcf_handle=handle)
+        ts = cls(
+            name,
+            records,
+            BedSet.load(bed) if bed is not None else None,
+            vcf_handle=handle,
+            vcf_path=src,
+        )
         for c in want or ():
             if handle is not None and c not in ts.by_chrom:
                 ts._index(c, [])  # loaded and empty, not "query by region"
@@ -400,8 +447,14 @@ class TruthSet:
             return
         recs = []
         if chrom in set(self._vf.header.contigs):
-            recs = [_record(r, self.name) for r in self._vf.fetch(chrom)]
+            recs = [_record(r, self.name) for r in self._region(chrom)]
         self._index(chrom, recs)
+
+    def _region(self, *args: Any) -> list[Any]:
+        holder = [self._vf]
+        got = fetch_vcf(holder, self._vcf_path or "", *args)
+        self._vf = holder[0]
+        return got
 
     def records(self, chrom: str) -> list[TruthRecord]:
         self._ensure(chrom)
@@ -422,7 +475,7 @@ class TruthSet:
             if chrom not in set(self._vf.header.contigs):
                 return []
             lo = max(0, s0 - bp - self.REGION_PAD)
-            got = [_record(r, self.name) for r in self._vf.fetch(chrom, lo, e0 + bp)]
+            got = [_record(r, self.name) for r in self._region(chrom, lo, e0 + bp)]
             return [r for r in got if r.overlaps(s0, e0, bp) and r != exclude]
         if not recs:
             return []

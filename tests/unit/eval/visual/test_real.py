@@ -1002,3 +1002,30 @@ def test_r4_cli_dispatch(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_lint", lambda *_: True)
     assert cli.main(["build-r4", "--out", str(tmp_path), "--manifest", "m", "--seed", "1"]) == 0
     assert seen["conditions"] == list(real.R4_CONDITIONS)
+
+
+def test_r4_resources_retry_reopens_handles(res):
+    """A dropped remote read is retried after re-opening every handle."""
+    import time as _time
+
+    opened: list[str] = []
+    keep = dict(res.openers), res.bam
+    res.openers = {"bam": lambda: opened.append("bam") or keep[1]}
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise OSError("truncated file")
+        return "ok"
+
+    sleeps: list = []
+    orig = _time.sleep
+    _time.sleep = sleeps.append  # type: ignore[assignment]
+    try:
+        assert res.retry(flaky) == "ok" and opened == ["bam", "bam"]
+        with pytest.raises(OSError):
+            res.retry(lambda: (_ for _ in ()).throw(OSError("down")), tries=2)
+    finally:
+        _time.sleep = orig  # type: ignore[assignment]
+        res.openers = keep[0]

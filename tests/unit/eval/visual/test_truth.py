@@ -450,3 +450,49 @@ def test_paths_are_not_in_the_repo():
     """Downloads go to the user cache dir, never into the source tree."""
     repo = Path(__file__).resolve().parents[4]
     assert repo not in T.cache_dir().resolve().parents
+
+
+def test_cached_rejects_a_short_download(tmp_path, monkeypatch):
+    """A proxy that drops the connection must not leave a silently truncated cache file."""
+    import urllib.error
+
+    monkeypatch.setenv("BAMCP_EVAL_CACHE", str(tmp_path / "c"))
+    calls: list[str] = []
+
+    class Short:
+        headers = {"Content-Length": "100"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+        def __init__(self):
+            self.sent = False
+
+        def read(self, n=-1):
+            if self.sent:
+                return b""
+            self.sent = True
+            return b"x" * 10
+
+    def short(url, timeout=0):
+        calls.append(url)
+        return Short()
+
+    monkeypatch.setattr(T.urllib.request, "urlopen", short)
+    with pytest.raises(OSError, match="short download"):
+        T.cached("https://example.org/big.vcf.gz")
+    assert len(calls) == T.DOWNLOAD_RETRIES
+    assert not list((tmp_path / "c").iterdir())  # no partial file left behind
+
+    def missing(url, timeout=0):
+        calls.append(url)
+        raise urllib.error.HTTPError(url, 404, "nf", {}, None)  # type: ignore[arg-type]
+
+    calls.clear()
+    monkeypatch.setattr(T.urllib.request, "urlopen", missing)
+    with pytest.raises(OSError):
+        T.cached("https://example.org/none.tbi")
+    assert len(calls) == 1  # a 404 is not retried

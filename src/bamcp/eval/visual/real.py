@@ -783,6 +783,7 @@ MIN_TR_INDEL_BP = 3  # indel-adjacent strata: truth indel >= 3 bp
 TR_MAX_INDEL = 4
 CMRG_MAX_INDEL = 10
 ANCHOR_CLEAR_BP = 10
+REMOTE_RETRIES = 4
 TR_NEG_MIN_READS = 4  # = strata_r4.TR_NEG_MIN_READS / TR_NEG_MIN_FRAC (knob-independent)
 TR_NEG_MIN_FRAC = 0.10
 
@@ -1096,9 +1097,34 @@ class R4Resources:
     parent_truth: dict[str, Any] | None = None
     bam_id: str = HG002_BAM
     log: Any = print
+    # name ("bam", "fasta", "hifi", "parent:<sample>") -> re-open function, for retries
+    openers: dict[str, Any] = field(default_factory=dict)
+
+    def retry(self, fn: Any, tries: int = REMOTE_RETRIES) -> Any:
+        """``fn()``, re-opening every remote handle and retrying when a remote read fails
+        (htslib surfaces a dropped connection as ``OSError: truncated file``)."""
+        import time
+
+        for attempt in range(tries):
+            try:
+                return fn()
+            except OSError as exc:
+                if attempt == tries - 1:
+                    raise
+                self.log(f"remote read failed ({exc}); re-opening and retrying")
+                time.sleep(2 * (attempt + 1))
+                self.reopen()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def reopen(self) -> None:
+        for name, opener in self.openers.items():
+            if name.startswith("parent:"):
+                self.parents[name.split(":", 1)[1]] = opener()
+            else:
+                setattr(self, name, opener())
 
     def fetch(self, chrom: str, s: int, e: int) -> str:
-        return str(self.fasta.fetch(chrom, max(0, s), e)).upper()
+        return str(self.retry(lambda: self.fasta.fetch(chrom, max(0, s), e))).upper()
 
     def features(self, chrom: str, pos0: int, **kw: Any) -> dict[str, Any]:
         run = kw.get("run")
@@ -1116,7 +1142,12 @@ class R4Resources:
             )
         )
         return dict(
-            self.cache.memo(key, lambda: _allele_features(self.bam, self.fasta, chrom, pos0, **kw))
+            self.cache.memo(
+                key,
+                lambda: self.retry(
+                    lambda: _allele_features(self.bam, self.fasta, chrom, pos0, **kw)
+                ),
+            )
         )
 
     def in_segdup_or_lowmap(self, chrom: str, pos0: int) -> bool:
@@ -1128,9 +1159,10 @@ class R4Resources:
 
 def _sv_spans(path: str | Path, chroms: Iterable[str] | None, pad: int = 50) -> Any:
     """Reference spans (+/- ``pad``) of every record in an SV VCF, as a BedSet."""
-    from .truth import BedSet, TruthSet
+    from .truth import BedSet, TruthSet, cached
 
-    ts = TruthSet.load("sv", path, None, chroms=chroms)
+    # One whole-file pass over a local copy: cheaper than genome-wide remote region reads.
+    ts = TruthSet.load("sv", cached(path), None, chroms=chroms)
     by: dict[str, Intervals] = {}
     for c, recs in ts.by_chrom.items():
         # GIAB SV VCFs are sequence-resolved: REF spans a deletion's deleted bases.
@@ -1204,10 +1236,15 @@ def open_r4_resources(
             by[c] = Intervals(by.get(c, Intervals([])).pairs() + iv.pairs())
     res.variable_copy = T.BedSet(by)
     res.clusters = T.cluster_index(superdups)
+    res.openers["bam"] = lambda: T.open_bam(bam_path, bam_index)
+    res.openers["fasta"] = lambda: pysam.FastaFile(ref_path)
     if hifi is not None:
-        res.hifi = T.open_bam(hifi[0], hifi[1])
+        h_url, h_bai = hifi
+        res.hifi = T.open_bam(h_url, h_bai)
+        res.openers["hifi"] = lambda: T.open_bam(h_url, h_bai)
     for name, (url, bai) in (parents or {}).items():
         res.parents[name] = T.open_bam(url, bai)
+        res.openers[f"parent:{name}"] = lambda url=url, bai=bai: T.open_bam(url, bai)
     if parent_truth:
         res.parent_truth = {
             n: T.TruthSet.load(n, v, b, chroms=()) for n, (v, b) in parent_truth.items()
@@ -1565,7 +1602,9 @@ def iter_tr_sites(
         scanned += 1
         hist = res.cache.memo(
             f"hist|{res.bam_id}|{c}|{s}|{e}",
-            lambda c=c, s=s, e=e: {str(k): v for k, v in T.spanning_hist(res.bam, c, s, e).items()},
+            lambda c=c, s=s, e=e: res.retry(
+                lambda: {str(k): v for k, v in T.spanning_hist(res.bam, c, s, e).items()}
+            ),
         )
         h = {int(k): v for k, v in hist.items()}
         delta = -u if h.get(-u, 0) >= h.get(u, 0) else u
@@ -1738,20 +1777,21 @@ def iter_psv_candidates(
         return _finish(row, res.features(c, p0, allele=alt))
 
     terr = {c: psv_territory(res, c) for c in chroms}
-    with T.open_vcf(dragen_vcf or T.DRAGEN_300X_VCF) as vf:
-        contigs = set(vf.header.contigs)
-        for c in chroms:
-            if c not in contigs:
-                continue
-            for s, e in terr[c]:
-                for r in vf.fetch(c, s, e):
-                    if len(r.alts or ()) != 1 or len(r.ref) != 1 or len(r.alts[0]) != 1:
-                        continue
-                    p0 = r.pos - 1
-                    if (c, p0) in seen or res.cmrg.find(c, r.pos, r.ref, r.alts[0]):
-                        continue
-                    seen.add((c, p0))
-                    yield make(c, p0, r.alts[0].upper(), "dragen_fp", (r.pos, r.ref, r.alts[0]))
+    dragen = dragen_vcf or T.DRAGEN_300X_VCF
+    holder = [T.open_vcf(dragen)]
+    contigs = set(holder[0].header.contigs)
+    for c in chroms:
+        if c not in contigs:
+            continue
+        for s, e in terr[c]:
+            for r in T.fetch_vcf(holder, dragen, c, s, e):
+                if len(r.alts or ()) != 1 or len(r.ref) != 1 or len(r.alts[0]) != 1:
+                    continue
+                p0 = r.pos - 1
+                if (c, p0) in seen or res.cmrg.find(c, r.pos, r.ref, r.alts[0]):
+                    continue
+                seen.add((c, p0))
+                yield make(c, p0, r.alts[0].upper(), "dragen_fp", (r.pos, r.ref, r.alts[0]))
     if not scan_windows:
         return
     windows = [(c, a) for c in chroms for s, e in terr[c] for a in range(s, e, window_bp)]
@@ -1762,9 +1802,9 @@ def iter_psv_candidates(
         ref = res.fetch(c, a, b)
         counts = res.cache.memo(
             f"pile|{res.bam_id}|{c}|{a}|{b}",
-            lambda c=c, a=a, b=b: {
-                str(p): dict(v) for p, v in _allele_counts(res.bam, c, a, b).items()
-            },
+            lambda c=c, a=a, b=b: res.retry(
+                lambda: {str(p): dict(v) for p, v in _allele_counts(res.bam, c, a, b).items()}
+            ),
         )
         for ps, cnt in counts.items():
             p0 = int(ps)
@@ -1922,9 +1962,9 @@ def iter_indel_adjacent(
         ref = res.fetch(c, a, b)
         counts = res.cache.memo(
             f"pile|{res.bam_id}|{c}|{a}|{b}",
-            lambda c=c, a=a, b=b: {
-                str(p): dict(v) for p, v in _allele_counts(res.bam, c, a, b).items()
-            },
+            lambda c=c, a=a, b=b: res.retry(
+                lambda: {str(p): dict(v) for p, v in _allele_counts(res.bam, c, a, b).items()}
+            ),
         )
         for ps, cnt in counts.items():
             p = int(ps)
@@ -2015,7 +2055,7 @@ def iter_anchor_sites(
         if any(ts.records_near(c, p, p + 1, ANCHOR_CLEAR_BP) for ts in (res.v421, res.v5q)):
             continue
         rb = res.fetch(c, p, p + 1)
-        cnt = T.base_counts(res.bam, c, p)
+        cnt = res.retry(lambda c=c, p=p: T.base_counts(res.bam, c, p))
         depth = sum(cnt.values())
         alt = depth - cnt.get(rb, 0)
         if depth < 20 or alt:
@@ -2175,7 +2215,9 @@ class LabelChecks:
         if stratum.startswith("anchor_"):
             return None
         if res.hifi is not None:
-            hifi = res.cache.memo(self._key("hifi", row), lambda: orthogonal_check(row, res.hifi))
+            hifi = res.cache.memo(
+                self._key("hifi", row), lambda: res.retry(lambda: orthogonal_check(row, res.hifi))
+            )
             checks["hifi"] = hifi
             if not hifi["pass"]:
                 return self._fail(hifi.get("reason") or "hifi")
@@ -2185,7 +2227,7 @@ class LabelChecks:
             if res.parents:
                 trio = res.cache.memo(
                     self._key("trio", row),
-                    lambda: trio_recurrence(row, res.parents, res.parent_truth),
+                    lambda: res.retry(lambda: trio_recurrence(row, res.parents, res.parent_truth)),
                 )
                 checks["trio"] = trio
                 if stratum in REQUIRED_TRIO and not trio["recurrent"]:
@@ -2402,7 +2444,9 @@ def select_r4(
                         ]
                         excl = report["exclusions"].setdefault(ns, Counter())
                         need = per[ns]
-                        target = (pos_rows + pos_rows)[:need] if pos_rows else []
+                        # One negative per drawn positive: a short positive stratum shortens
+                        # its negative equally (balance-preserving, design 3.6 fallback 3).
+                        target = pos_rows[:need]
                         got, counts = match_negatives(
                             target,
                             cand,

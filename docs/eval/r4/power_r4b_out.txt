@@ -1,0 +1,20 @@
+items/stratum=15 pair_items=120 models=3 runs=1080+anchors scen=null                         meanDelta=+0.001 SE=0.028 power=0.01 TOST(+-0.07)=0.40
+items/stratum=15 pair_items=120 models=3 runs=1080+anchors scen=uniform+0.10                 meanDelta=+0.100 SE=0.028 power=0.90 TOST(+-0.07)=0.00
+items/stratum=15 pair_items=120 models=3 runs=1080+anchors scen=C1-predicted                 meanDelta=+0.037 SE=0.028 power=0.13 TOST(+-0.07)=0.17
+items/stratum=15 pair_items=120 models=3 runs=1080+anchors scen=C2-predicted                 meanDelta=+0.043 SE=0.028 power=0.20 TOST(+-0.07)=0.14
+items/stratum=15 pair_items=120 models=3 runs=1080+anchors scen=concentrated+0.15(2 pairs)   meanDelta=+0.075 SE=0.028 power=0.60 TOST(+-0.07)=0.02
+items/stratum=17 pair_items=136 models=3 runs=1224+anchors scen=null                         meanDelta=-0.000 SE=0.027 power=0.01 TOST(+-0.07)=0.50
+items/stratum=17 pair_items=136 models=3 runs=1224+anchors scen=uniform+0.10                 meanDelta=+0.100 SE=0.026 power=0.94 TOST(+-0.07)=0.00
+items/stratum=17 pair_items=136 models=3 runs=1224+anchors scen=C1-predicted                 meanDelta=+0.038 SE=0.027 power=0.15 TOST(+-0.07)=0.19
+items/stratum=17 pair_items=136 models=3 runs=1224+anchors scen=C2-predicted                 meanDelta=+0.044 SE=0.027 power=0.23 TOST(+-0.07)=0.15
+items/stratum=17 pair_items=136 models=3 runs=1224+anchors scen=concentrated+0.15(2 pairs)   meanDelta=+0.075 SE=0.026 power=0.66 TOST(+-0.07)=0.01
+items/stratum=20 pair_items=160 models=3 runs=1440+anchors scen=null                         meanDelta=-0.001 SE=0.025 power=0.01 TOST(+-0.07)=0.62
+items/stratum=20 pair_items=160 models=3 runs=1440+anchors scen=uniform+0.10                 meanDelta=+0.099 SE=0.024 power=0.97 TOST(+-0.07)=0.00
+items/stratum=20 pair_items=160 models=3 runs=1440+anchors scen=C1-predicted                 meanDelta=+0.037 SE=0.024 power=0.18 TOST(+-0.07)=0.25
+items/stratum=20 pair_items=160 models=3 runs=1440+anchors scen=C2-predicted                 meanDelta=+0.043 SE=0.024 power=0.26 TOST(+-0.07)=0.18
+items/stratum=20 pair_items=160 models=3 runs=1440+anchors scen=concentrated+0.15(2 pairs)   meanDelta=+0.075 SE=0.024 power=0.77 TOST(+-0.07)=0.01
+items/stratum=22 pair_items=176 models=2 runs=1056+anchors scen=null                         meanDelta=-0.002 SE=0.027 power=0.01 TOST(+-0.07)=0.52
+items/stratum=22 pair_items=176 models=2 runs=1056+anchors scen=uniform+0.10                 meanDelta=+0.088 SE=0.025 power=0.88 TOST(+-0.07)=0.01
+items/stratum=22 pair_items=176 models=2 runs=1056+anchors scen=C1-predicted                 meanDelta=+0.032 SE=0.026 power=0.12 TOST(+-0.07)=0.28
+items/stratum=22 pair_items=176 models=2 runs=1056+anchors scen=C2-predicted                 meanDelta=+0.039 SE=0.026 power=0.20 TOST(+-0.07)=0.21
+items/stratum=22 pair_items=176 models=2 runs=1056+anchors scen=concentrated+0.15(2 pairs)   meanDelta=+0.065 SE=0.026 power=0.55 TOST(+-0.07)=0.04

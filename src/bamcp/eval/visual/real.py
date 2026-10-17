@@ -30,7 +30,7 @@ import hashlib
 import json
 import random
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1345,6 +1345,47 @@ def _span_of(rec: Any, fetch: Any) -> tuple[int, int, str]:
     return min(s, p0 + 1), max(e, p0 + 1 + max(dl, 0)), unit
 
 
+def _truth_sets(res: R4Resources) -> list[Any]:
+    """Every loaded truth set: isolation and clearance count records of any of them
+    (design 3.0, "no other truth record (any set, any FILTER)")."""
+    return [ts for ts in (res.v421, res.v5q, res.cmrg, res.mosaic) if ts is not None]
+
+
+def _same_variant(res: R4Resources, a: Any, b: Any) -> bool:
+    """Do two truth records describe the same allele after left-normalisation (two sets'
+    representations of one variant are not "other" records)?"""
+    from .truth import normalized_key
+
+    if not a.alts or not b.alts:
+        return False
+    want = {normalized_key(res.fetch, a, x) for x in a.alts}
+    return any(normalized_key(res.fetch, b, x) in want for x in b.alts)
+
+
+def _truth_near(
+    res: R4Resources,
+    c: str,
+    s0: int,
+    e0: int,
+    bp: int,
+    *,
+    sets: Iterable[Any] | None = None,
+    own: Any = None,
+    keep: Callable[[Any], bool] | None = None,
+) -> Any:
+    """The first truth set (of ``sets``, default every loaded one) holding a record of any
+    FILTER within ``bp`` of [s0, e0) that is not ``own`` (or the same variant as it) and
+    passes ``keep``; None when the window is clear."""
+    for ts in sets if sets is not None else _truth_sets(res):
+        for o in ts.records_near(c, s0, e0, bp):
+            if own is not None and (o is own or o == own or _same_variant(res, own, o)):
+                continue
+            if keep is not None and not keep(o):
+                continue
+            return ts
+    return None
+
+
 def _allele_in_unit(allele: str, unit: str) -> bool:
     if not unit or len(allele) % len(unit):
         return False
@@ -1495,10 +1536,10 @@ def iter_mosaic_caller_fps(
         if not res.mosaic.covers(c, p0):
             yield _excluded(row, "outside_mosaic_bed")
             continue
-        for ts in (res.mosaic, res.v421, res.v5q):
-            if ts.records_near(c, p0, p0 + 1, ISOLATION_R4):
-                yield _excluded(row, f"{ts.name}_within_30bp")
-                break
+        order = [res.mosaic, *(t for t in _truth_sets(res) if t is not res.mosaic)]
+        near = _truth_near(res, c, p0, p0 + 1, ISOLATION_R4, sets=order)
+        if near is not None:
+            yield _excluded(row, f"{near.name}_within_30bp")
         else:
             scanned += 1
             yield _finish(row, res.features(c, p0, allele=alt))
@@ -1561,14 +1602,9 @@ def iter_tr_sites(
                 vcf=(rec.pos, rec.ref, rec.alts[0]),
                 context={"run": [s, e], "unit": unit, "delta": delta},
             )
-            others = [
-                o for o in res.v5q.records_near(rec.chrom, s, e, ISOLATION_R4) if o is not rec
-            ]
-            if others:
-                yield _excluded(row, "truth_in_run_30bp")
-                continue
-            v4_near = res.v421.records_near(rec.chrom, s, e, ISOLATION_R4)
-            if len(v4_near) > 1:
+            # The run +/- 30 bp holds no truth record of any set other than this variant
+            # (another set's representation of the same allele is not "other").
+            if _truth_near(res, rec.chrom, s, e, ISOLATION_R4, own=rec) is not None:
                 yield _excluded(row, "truth_in_run_30bp")
                 continue
             if T.concordant(rec, res.v421, res.fetch) is False:
@@ -1622,7 +1658,7 @@ def iter_tr_sites(
             label=None,
             context={"run": [s, e], "unit": unit},
         )
-        if any(ts.records_near(c, s, e, ISOLATION_R4) for ts in (res.v5q, res.v421)):
+        if _truth_near(res, c, s, e, ISOLATION_R4) is not None:
             yield _excluded(row, "truth_in_run_30bp")
             continue
         if T.reference_concordant(res.v421, c, s, e, ISOLATION_R4) is False:
@@ -1680,12 +1716,12 @@ def iter_cmrg_sites(res: R4Resources, chroms: Iterable[str]) -> Iterable[dict[st
                 vcf=(rec.pos, rec.ref, rec.alts[0]),
                 context=ctx,
             )
-            if [
-                o
-                for o in res.cmrg.records_near(c, rec.start0, rec.end0, ISOLATION_R4)
-                if o is not rec
-            ]:
+            if _truth_near(res, c, rec.start0, rec.end0, ISOLATION_R4, sets=[res.cmrg], own=rec):
                 yield _excluded(row, "cmrg_within_30bp")
+                continue
+            others = [ts for ts in _truth_sets(res) if ts is not res.cmrg]
+            if _truth_near(res, c, rec.start0, rec.end0, ISOLATION_R4, sets=others, own=rec):
+                yield _excluded(row, "truth_within_30bp")
                 continue
             if T.concordant(rec, res.v5q, res.fetch) is False:
                 yield _excluded(row, "discordant_v5.0q")
@@ -1757,9 +1793,10 @@ def _psv_exclusion(res: R4Resources, c: str, p0: int) -> str | None:
         return "inside_v4.2.1_bed"
     if not res.in_segdup_or_lowmap(c, p0):
         return "not_segdup_or_lowmap"
-    for ts in (res.cmrg, res.v5q):
-        if ts.records_near(c, p0, p0 + 1, PSV_CLEAR_BP):
-            return f"{ts.name}_within_50bp"
+    order = [res.cmrg, res.v5q, *(t for t in _truth_sets(res) if t not in (res.cmrg, res.v5q))]
+    near = _truth_near(res, c, p0, p0 + 1, PSV_CLEAR_BP, sets=order)
+    if near is not None:
+        return f"{near.name}_within_50bp"
     if res.variable_copy is not None and res.variable_copy.contains(c, p0):
         return "variable_copy"
     return None
@@ -1898,10 +1935,12 @@ def _adjacent_problem(
         return "in_indel_run"
     if not (res.v421.covers(c, p) and res.v5q.covers(c, p)):
         return "outside_beds"
-    for ts in (res.v421, res.v5q):
-        for o in ts.records_near(c, p, p + 1, ADJ_CLEAR_BP):
-            if not o.overlaps(s, e) and not (own_snv and o.start0 == p and o.end0 == p + 1):
-                return "truth_within_3bp"
+
+    def other(o: Any) -> bool:
+        return not o.overlaps(s, e) and not (own_snv and o.start0 == p and o.end0 == p + 1)
+
+    if _truth_near(res, c, p, p + 1, ADJ_CLEAR_BP, keep=other) is not None:
+        return "truth_within_3bp"
     sp = [x for x in spans if not (own_snv and x[0] == p and x[1] == p + 1)]
     if not anchoring_safe(res.fetch, c, p, sp):
         return "anchoring_unsafe"
@@ -2049,12 +2088,7 @@ def iter_anchor_sites(
         c, p = rec.chrom, rec.start0
         if res.repeats.contains(c, p) or res.in_segdup_or_lowmap(c, p):
             continue
-        if [
-            o
-            for ts in (res.v421, res.v5q)
-            for o in ts.records_near(c, p, p + 1, ISOLATION_R4)
-            if not (o.pos == rec.pos and o.alts == rec.alts)
-        ]:
+        if _truth_near(res, c, p, p + 1, ISOLATION_R4, own=rec) is not None:
             continue
         if T.concordant(rec, res.v5q, res.fetch) is not True:
             continue
@@ -2081,7 +2115,7 @@ def iter_anchor_sites(
         p = rng.randint(s + ANCHOR_CLEAR_BP, e - ANCHOR_CLEAR_BP - 1)
         if res.repeats.contains(c, p) or res.in_segdup_or_lowmap(c, p):
             continue
-        if any(ts.records_near(c, p, p + 1, ANCHOR_CLEAR_BP) for ts in (res.v421, res.v5q)):
+        if _truth_near(res, c, p, p + 1, ANCHOR_CLEAR_BP) is not None:
             continue
         rb = res.fetch(c, p, p + 1)
         cnt = res.retry(lambda c=c, p=p: T.base_counts(res.bam, c, p))

@@ -804,6 +804,62 @@ def test_iter_anchor_sites(res):
         assert r["alt_reads"] == 0 and r["depth"] >= 20
 
 
+def _inject(ts, *recs, drop=None):
+    """Add truth records to (and optionally drop ``drop(rec)`` ones from) a loaded set."""
+    keep = [r for r in ts.records(W.CHROM) if drop is None or not drop(r)]
+    ts._index(W.CHROM, keep + list(recs))
+
+
+def _rec(pos0, source, ref="A", alt="C"):
+    from bamcp.eval.visual.truth import TruthRecord
+
+    return TruthRecord(W.CHROM, pos0 + 1, ref, (alt,), (0, 1), "PASS", source)
+
+
+def test_tr_positive_isolation_ignores_only_its_own_v421_record(world):
+    """A different v4.2.1 record in the run +/- 30 bp breaks isolation even where v4.2.1
+    does not cover the variant (it used to pass as "the one v4.2.1 record")."""
+    from bamcp.eval.visual.truth import BedSet, Intervals
+
+    r = W.resources(world)
+    r.v421.bed = BedSet({W.CHROM: Intervals([(23000, 59000)])})  # no v4.2.1 coverage here
+    _inject(r.v421, drop=lambda x: x.start0 < W.HP_POS + 20 and x.end0 > W.HP_POS - 20)
+    clean = list(real.iter_tr_sites(r, [W.CHROM], polarity="pos", seed=1))
+    assert [x["exclude"] for x in clean] == [None]
+    _inject(r.v421, _rec(W.HP_POS + 12 + 20, "v4.2.1"))
+    got = list(real.iter_tr_sites(r, [W.CHROM], polarity="pos", seed=1))
+    assert [x["exclude"] for x in got] == ["truth_in_run_30bp"]
+
+
+def test_isolation_and_clearance_count_every_truth_set(world):
+    """Design 3.0: no other truth record of *any* set near the POI (CMRG / mosaic too)."""
+    r = W.resources(world)
+    _inject(r.cmrg, _rec(W.HP_NEG + 12 + 10, "cmrg_v1.00"), _rec(W.FP + 5, "cmrg_v1.00"))
+    _inject(r.cmrg, _rec(W.ANCHOR_HET + 5, "cmrg_v1.00"))
+    _inject(r.mosaic, _rec(W.PSV + 10, "mosaic_v1.1"))
+    neg = {
+        tuple(x["context"]["run"]): x
+        for x in real.iter_tr_sites(r, [W.CHROM], polarity="neg", seed=1)
+    }
+    assert neg[(W.HP_NEG, W.HP_NEG + 12)]["exclude"] == "truth_in_run_30bp"
+    fps = {
+        x["site0"]: x
+        for x in real.iter_mosaic_caller_fps(
+            r, [W.CHROM], sources={"caller": str(world.paths["caller"])}
+        )
+    }
+    assert fps[W.FP]["exclude"] == "cmrg_v1.00_within_30bp"
+    psv = {
+        x["site0"]: x
+        for x in real.iter_psv_candidates(
+            r, [W.CHROM], seed=1, dragen_vcf=str(world.paths["dragen"]), scan_windows=0
+        )
+    }
+    assert psv[W.PSV]["exclude"] == "mosaic_v1.1_within_50bp"
+    anchors = list(real.iter_anchor_sites(r, [W.CHROM], seed=1, limit=3))
+    assert not _by(anchors, "anchor_het_snv")
+
+
 # --- pools, checks, draw --------------------------------------------------------------------
 
 

@@ -2315,8 +2315,10 @@ class LabelChecks:
         if stratum.startswith("anchor_"):
             return None
         if res.hifi is not None:
+            # "-a2": the HiFi rule changed under amendment A2; older cached verdicts are stale.
             hifi = res.cache.memo(
-                self._key("hifi", row), lambda: res.retry(lambda: orthogonal_check(row, res.hifi))
+                self._key("hifi-a2", row),
+                lambda: res.retry(lambda: orthogonal_check(row, res.hifi)),
             )
             checks["hifi"] = hifi
             if not hifi["pass"]:

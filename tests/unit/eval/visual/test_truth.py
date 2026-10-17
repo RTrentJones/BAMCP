@@ -309,6 +309,27 @@ def test_orthogonal_check_repeat_lengths(world):
     assert not dirty["pass"]
 
 
+@pytest.mark.parametrize(
+    ("hist", "ok"),
+    [
+        ({0: 59, -1: 1}, True),  # 1 read, 1.7%
+        ({0: 29, -1: 1}, False),  # 1 read but 3.3% > 2%
+        ({0: 98, -1: 2}, False),  # 2% but 2 reads > 1
+    ],
+)
+def test_orthogonal_check_stutter_negative_needs_both_read_and_fraction_caps(monkeypatch, hist, ok):
+    """Design 3.0: a negative's candidate allele on <= 1 HiFi read *and* <= 2%."""
+    monkeypatch.setattr(T, "spanning_hist", lambda *a, **k: Counter(hist))
+    row = _row(
+        "tr_stutter_neg",
+        100,
+        polarity="neg",
+        context={"run": [100, 112], "unit": "A", "delta": -1},
+        features={"stutter_frac": 0.5},  # the ratio rule passes in every case
+    )
+    assert T.orthogonal_check(row, None)["pass"] is ok
+
+
 def test_orthogonal_check_low_depth(tmp_path, world):
     header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": W.CHROM, "LN": W.LEN}]}
     empty = tmp_path / "e.bam"
@@ -463,10 +484,15 @@ def test_open_bam_local_and_vcf(world):
         assert W.CHROM in v.header.contigs
 
 
-def test_paths_are_not_in_the_repo():
-    """Downloads go to the user cache dir, never into the source tree."""
+def test_paths_are_not_in_the_repo(tmp_path, monkeypatch):
+    """Downloads go to the user cache dir, never into the source tree (the default
+    location is checked under a temporary HOME, so the test never writes to the real one)."""
+    monkeypatch.delenv("BAMCP_EVAL_CACHE", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     repo = Path(__file__).resolve().parents[4]
-    assert repo not in T.cache_dir().resolve().parents
+    got = T.cache_dir().resolve()
+    assert repo not in got.parents and got == (tmp_path / "home" / ".cache" / "bamcp-eval")
 
 
 def test_cached_rejects_a_short_download(tmp_path, monkeypatch):

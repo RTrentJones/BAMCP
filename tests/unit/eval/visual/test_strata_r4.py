@@ -98,7 +98,9 @@ def test_label_for():
     for s in ("mosaic_caller_fp_neg", "segdup_psv_neg", "indel_adjacent_misalign_neg"):
         lab = S.label_for(s, row(s, 1))
         assert lab["artifact_type"] == "unknown" and lab["artifact_verdict"] == "artifact"
-    assert S.label_for("anchor_clean_neg", row("anchor_clean_neg", 1))["artifact_type"] == "none"
+    # Unscored like every non-stutter negative (CONTRACT.md); round 3 used "none" here.
+    clean = S.label_for("anchor_clean_neg", row("anchor_clean_neg", 1))
+    assert clean["artifact_type"] == "unknown" and clean["variant_present"] == "no"
     hom = S.label_for(
         "anchor_hom_snv",
         row(

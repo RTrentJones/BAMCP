@@ -241,3 +241,25 @@ def test_artifact_answers_make_negatives_right(tmp_path: Path) -> None:
     )
     runs, _ = load_pilot_runs([rs])
     assert all(r.correct == r.stratum.endswith("_neg") for r in runs if r.stratum in HARD_STRATA_R4)
+
+
+def test_g3_move_never_pushes_primary_out_of_g1() -> None:
+    """Lowering strata for G3 stops (and undoes the move) rather than breaking G1."""
+    from bamcp.eval.visual.calibrate import Cell, apply_knob_rule
+
+    cells = {}
+    for s in HARD_STRATA_R4:
+        cells[(s, "default")] = Cell(s, "default", 6, 18, 0.7, 9.0, 63.0, 27.0)
+        cells[(s, "alt")] = Cell(s, "alt", 4, 12, 0.5, 6.0, 30.0, 30.0)
+
+    def predict(settings: dict[str, str]) -> dict:
+        n_alt = sum(v == "alt" for v in settings.values())
+        return {
+            "mean": 0.63 - 0.02 * n_alt,  # one move takes G1 out of its window
+            "per_model": {"opus": 0.93 - 0.015 * n_alt},
+            "per_stratum": dict(EXPECTED_B),
+        }
+
+    start = dict.fromkeys(HARD_STRATA_R4, "default")
+    settings, moves = apply_knob_rule(cells, start, predict, "opus")
+    assert settings == start and moves == []

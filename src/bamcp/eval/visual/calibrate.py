@@ -378,9 +378,16 @@ def apply_knob_rule(
         if (alt.mean > cur.mean) != up or alt.mean == cur.mean:
             continue
         need = "raise" if up else "lower"
+        before = (dict(settings), pred, g1)
         move(s, f"G1/G3: {need} predicted primary {pred['mean']:.3f}")
         pred = predict(settings)
         g1, g3 = _g1_g3(pred, opus)
+        if before[2] and not g1:
+            # A move made for G3 must not push the primary out of the G1 window: undo it
+            # and stop (the rule then ends in a re-pilot rather than moving further away).
+            settings, pred, g1 = before
+            moves.pop()
+            break
         if g1 and g3:
             break
     return settings, moves

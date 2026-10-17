@@ -11,19 +11,64 @@ Checks, per pre-registration:
    id, or a case-type name.
 4. Every caption matches the single uniform template.
 5. Nothing label-bearing (``labels.jsonl``) sits under ``stim/``.
+
+Round 4 (``docs/eval/visual-design-r4.md`` section 10) adds:
+
+6. No evidence file names a truth set or stratification (GIAB, CMRG, v4.2.1, v5.0q,
+   benchmark, segdup, HiFi, PacBio, trio); ``mosaic`` appears only in ``caption.md`` and
+   ``prompt.md`` (the shipped tool text's own fixed phrases are stripped first, see
+   :data:`PRODUCT_PHRASES`). ``tcur.md`` is, like ``tfull.md``, exempt from rule 2 only.
+7. The fixtures' "mate elsewhere" sentinel contig carries no real coordinate.
+
+Selection-side helpers (run on the manifest, not on stimuli): :func:`ks_two_sample` /
+:func:`lint_poi_offsets` (strata 3 vs 4 POI offset within the repeat run) and
+:func:`lint_anchor_collisions` (strata 7-8: the anchoring sentence never maps the POI onto
+another truth record).
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import zlib
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .cases import CASE_TYPES
 from .real import REAL_CASE_TYPES
-from .stimuli import FILE_ORDER, prompt_text
+from .real import SAMPLE_LINE as REAL_SAMPLE_LINE
+from .stimuli import FILE_ORDER, SAMPLE_LINE_R4, SYNTHETIC_SAMPLE_LINE, prompt_text
+
+# Round-4 strata. ``strata_r4.STRATA_R4`` is owned by the selection code; this local copy keeps
+# the lint usable without it, and a test asserts the two match whenever both exist.
+R4_CASE_TYPES = (
+    "mosaic_snv_pos",
+    "mosaic_caller_fp_neg",
+    "tr_indel_pos",
+    "tr_stutter_neg",
+    "segdup_cmrg_pos",
+    "segdup_psv_neg",
+    "indel_adjacent_misalign_neg",
+    "indel_adjacent_snv_pos",
+    "anchor_het_snv",
+    "anchor_hom_snv",
+    "anchor_clean_neg",
+)
+SENTINEL_CONTIG = "chrU"
+SENTINEL_MAX_LEN = 1000
+
+
+def r4_case_types() -> tuple[str, ...]:
+    """``R4_CASE_TYPES`` plus anything ``strata_r4.STRATA_R4`` adds (imported lazily)."""
+    try:
+        from .strata_r4 import STRATA_R4  # type: ignore[import-not-found,unused-ignore]
+    except ImportError:
+        return R4_CASE_TYPES
+    return tuple(dict.fromkeys([*R4_CASE_TYPES, *STRATA_R4]))
+
 
 ALLOWED_FILES = frozenset(
     {
@@ -32,11 +77,12 @@ ALLOWED_FILES = frozenset(
         "traw.md",
         "tjson.json",
         "tfull.md",
+        "tcur.md",
         "view_wide.png",
         "view_zoom.png",
     }
 )
-VOCAB_EXEMPT = frozenset({"prompt.md", "tfull.md"})
+VOCAB_EXEMPT = frozenset({"prompt.md", "tfull.md", "tcur.md"})
 _OPAQUE_DIR = re.compile(r"^[0-9a-f]{8}$")
 LEAK_VOCAB = re.compile(
     r"strand|bias|homopolymer|artifact|artefact|mapq_low|low_mapq|low_baseq|low_bq|dup|"
@@ -46,13 +92,27 @@ LEAK_VOCAB = re.compile(
     r"multi_allelic|phas",
     re.IGNORECASE,
 )
+# Section 10 of the round-4 design: truth-set / stratification names, in every evidence file.
+TRUTH_VOCAB = re.compile(
+    r"giab|cmrg|v4\.2\.1|v5\.0q|benchmark|segdup|hifi|pacbio|\btrio\b", re.IGNORECASE
+)
+# ``mosaic`` only in caption.md / prompt.md (the round-4 sample line names it on purpose).
+MOSAIC_VOCAB = re.compile(r"\bmosaic", re.IGNORECASE)
+MOSAIC_ALLOWED = frozenset({"caption.md", "prompt.md"})
+# Fixed wording of the shipped tools (``analysis/evidence.zygosity_hint`` and the J6 low-VAF
+# note), stripped from tool text before the mosaic check: it depends on VAF alone, never on
+# the label, and Tfull/Tcur measure the tool as shipped.
+PRODUCT_PHRASES = ("subclonal/mosaic", "mosaicism")
+TOOL_TEXT_FILES = frozenset({"tfull.md", "tcur.md"})
 CAPTION_RE = re.compile(
     r"^# Site\n\n"
     r"- Region: chr\d+:\d+-\d+ \(1-based, inclusive\)\n"
     r"- Position\(s\) of interest: chr\d+:\d+(, chr\d+:\d+)?\n"
-    r"- Sample: (simulated diploid sample on a synthetic GRCh38-like reference"
-    r"|sequenced human sample \(Illumina short reads\); coordinates are re-indexed)\n$"
+    r"- Sample: ("
+    + "|".join(re.escape(x) for x in (SYNTHETIC_SAMPLE_LINE, REAL_SAMPLE_LINE, SAMPLE_LINE_R4))
+    + r")\n$"
 )
+_SENTINEL_COORD = re.compile(re.escape(SENTINEL_CONTIG) + r"\s*:\s*\d")
 
 
 @dataclass
@@ -112,13 +172,12 @@ def lint_run_set(run_dir: str | Path, bam_path: str | None = None) -> LintReport
     ids: set[str] = set()
     if labels_path.exists():
         ids = {json.loads(line)["item"] for line in labels_path.read_text().splitlines() if line}
-    case_names = {c.name for c in CASE_TYPES} | set(REAL_CASE_TYPES)
-    meta = run_dir / "build.json"
-    sample_kind = (
-        "sequenced"
-        if meta.exists() and json.loads(meta.read_text()).get("tier") == "real"
-        else "simulated"
-    )
+    case_names = {c.name for c in CASE_TYPES} | set(REAL_CASE_TYPES) | set(r4_case_types())
+    meta_path = run_dir / "build.json"
+    build = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    r4 = bool(build.get("r4"))
+    sample_kind = "sequenced" if build.get("tier") == "real" or r4 else "simulated"
+    report.problems.extend(lint_sentinel_contig(bam_path, build.get("reference")))
 
     for path in sorted(stim.rglob("*")):
         rel = path.relative_to(run_dir)
@@ -141,6 +200,7 @@ def lint_run_set(run_dir: str | Path, bam_path: str | None = None) -> LintReport
             m = LEAK_VOCAB.search(text)
             if m:
                 report.problems.append(f"{rel}: label vocabulary {m.group(0)!r}")
+        report.problems.extend(f"{rel}: {p}" for p in r4_vocab_problems(path.name, text))
         if path.name == "caption.md" and not CAPTION_RE.match(text):
             report.problems.append(f"{rel}: caption does not match the uniform template")
         if path.name == "prompt.md":
@@ -148,7 +208,7 @@ def lint_run_set(run_dir: str | Path, bam_path: str | None = None) -> LintReport
             # vocabulary scan it must be exactly the uniform text for its file set.
             present = sorted(p.name for p in path.parent.iterdir() if p.name in FILE_ORDER)
             present.sort(key=FILE_ORDER.index)
-            if text != prompt_text(present, sample_kind):
+            if text != prompt_text(present, sample_kind, r4=r4):
                 report.problems.append(f"{rel}: prompt differs from the uniform prompt")
             continue
         for token in _tokens(text):
@@ -162,6 +222,199 @@ def lint_run_set(run_dir: str | Path, bam_path: str | None = None) -> LintReport
                 report.problems.append(f"{rel}: contains a case-type name {token!r}")
                 break
     return report
+
+
+def r4_vocab_problems(name: str, text: str) -> list[str]:
+    """Section-10 vocabulary problems of one stimulus file (``name`` = its file name)."""
+    if name in ("caption.md", "prompt.md"):
+        # Both are checked against their uniform templates; only the truth names apply.
+        m = TRUTH_VOCAB.search(text)
+        return [f"truth-set vocabulary {m.group(0)!r}"] if m else []
+    out: list[str] = []
+    m = TRUTH_VOCAB.search(text)
+    if m:
+        out.append(f"truth-set vocabulary {m.group(0)!r}")
+    scan = text
+    if name in TOOL_TEXT_FILES:
+        for phrase in PRODUCT_PHRASES:
+            scan = re.sub(re.escape(phrase), " ", scan, flags=re.IGNORECASE)
+    m = MOSAIC_VOCAB.search(scan)
+    if m and name not in MOSAIC_ALLOWED:
+        out.append(f"{m.group(0)!r} outside caption.md / prompt.md")
+    if _SENTINEL_COORD.search(text):
+        out.append(f"names a coordinate on the sentinel contig {SENTINEL_CONTIG}")
+    return out
+
+
+def lint_sentinel_contig(bam_path: str | None, ref_path: str | None = None) -> list[str]:
+    """The "mate elsewhere" sentinel contig must carry no real coordinate.
+
+    When the BAM declares ``SENTINEL_CONTIG``: it is at most ``SENTINEL_MAX_LEN`` bp, no read
+    is aligned to it, every mate placed on it sits inside it at one shared position (a
+    varying position could encode the mate's real one), and its reference sequence (when
+    ``ref_path`` has it) is all ``N``.
+    """
+    if not bam_path or not Path(bam_path).exists():
+        return []
+    import pysam
+
+    problems: list[str] = []
+    with pysam.AlignmentFile(bam_path, "rb") as bam:
+        if SENTINEL_CONTIG not in bam.references:
+            return []
+        tid = bam.get_tid(SENTINEL_CONTIG)
+        length = bam.get_reference_length(SENTINEL_CONTIG)
+        if length > SENTINEL_MAX_LEN:
+            problems.append(f"{SENTINEL_CONTIG}: length {length} > {SENTINEL_MAX_LEN}")
+        placed = 0
+        mate_pos: set[int] = set()
+        for r in bam.fetch(until_eof=True):
+            if r.reference_id == tid:
+                placed += 1
+            if r.is_paired and r.next_reference_id == tid:
+                mate_pos.add(int(r.next_reference_start))
+    if placed:
+        problems.append(f"{SENTINEL_CONTIG}: {placed} read(s) aligned to the sentinel contig")
+    outside = sorted(p for p in mate_pos if not 0 <= p < length)
+    if outside:
+        problems.append(f"{SENTINEL_CONTIG}: mate position(s) outside the contig: {outside[:5]}")
+    if len(mate_pos) > 1:
+        problems.append(
+            f"{SENTINEL_CONTIG}: {len(mate_pos)} distinct mate positions (must be one constant)"
+        )
+    if ref_path and Path(ref_path).exists():
+        with pysam.FastaFile(ref_path) as fa:
+            if SENTINEL_CONTIG in fa.references:
+                seq = fa.fetch(SENTINEL_CONTIG).upper()
+                if set(seq) - {"N"}:
+                    problems.append(f"{SENTINEL_CONTIG}: reference sequence is not all N")
+    return problems
+
+
+# ---------------------------------------------------------------------------
+# Selection-side lints (site manifest, before any stimulus is built)
+# ---------------------------------------------------------------------------
+
+
+def _ks_exact_p(n: int, m: int, d: float) -> float:
+    """P(D >= d) for the two-sample KS statistic under H0 (continuous data), by counting
+    the monotone lattice paths from (0, 0) to (n, m) that stay strictly inside the band."""
+    # |i/n - j/m| < d  <=>  |i*m - j*n| < d*n*m; the epsilon keeps the observed D itself
+    # outside the band (P(D >= d) includes D == d).
+    bound = d * n * m - 1e-9 * n * m
+    row = [0.0] * (m + 1)
+    for i in range(n + 1):
+        for j in range(m + 1):
+            if abs(i * m - j * n) >= bound:
+                row[j] = 0.0
+            elif i == 0 and j == 0:
+                row[j] = 1.0
+            else:
+                row[j] = (row[j] if i > 0 else 0.0) + (row[j - 1] if j > 0 else 0.0)
+    total = math.comb(n + m, n)
+    return min(1.0, max(0.0, 1.0 - row[m] / total))
+
+
+def _ks_asymptotic_p(n: int, m: int, d: float) -> float:
+    """Kolmogorov limiting distribution with Stephens' small-sample correction."""
+    en = math.sqrt(n * m / (n + m))
+    lam = (en + 0.12 + 0.11 / en) * d
+    if lam < 1e-3:
+        return 1.0
+    s = sum((1.0 if k % 2 else -1.0) * math.exp(-2.0 * k * k * lam * lam) for k in range(1, 101))
+    return min(1.0, max(0.0, 2 * s))
+
+
+def ks_two_sample(a: Sequence[float], b: Sequence[float]) -> tuple[float, float]:
+    """Two-sample Kolmogorov-Smirnov test (two-sided): ``(D, p)``.
+
+    Pure Python. Exact p-value (path counting, as for continuous data) when ``n + m <= 1000``,
+    else the asymptotic Kolmogorov distribution. Tied values are handled in ``D`` (the ECDFs
+    are compared after every distinct value) and make the p-value conservative.
+    """
+    n, m = len(a), len(b)
+    if not n or not m:
+        raise ValueError("ks_two_sample needs two non-empty samples")
+    xs, ys = sorted(a), sorted(b)
+    d = 0.0
+    i = j = 0
+    for v in sorted(set(xs) | set(ys)):
+        while i < n and xs[i] <= v:
+            i += 1
+        while j < m and ys[j] <= v:
+            j += 1
+        d = max(d, abs(i / n - j / m))
+    if d <= 0.0:
+        return 0.0, 1.0
+    p = _ks_exact_p(n, m, d) if n + m <= 1000 else _ks_asymptotic_p(n, m, d)
+    return d, p
+
+
+def poi_offset(site0: int, run: tuple[int, int]) -> int:
+    """Offset (bp) of the POI from the start of its repeat run (``run`` 0-based half-open).
+
+    -1 is allowed: a left-normalised insertion of the run's unit is anchored on the base
+    just before the run."""
+    start, end = run
+    if not start - 1 <= site0 < end:
+        raise ValueError(f"POI {site0} is not inside the run [{start}, {end}) or just before it")
+    return site0 - start
+
+
+@dataclass
+class OffsetLint:
+    ok: bool
+    d: float
+    p: float
+    n_pos: int
+    n_neg: int
+    problems: list[str] = field(default_factory=list)
+
+
+def lint_poi_offsets(
+    pos_offsets: Sequence[float], neg_offsets: Sequence[float], *, min_p: float = 0.2
+) -> OffsetLint:
+    """Section 3.4: the POI-offset-within-run distributions of ``tr_indel_pos`` (``pos``)
+    and ``tr_stutter_neg`` (``neg``) must not differ: two-sample KS p > ``min_p``, else the
+    draw is redone by seed (data-only)."""
+    d, p = ks_two_sample(pos_offsets, neg_offsets)
+    res = OffsetLint(p > min_p, d, p, len(pos_offsets), len(neg_offsets))
+    if not res.ok:
+        res.problems.append(
+            f"POI offset within run differs between strata 3 and 4: KS D={d:.3f}, "
+            f"p={p:.3f} <= {min_p} (n={len(pos_offsets)}/{len(neg_offsets)}); redraw by seed"
+        )
+    return res
+
+
+def anchor_window(site0: int, run: tuple[int, int] | None, slop: int = 2) -> tuple[int, int]:
+    """Half-open span the round-4 anchoring sentence lets an indel at the POI occupy: the
+    repeat run containing the POI (if any) and ``slop`` bp either side of the POI."""
+    lo, hi = site0 - slop, site0 + slop + 1
+    if run is not None:
+        lo, hi = min(lo, run[0]), max(hi, run[1])
+    return lo, hi
+
+
+def lint_anchor_collisions(rows: Iterable[dict[str, Any]]) -> list[str]:
+    """Strata 7-8 (section 3.7): fail any item where the anchoring sentence could map its
+    POI onto a truth record other than its own.
+
+    Each row: ``site0``, optional ``run`` ([start, end) of the repeat run containing the
+    POI), ``other_truth`` (list of [start, end) reference spans of every *other* truth
+    record nearby, any set and FILTER) and an identifier in ``id`` or ``chrom``.
+    """
+    problems: list[str] = []
+    for r in rows:
+        run = tuple(r["run"]) if r.get("run") else None
+        lo, hi = anchor_window(int(r["site0"]), run)  # type: ignore[arg-type]
+        hits = [tuple(t) for t in r.get("other_truth", []) if t[0] < hi and lo < t[1]]
+        if hits:
+            name = r.get("id") or f"{r.get('chrom', '?')}:{int(r['site0']) + 1}"
+            problems.append(
+                f"{name}: anchoring window [{lo}, {hi}) overlaps truth record(s) {hits[:3]}"
+            )
+    return problems
 
 
 _TOKEN = re.compile(r"[A-Za-z0-9_]{4,}")

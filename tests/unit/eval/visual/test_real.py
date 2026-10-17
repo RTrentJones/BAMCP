@@ -1091,3 +1091,19 @@ def test_r4_resources_fetch_blocks_match_fasta(world, res):
     for s, e in ((0, 10), (16_380, 16_390), (5, 40_000), (59_990, 60_000), (100, 100)):
         assert res.fetch(W.CHROM, s, e) == world.ref[s:e]
     assert len(res._blocks) <= real.FETCH_BLOCKS_MAX
+
+
+def test_sv_spans_cover_the_duplicated_copy_of_an_insertion(tmp_path):
+    """A 500 bp insertion (tandem dup) makes the next 500 reference bases variable-copy;
+    the anchor +/- 50 bp alone missed them."""
+    vcf = W._vcf(
+        tmp_path / "sv.vcf.gz",
+        [
+            (10001, "A", "A" + "C" * 500, "PASS", "0/1"),
+            (20001, "G" + "T" * 100, "G", "PASS", "0/1"),
+        ],
+    )
+    bs = real._sv_spans(vcf, [W.CHROM])
+    assert bs.contains(W.CHROM, 10000 + 400) and bs.contains(W.CHROM, 10000 - 400)
+    assert not bs.contains(W.CHROM, 10000 + 600)
+    assert bs.contains(W.CHROM, 20000 + 100) and not bs.contains(W.CHROM, 20000 + 200)

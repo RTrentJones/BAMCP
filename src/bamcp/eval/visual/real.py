@@ -1176,15 +1176,25 @@ class R4Resources:
 
 
 def _sv_spans(path: str | Path, chroms: Iterable[str] | None, pad: int = 50) -> Any:
-    """Reference spans (+/- ``pad``) of every record in an SV VCF, as a BedSet."""
+    """Variable-copy spans (+/- ``pad``) of every record in an SV VCF, as a BedSet.
+
+    GIAB SV VCFs are sequence-resolved: a deletion's REF spans its deleted bases. An
+    insertion's REF is only its anchor, but most large HG002 insertions are tandem
+    duplications / VNTR expansions of the adjacent reference, so its span is widened by
+    the inserted length on both sides (the duplicated copy may sit either way).
+    """
     from .truth import BedSet, TruthSet, cached
 
     # One whole-file pass over a local copy: cheaper than genome-wide remote region reads.
     ts = TruthSet.load("sv", cached(path), None, chroms=chroms)
     by: dict[str, Intervals] = {}
     for c, recs in ts.by_chrom.items():
-        # GIAB SV VCFs are sequence-resolved: REF spans a deletion's deleted bases.
-        by[c] = Intervals([(max(0, r.start0 - pad), r.end0 + pad) for r in recs])
+        spans = []
+        for r in recs:
+            ins = max((len(a) - len(r.ref) for a in r.alts if not a.startswith("<")), default=0)
+            ins = max(ins, 0)
+            spans.append((max(0, r.start0 - ins - pad), r.end0 + ins + pad))
+        by[c] = Intervals(spans)
     return BedSet(by)
 
 

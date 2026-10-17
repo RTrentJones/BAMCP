@@ -754,9 +754,11 @@ def orthogonal_check(row: dict[str, Any], bam: Any) -> dict[str, Any]:
         ill = float((row.get("features") or {}).get("stutter_frac") or 0.0)
         hifi_unit = unit_fraction(hist, unit)
         out.update(alt_reads=hist[delta], alt_frac=frac, unit_frac=hifi_unit)
-        # Design 3.0: <= 1 read AND <= 2% (as for SNV negatives), plus the stutter ratio.
-        ok = hist[delta] <= HIFI_NEG_MAX_READS and frac <= HIFI_NEG_MAX_FRAC
-        ok = ok and hifi_unit <= HIFI_STUTTER_RATIO * ill
+        # Design 3.4 (amendment A2): HiFi has its own homopolymer +/-1 error, so the SNV
+        # negatives' cap (<= 1 read and <= 2%) rejected most clean runs; a stutter negative
+        # needs reference as HiFi's modal length and HiFi's +/-1-unit fraction at most half
+        # of Illumina's.
+        ok = bool(top) and top[0] == 0 and hifi_unit <= HIFI_STUTTER_RATIO * ill
         return {**out, "pass": ok, "reason": None if ok else "hifi_carries_allele"}
 
     counts = base_counts(bam, chrom, site0, min_mapq=HIFI_MIN_MAPQ)

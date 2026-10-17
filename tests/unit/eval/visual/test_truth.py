@@ -312,20 +312,21 @@ def test_orthogonal_check_repeat_lengths(world):
 @pytest.mark.parametrize(
     ("hist", "ok"),
     [
-        ({0: 59, -1: 1}, True),  # 1 read, 1.7%
-        ({0: 29, -1: 1}, False),  # 1 read but 3.3% > 2%
-        ({0: 98, -1: 2}, False),  # 2% but 2 reads > 1
+        ({0: 95, -1: 5}, True),  # HiFi 5% <= half of Illumina's 10%
+        ({0: 90, -1: 6, 1: 4}, False),  # 10% of HiFi reads one unit off > 5%
+        ({0: 40, -1: 60}, False),  # HiFi's mode is the -1 length, not reference
     ],
 )
-def test_orthogonal_check_stutter_negative_needs_both_read_and_fraction_caps(monkeypatch, hist, ok):
-    """Design 3.0: a negative's candidate allele on <= 1 HiFi read *and* <= 2%."""
+def test_orthogonal_check_stutter_negative_uses_the_ratio_rule(monkeypatch, hist, ok):
+    """Amendment A2: reference is HiFi's mode and HiFi's +/-1 share <= half of Illumina's
+    (HiFi's own homopolymer error makes the SNV-negative read cap unusable here)."""
     monkeypatch.setattr(T, "spanning_hist", lambda *a, **k: Counter(hist))
     row = _row(
         "tr_stutter_neg",
         100,
         polarity="neg",
         context={"run": [100, 112], "unit": "A", "delta": -1},
-        features={"stutter_frac": 0.5},  # the ratio rule passes in every case
+        features={"stutter_frac": 0.10},
     )
     assert T.orthogonal_check(row, None)["pass"] is ok
 

@@ -484,10 +484,15 @@ def test_open_bam_local_and_vcf(world):
         assert W.CHROM in v.header.contigs
 
 
-def test_paths_are_not_in_the_repo():
-    """Downloads go to the user cache dir, never into the source tree."""
+def test_paths_are_not_in_the_repo(tmp_path, monkeypatch):
+    """Downloads go to the user cache dir, never into the source tree (the default
+    location is checked under a temporary HOME, so the test never writes to the real one)."""
+    monkeypatch.delenv("BAMCP_EVAL_CACHE", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     repo = Path(__file__).resolve().parents[4]
-    assert repo not in T.cache_dir().resolve().parents
+    got = T.cache_dir().resolve()
+    assert repo not in got.parents and got == (tmp_path / "home" / ".cache" / "bamcp-eval")
 
 
 def test_cached_rejects_a_short_download(tmp_path, monkeypatch):

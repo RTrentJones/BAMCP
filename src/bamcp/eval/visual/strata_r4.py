@@ -162,17 +162,12 @@ def label_for(stratum: str, row: dict[str, Any]) -> dict[str, Any]:
 
     Positives are ``yes`` / ``real`` with the truth allele; mosaic positives are
     ``zygosity: low_vaf`` (an allowed answer value). Negatives are ``no`` / ``artifact``;
-    ``artifact_type`` is ``unknown`` (unscored) except for TR stutter
-    (``homopolymer_indel``). Anchors' clean negative is ``none`` like round 3's.
+    ``artifact_type`` is ``unknown`` (unscored) for every negative, anchors' clean negative
+    included (design 3.0, CONTRACT.md), except TR stutter (``homopolymer_indel``).
     """
     _, polarity = PAIRS[stratum]
     if polarity == "neg":
-        if stratum == "tr_stutter_neg":
-            atype = "homopolymer_indel"
-        elif stratum == "anchor_clean_neg":
-            atype = "none"
-        else:
-            atype = "unknown"
+        atype = "homopolymer_indel" if stratum == "tr_stutter_neg" else "unknown"
         return {**NEGATIVE_LABEL, "artifact_type": atype}
     base = dict(row.get("label") or {})
     lab = {

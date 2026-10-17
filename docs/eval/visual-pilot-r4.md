@@ -74,3 +74,38 @@ With an expert-style text summary of the site, real hard-class sites in HG002 do
 0.70 baseline for current models; the round-3 ceiling was not an artifact of easy items. The
 headroom seen in rounds 1–3 lives in the *input format* instead: raw read payloads (`Tjson`,
 0.82–0.93) and the picture alone (`V`, 0.87–0.89) scored below the summary panel (0.98–0.99).
+
+## Pilot 2: raw-input baseline (`samtools mpileup`)
+
+After the NO-GO the baseline was changed to what a user without BAMCP would paste: unfiltered
+`samtools mpileup -B -Q 0 -q 0 -s --output-BP` of the position of interest ± 30 bp, with a fixed
+column key (condition `Tmp`, harness `179b604`). Same 52 items, same three models, 156 blind
+runs; audit 156/156 answered, 0 violations.
+
+| | primary (balanced) | sensitivity | specificity |
+|---|---|---|---|
+| all models | **0.944** | 0.911 | 0.978 |
+| small | 0.900 | 0.833 | 0.967 |
+| mid | 0.967 | 0.967 | 0.967 |
+| large | 0.967 | 0.933 | 1.000 |
+
+| stratum | knob default | knob alt |
+|---|---|---|
+| `mosaic_snv_pos` | 1.00 | 0.92 |
+| `mosaic_caller_fp_neg` | 1.00 | 1.00 |
+| `tr_indel_pos` | 0.89 | **0.58** |
+| `tr_stutter_neg` | 1.00 | 0.83 |
+| `segdup_cmrg_pos` / `segdup_psv_neg` | 1.00 / 1.00 | 1.00 / 1.00 |
+| anchors | 0.83–1.00 | — |
+
+**Still NO-GO (0.94).** Removing the expert summary cost 0.017 overall: the models decode raw
+mpileup strings (strand case, Phred characters, indel tokens, read positions) almost as well as
+the pre-digested panel. The one consistently hard class, under both baselines, is
+**genotyping repeat indels in long homopolymers at the alternative knob** (run ≥ 12 bp, stutter
+≥ 12% or allele fraction ≤ 0.40 het): 0.67 with the panel, 0.58 with mpileup, mostly true
+insertions called stutter by the small model.
+
+**Conclusion of the round-4 pilots.** On single-site review of real HG002 reads, from the classes
+where short-read callers fail most (low-fraction mosaic, caller false positives, segmental
+duplications, homopolymer indels), current models are at 0.94–0.96 with either a text summary or
+raw mpileup. A 0.70 text baseline exists only for long-homopolymer indel genotyping.

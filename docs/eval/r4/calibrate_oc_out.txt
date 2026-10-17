@@ -1,0 +1,15 @@
+# python -m bamcp.eval.visual.cli_r4 calibrate --simulate --n-sims 500 --seed 0
+calibrate --simulate: 500 simulated pilots (seed 0)
+prior: stratum default B ~ U(expected ± 0.12); alt shifted (0.03, 0.1) in SIM_ALT_DIRECTION; models {'haiku': -0.9, 'sonnet': 0.0, 'opus': 0.9}; item SD 1.67
+branch frequencies:
+  GO                   0.872
+  GO after knob move   0.078
+  GO after re-pilot    0.022
+  NO-GO                0.028
+realised main-set primary B (GO outcomes):
+  GO                   n=436 mean=0.691 [q05 0.625, q50 0.690, q95 0.753]
+  GO after knob move   n=39 mean=0.658 [q05 0.599, q50 0.658, q95 0.731]
+  GO after re-pilot    n=11 mean=0.668 [q05 0.590, q50 0.672, q95 0.731]
+  all GO               n=486 mean=0.687 [q05 0.619, q95 0.753]
+  true B, all GO       n=486 mean=0.689 [q05 0.645, q95 0.730]
+P(realised main B in (0.62, 0.78) | GO) = 0.934

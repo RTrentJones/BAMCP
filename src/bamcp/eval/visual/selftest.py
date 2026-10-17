@@ -1,4 +1,9 @@
-"""Grader self-tests: oracle answers must score 100%, random answers ≈ chance."""
+"""Grader self-tests: oracle answers must score 100%, random answers ≈ chance.
+
+Round 4 (:func:`run_selftests_r4`): oracle → primary 1.0; always-real and always-artifact →
+balanced accuracy exactly 0.5 in every pair (the property that makes the primary immune to
+a calling-threshold shift); random → primary ≈ chance.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .answers import ENUMS
-from .grade import UNSCORED_TYPE, grade_run_set, load_jsonl
+from .grade import PAIRS_R4, UNSCORED_TYPE, grade_run_set, grade_run_set_r4, load_jsonl
 
 # P(joint correct) for a uniform random answer: 1/2 (variant_present) x 1/3 (verdict).
 RANDOM_CHANCE = 1 / (len(ENUMS["variant_present"]) * len(ENUMS["artifact_verdict"]))
@@ -49,14 +54,38 @@ def random_answer(rng: random.Random) -> dict[str, Any]:
     return ans
 
 
+def constant_answer(verdict: str) -> dict[str, Any]:
+    """The same answer for every item: ``real`` (a variant everywhere) or ``artifact``."""
+    real = verdict == "real"
+    return {
+        "variant_present": "yes" if real else "no",
+        "variant_type": "SNV" if real else "none",
+        "alt_allele": "A" if real else "",
+        "zygosity": "het" if real else "none",
+        "artifact_verdict": verdict,
+        "artifact_type": "none",
+        "phase": "na",
+        "confidence": 0.5,
+        "rationale": f"always {verdict}",
+    }
+
+
 def write_answers(run_dir: Path, dest: Path, kind: str, seed: int = 0) -> int:
+    """Write one answer per run: ``oracle``, ``random``, ``always_real`` or ``always_artifact``."""
     runs = load_jsonl(run_dir / "runs.jsonl")
     labels = {r["item"]: r for r in load_jsonl(run_dir / "labels" / "labels.jsonl")}
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True)
     rng = random.Random(seed)  # noqa: S311 — reproducible resampling
     for r in runs:
-        ans = oracle_answer(labels[r["item"]]) if kind == "oracle" else random_answer(rng)
+        if kind == "oracle":
+            ans = oracle_answer(labels[r["item"]])
+        elif kind == "random":
+            ans = random_answer(rng)
+        elif kind in ("always_real", "always_artifact"):
+            ans = constant_answer(kind.removeprefix("always_"))
+        else:
+            raise ValueError(f"unknown answer kind {kind!r}")
         (dest / Path(r["answer_path"]).name).write_text(json.dumps(ans))
     return len(runs)
 
@@ -136,3 +165,76 @@ def _iter_csv(path: Path) -> Any:
 
     with path.open() as f:
         yield from csv.DictReader(f)
+
+
+def run_selftests_r4(
+    run_dir: str | Path, *, seed: int = 0, n_flips: int = 1000
+) -> list[SelfTestResult]:
+    """Round-4 grader self-tests on a run set whose labels carry r4 strata.
+
+    ``n_flips`` only bounds the contrasts' cost here: the self-tests check point estimates.
+    """
+    run_dir = Path(run_dir)
+    base = run_dir / "selftest_r4"
+    results: list[SelfTestResult] = []
+
+    def grade(kind: str) -> dict[str, Any]:
+        write_answers(run_dir, base / kind / "answers", kind, seed=seed)
+        return grade_run_set_r4(
+            run_dir,
+            answers_dir=base / kind / "answers",
+            out_dir=base / kind / "results",
+            n_flips=n_flips,
+            seed=seed,
+        )
+
+    s = grade("oracle")
+    bad = [
+        k
+        for k, g in s["groups"].items()
+        if g["primary"] != 1.0 or g["utility"] != 1.0 or g["pooled_joint_accuracy"] != 1.0
+    ]
+    results.append(
+        SelfTestResult(
+            "r4 oracle = 1.0",
+            not bad and s["n_runs"] > 0 and bool(s["groups"]),
+            f"{s['n_runs']} runs; imperfect groups: {bad or 'none'}",
+        )
+    )
+
+    for kind in ("always_real", "always_artifact"):
+        s = grade(kind)
+        bad = []
+        for k, g in s["groups"].items():
+            for pair in PAIRS_R4:
+                bal = g["per_pair"].get(pair, {}).get("balanced")
+                if bal != 0.5:
+                    bad.append(f"{k}:{pair}={bal}")
+            if g["primary"] != 0.5:
+                bad.append(f"{k}:primary={g['primary']}")
+        results.append(
+            SelfTestResult(
+                f"r4 {kind.replace('_', '-')} = 0.5 per pair",
+                not bad and bool(s["groups"]),
+                f"off: {bad or 'none'}",
+            )
+        )
+
+    s = grade("random")
+    off = []
+    for k, g in s["groups"].items():
+        if not k.startswith("__all__|"):
+            continue
+        # Balanced accuracy is a mean of class means: its SE is about that of a proportion
+        # over the hard-pair runs, inflated by the 8 unequal-size cells; 4 SE or 0.08.
+        tol = max(0.08, 4 * math.sqrt(RANDOM_CHANCE * (1 - RANDOM_CHANCE) / max(1, g["n_runs"])))
+        if abs(g["primary"] - RANDOM_CHANCE) > tol:
+            off.append(f"{k}={g['primary']:.3f} (tol ±{tol:.3f})")
+    results.append(
+        SelfTestResult(
+            "r4 random ≈ chance",
+            not off and bool(s["groups"]),
+            f"chance {RANDOM_CHANCE:.3f}; off: {off or 'none'}",
+        )
+    )
+    return results

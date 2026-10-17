@@ -204,6 +204,14 @@ def open_bam(path: str, index: str | Path | None = None) -> Any:
     return pysam.AlignmentFile(path, index_filename=str(index) if index else None)
 
 
+def transient(exc: BaseException) -> bool:
+    """A remote read that dropped mid-stream: htslib reports ``OSError`` (e.g. "truncated
+    file") or, from a pileup iterator, ``ValueError("error during iteration")``."""
+    return isinstance(exc, OSError) or (
+        isinstance(exc, ValueError) and "error during iteration" in str(exc)
+    )
+
+
 def fetch_vcf(holder: list[Any], path: str | Path, *args: Any, tries: int = 4) -> list[Any]:
     """``list(vf.fetch(*args))`` for the VariantFile in ``holder[0]``, re-opening ``path``
     into ``holder`` and retrying when a remote read drops (``OSError``)."""
@@ -837,9 +845,16 @@ class ClusterIndex:
         return f"bin:{chrom}:{pos0 // BIN_BP}"
 
 
-def cluster_index(path: str | Path | None = None) -> ClusterIndex:
+def cluster_index(path: str | Path | None = None, *, min_identity: float = 0.0) -> ClusterIndex:
     """Build the cluster index from a ``genomicSuperDups.txt.gz`` (default: the UCSC hg38
-    table, downloaded once into the cache)."""
+    table, downloaded once into the cache).
+
+    With every pairing (``min_identity=0``, the design's rule) the transitive closure has
+    one component of about 106 Mb (60% of segdup bp), which then lands wholly in one
+    partition. ``min_identity`` keeps only pairings with ``fracMatch`` at or above it
+    (0.98: largest component 19 Mb; 0.99: 8 Mb) -- a pre-registration choice, not a
+    default.
+    """
     p = cached(path or SUPERDUPS_URL)
     pairs: list[tuple[str, int, int, str, int, int]] = []
     raw: dict[str, list[tuple[int, int]]] = {}
@@ -848,6 +863,8 @@ def cluster_index(path: str | Path | None = None) -> ClusterIndex:
         for line in fh:
             f = line.rstrip("\n").split("\t")
             if len(f) < 10:
+                continue
+            if min_identity and len(f) > 26 and float(f[26]) < min_identity:
                 continue
             c1, s1, e1 = f[1], int(f[2]), int(f[3])
             c2, s2, e2 = f[7], int(f[8]), int(f[9])
@@ -910,6 +927,7 @@ def estimate_contamination(
     n_sites: int = 2000,
     seed: int = 1,
     exclude: BedSet | None = None,
+    reopen: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     """Cross-sample contamination from the reference fraction at hom-alt truth SNVs.
 
@@ -918,9 +936,11 @@ def estimate_contamination(
     estimated from the third/fourth bases, the excess reference fraction is the
     contamination share times the contaminant's reference-allele frequency; assuming that
     frequency is about 0.5 at common SNPs, ``contamination ~ 2 x excess``. Sites in
-    ``exclude`` (e.g. segdups) are skipped.
+    ``exclude`` (e.g. segdups) are skipped. ``reopen()`` returns a fresh BAM handle after a
+    dropped remote read (else the error propagates).
     """
     import random
+    import time
 
     rng = random.Random(f"contamination:{seed}")  # noqa: S311
     pool = [
@@ -935,7 +955,15 @@ def estimate_contamination(
     ref_n = alt_n = other_n = 0
     used = 0
     for r in pool[:n_sites]:
-        c = base_counts(bam, r.chrom, r.start0, min_mapq=20)
+        for attempt in range(4):
+            try:
+                c = base_counts(bam, r.chrom, r.start0, min_mapq=20)
+                break
+            except (OSError, ValueError) as exc:
+                if reopen is None or attempt == 3 or not transient(exc):
+                    raise
+                time.sleep(2 * (attempt + 1))
+                bam = reopen()
         d = sum(v for k, v in c.items() if k != "-")
         if d < 10:
             continue

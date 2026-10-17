@@ -1029,3 +1029,9 @@ def test_r4_resources_retry_reopens_handles(res):
     finally:
         _time.sleep = orig  # type: ignore[assignment]
         res.openers = keep[0]
+
+
+def test_r4_resources_fetch_blocks_match_fasta(world, res):
+    for s, e in ((0, 10), (16_380, 16_390), (5, 40_000), (59_990, 60_000), (100, 100)):
+        assert res.fetch(W.CHROM, s, e) == world.ref[s:e]
+    assert len(res._blocks) <= real.FETCH_BLOCKS_MAX

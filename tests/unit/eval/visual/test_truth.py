@@ -381,6 +381,23 @@ def test_cluster_index_components(tmp_path):
     assert idx.sizes[a] == 3
 
 
+def test_cluster_index_min_identity(tmp_path):
+    sd = tmp_path / "sd.txt.gz"
+    pad = "\t".join(["0"] * 16)
+    with gzip.open(sd, "wt") as fh:
+        for c1, s1, c2, s2, ident in (
+            ("chr1", 100, "chr2", 500, 0.995),
+            ("chr2", 550, "chr3", 10, 0.96),
+        ):
+            fh.write(
+                f"585\t{c1}\t{s1}\t{s1 + 100}\tx\t0\t+\t{c2}\t{s2}\t{s2 + 100}\t{pad}\t{ident}\n"
+            )
+    loose, strict = T.cluster_index(sd), T.cluster_index(sd, min_identity=0.98)
+    assert loose.cluster_id("chr1", 150) == loose.cluster_id("chr3", 20)
+    assert strict.cluster_id("chr1", 150) == strict.cluster_id("chr2", 550)
+    assert strict.cluster_id("chr3", 20) == "bin:chr3:0"  # its only pairing is below 0.98
+
+
 def test_partition_is_seeded_by_cluster_and_about_a_quarter():
     assert T.partition("sd:chr1:100") == T.partition("sd:chr1:100")
     parts = Counter(T.partition(f"bin:chr{c}:{i}") for c in range(1, 23) for i in range(60))

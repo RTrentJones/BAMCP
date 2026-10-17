@@ -784,6 +784,8 @@ TR_MAX_INDEL = 4
 CMRG_MAX_INDEL = 10
 ANCHOR_CLEAR_BP = 10
 REMOTE_RETRIES = 4
+FETCH_BLOCK = 16_384
+FETCH_BLOCKS_MAX = 512  # bounded: about 8 MB of reference
 TR_NEG_MIN_READS = 4  # = strata_r4.TR_NEG_MIN_READS / TR_NEG_MIN_FRAC (knob-independent)
 TR_NEG_MIN_FRAC = 0.10
 
@@ -1099,17 +1101,21 @@ class R4Resources:
     log: Any = print
     # name ("bam", "fasta", "hifi", "parent:<sample>") -> re-open function, for retries
     openers: dict[str, Any] = field(default_factory=dict)
+    _blocks: dict[tuple[str, int], str] = field(default_factory=dict, repr=False)
 
     def retry(self, fn: Any, tries: int = REMOTE_RETRIES) -> Any:
         """``fn()``, re-opening every remote handle and retrying when a remote read fails
-        (htslib surfaces a dropped connection as ``OSError: truncated file``)."""
+        (:func:`truth.transient`: htslib surfaces a dropped connection as ``OSError:
+        truncated file`` or a pileup ``ValueError: error during iteration``)."""
         import time
 
         for attempt in range(tries):
             try:
                 return fn()
-            except OSError as exc:
-                if attempt == tries - 1:
+            except (OSError, ValueError) as exc:
+                from .truth import transient
+
+                if attempt == tries - 1 or not transient(exc):
                     raise
                 self.log(f"remote read failed ({exc}); re-opening and retrying")
                 time.sleep(2 * (attempt + 1))
@@ -1124,7 +1130,27 @@ class R4Resources:
                 setattr(self, name, opener())
 
     def fetch(self, chrom: str, s: int, e: int) -> str:
-        return str(self.retry(lambda: self.fasta.fetch(chrom, max(0, s), e))).upper()
+        """Upper-case reference [s, e), served from cached 16 kb blocks: normalisation and
+        run detection make many tiny reads, each a round trip on a remote FASTA."""
+        s = max(0, s)
+        if e <= s:
+            return ""
+        out = []
+        for b in range(s // FETCH_BLOCK, (e - 1) // FETCH_BLOCK + 1):
+            key = (chrom, b)
+            blk = self._blocks.get(key)
+            if blk is None:
+                a0 = b * FETCH_BLOCK
+                blk = str(
+                    self.retry(lambda a0=a0: self.fasta.fetch(chrom, a0, a0 + FETCH_BLOCK))
+                ).upper()
+                if len(self._blocks) >= FETCH_BLOCKS_MAX:
+                    self._blocks.pop(next(iter(self._blocks)))
+                self._blocks[key] = blk
+            out.append(blk)
+        joined = "".join(out)
+        off = s - (s // FETCH_BLOCK) * FETCH_BLOCK
+        return joined[off : off + (e - s)]
 
     def features(self, chrom: str, pos0: int, **kw: Any) -> dict[str, Any]:
         run = kw.get("run")
@@ -1183,6 +1209,7 @@ def open_r4_resources(
     mosaic: tuple[str, str] | None = None,
     strat: dict[str, str] | None = None,
     superdups: str | None = None,
+    superdup_min_identity: float = 0.0,
     sv_vcfs: Iterable[str] | None = None,
     hifi: tuple[str, str | None] | None = None,
     parents: dict[str, tuple[str, str | None]] | None = None,
@@ -1235,7 +1262,7 @@ def open_r4_resources(
         for c, iv in _sv_spans(p, allc).by_chrom.items():
             by[c] = Intervals(by.get(c, Intervals([])).pairs() + iv.pairs())
     res.variable_copy = T.BedSet(by)
-    res.clusters = T.cluster_index(superdups)
+    res.clusters = T.cluster_index(superdups, min_identity=superdup_min_identity)
     res.openers["bam"] = lambda: T.open_bam(bam_path, bam_index)
     res.openers["fasta"] = lambda: pysam.FastaFile(ref_path)
     if hifi is not None:
@@ -1419,6 +1446,8 @@ def iter_mosaic_caller_fps(
     *,
     sources: dict[str, str] | None = None,
     database: str | Path | None = None,
+    seed: int = 0,
+    limit: int | None = None,
 ) -> Iterable[dict[str, Any]]:
     """Stratum 2: caller-flagged SNVs the mosaic benchmark rejected.
 
@@ -1427,6 +1456,8 @@ def iter_mosaic_caller_fps(
     given, the putative/candidate rows of ``HG002_GRCh38_mosaic_database.tsv`` -- each
     minus the mosaic VCF. A candidate must lie inside the mosaic BED (which asserts < 2%
     VAF at any unlisted SNV) with no v4.2.1, v5.0q or mosaic record within 30 bp.
+    Candidates are read from the BAM in seeded order, at most ``limit`` of them (chr20
+    alone carries about 12,000 caller records, mostly Strelka2's).
     """
     from . import truth as T
 
@@ -1461,7 +1492,12 @@ def iter_mosaic_caller_fps(
             )
             seen[key] = row
             order.append(key)
+    order.sort()
+    _derive_rng(seed, "mosaic-fp").shuffle(order)
+    scanned = 0
     for key in order:
+        if limit is not None and scanned >= limit:
+            return
         row = seen[key]
         c, p0, alt = key
         if not res.mosaic.covers(c, p0):
@@ -1472,6 +1508,7 @@ def iter_mosaic_caller_fps(
                 yield _excluded(row, f"{ts.name}_within_30bp")
                 break
         else:
+            scanned += 1
             yield _finish(row, res.features(c, p0, allele=alt))
 
 
@@ -2094,7 +2131,14 @@ def collect_pools_r4(
     from .truth import partition
 
     chroms, truth_chroms = list(chroms), list(truth_chroms)
-    lim = {"tr": 1500, "indel_adj": 1500, "anchor": 60, "psv_windows": 800, **(limits or {})}
+    lim = {
+        "tr": 1500,
+        "indel_adj": 1500,
+        "anchor": 60,
+        "psv_windows": 800,
+        "mosaic_fp": 3000,
+        **(limits or {}),
+    }
     gens: list[tuple[str, Iterable[dict[str, Any]]]] = []
     want = set(pairs)
     if "mosaic" in want:
@@ -2102,7 +2146,14 @@ def collect_pools_r4(
         gens.append(
             (
                 "mosaic_caller_fp_neg",
-                iter_mosaic_caller_fps(res, chroms, sources=fp_sources, database=mosaic_database),
+                iter_mosaic_caller_fps(
+                    res,
+                    chroms,
+                    sources=fp_sources,
+                    database=mosaic_database,
+                    seed=seed,
+                    limit=lim["mosaic_fp"],
+                ),
             )
         )
     if "tr" in want:
@@ -2387,6 +2438,7 @@ def select_r4(
                 return "taken"
             why = spacing.why_not(r)
             if why:
+                excl[why] += 1
                 return why
             why = check(r)
             if why:

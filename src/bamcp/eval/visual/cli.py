@@ -183,10 +183,17 @@ def _add_r4_source_args(p: argparse.ArgumentParser) -> None:
         p.add_argument(f"--{name}-bed", default=None)
     p.add_argument("--strat-dir", default=None, help="local v3.3 stratification BEDs")
     p.add_argument("--superdups", default=None, help="local genomicSuperDups.txt.gz")
+    p.add_argument(
+        "--superdup-min-identity",
+        type=float,
+        default=0.0,
+        help="cluster only segdup pairings with fracMatch >= this (default: all, as designed)",
+    )
     p.add_argument("--mosaic-database", default=None, help="mosaic database .tsv (optional)")
     p.add_argument("--limit-tr", type=int, default=1500, help="TR loci read per polarity")
     p.add_argument("--limit-adj", type=int, default=1500, help="truth indels read per polarity")
     p.add_argument("--limit-anchor", type=int, default=60)
+    p.add_argument("--limit-mosaic-fp", type=int, default=3000, help="caller FPs read")
     p.add_argument("--psv-windows", type=int, default=800, help="2 kb PSV scan windows")
 
 
@@ -226,6 +233,7 @@ def _r4_rows(args: argparse.Namespace, *, checks: bool) -> tuple[list, object]:
         mosaic=pair("mosaic"),
         strat=strat,
         superdups=args.superdups,
+        superdup_min_identity=args.superdup_min_identity,
         hifi=(truth.HIFI_BAM, args.hifi_bai) if use_hifi else None,
         parents={n: (u, None) for n, u in truth.PARENT_BAMS.items()} if use_trio else None,
         parent_truth=dict(truth.PARENT_TRUTH) if use_trio else None,
@@ -245,6 +253,7 @@ def _r4_rows(args: argparse.Namespace, *, checks: bool) -> tuple[list, object]:
             "tr": args.limit_tr,
             "indel_adj": args.limit_adj,
             "anchor": args.limit_anchor,
+            "mosaic_fp": args.limit_mosaic_fp,
             "psv_windows": args.psv_windows,
         },
         mosaic_database=args.mosaic_database,

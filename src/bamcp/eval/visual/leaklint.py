@@ -203,6 +203,9 @@ def lint_run_set(run_dir: str | Path, bam_path: str | None = None) -> LintReport
         report.problems.extend(f"{rel}: {p}" for p in r4_vocab_problems(path.name, text))
         if path.name == "caption.md" and not CAPTION_RE.match(text):
             report.problems.append(f"{rel}: caption does not match the uniform template")
+        elif path.name == "caption.md" and r4 and f"- Sample: {SAMPLE_LINE_R4}\n" not in text:
+            # Round 4 freezes one caption sample line (design section 4).
+            report.problems.append(f"{rel}: round-4 caption must use SAMPLE_LINE_R4")
         if path.name == "prompt.md":
             # The shared prompt names the answer vocabulary on purpose; instead of a
             # vocabulary scan it must be exactly the uniform text for its file set.
@@ -249,10 +252,11 @@ def r4_vocab_problems(name: str, text: str) -> list[str]:
 def lint_sentinel_contig(bam_path: str | None, ref_path: str | None = None) -> list[str]:
     """The "mate elsewhere" sentinel contig must carry no real coordinate.
 
-    When the BAM declares ``SENTINEL_CONTIG``: it is at most ``SENTINEL_MAX_LEN`` bp, no read
-    is aligned to it, every mate placed on it sits inside it at one shared position (a
-    varying position could encode the mate's real one), and its reference sequence (when
-    ``ref_path`` has it) is all ``N``.
+    Every mapped mate's position must lie inside its (fixture) contig, else it is an
+    un-re-indexed real coordinate. When the BAM declares ``SENTINEL_CONTIG``: it is at most
+    ``SENTINEL_MAX_LEN`` bp, no read is aligned to it, every mate placed on it sits inside
+    it at one shared position (a varying position could encode the mate's real one), and
+    its reference sequence (when ``ref_path`` has it) is all ``N``.
     """
     if not bam_path or not Path(bam_path).exists():
         return []
@@ -260,19 +264,34 @@ def lint_sentinel_contig(bam_path: str | None, ref_path: str | None = None) -> l
 
     problems: list[str] = []
     with pysam.AlignmentFile(bam_path, "rb") as bam:
-        if SENTINEL_CONTIG not in bam.references:
-            return []
-        tid = bam.get_tid(SENTINEL_CONTIG)
-        length = bam.get_reference_length(SENTINEL_CONTIG)
+        has_sentinel = SENTINEL_CONTIG in bam.references
+        tid = bam.get_tid(SENTINEL_CONTIG) if has_sentinel else -2
+        length = bam.get_reference_length(SENTINEL_CONTIG) if has_sentinel else 0
         if length > SENTINEL_MAX_LEN:
             problems.append(f"{SENTINEL_CONTIG}: length {length} > {SENTINEL_MAX_LEN}")
+        lengths = list(bam.lengths)
         placed = 0
         mate_pos: set[int] = set()
+        off_contig = 0
         for r in bam.fetch(until_eof=True):
             if r.reference_id == tid:
                 placed += 1
-            if r.is_paired and r.next_reference_id == tid:
+            if r.is_paired and has_sentinel and r.next_reference_id == tid:
                 mate_pos.add(int(r.next_reference_start))
+            elif (
+                r.is_paired
+                and not r.mate_is_unmapped
+                and 0 <= r.next_reference_id < len(lengths)
+                and not 0 <= r.next_reference_start < lengths[r.next_reference_id]
+            ):
+                # A mate position past its fixture contig is an un-re-indexed real coordinate.
+                off_contig += 1
+    if off_contig:
+        problems.append(
+            f"{off_contig} read(s) with a mate position outside its contig (not re-indexed)"
+        )
+    if not has_sentinel:
+        return problems
     if placed:
         problems.append(f"{SENTINEL_CONTIG}: {placed} read(s) aligned to the sentinel contig")
     outside = sorted(p for p in mate_pos if not 0 <= p < length)

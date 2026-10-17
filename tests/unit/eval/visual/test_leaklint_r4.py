@@ -11,7 +11,7 @@ from pathlib import Path
 import pysam
 import pytest
 
-from bamcp.eval.visual import leaklint, stimuli
+from bamcp.eval.visual import leaklint, real, stimuli
 from bamcp.eval.visual.leaklint import (
     CAPTION_RE,
     R4_CASE_TYPES,
@@ -311,3 +311,28 @@ def test_lint_anchor_collisions():
     problems = lint_anchor_collisions(rows)
     assert len(problems) == 2
     assert problems[0].startswith("near:") and problems[1].startswith("chr20:201:")
+
+
+def test_mate_position_outside_its_contig_is_flagged(tmp_path):
+    # A real (un-re-indexed) mate coordinate on a fixture contig, with or without chrU.
+    bam, fa = _sentinel_bam(tmp_path)
+    with pysam.AlignmentFile(bam, "rb") as src:
+        header = src.header.to_dict()
+    leaky = tmp_path / "leaky.bam"
+    with pysam.AlignmentFile(str(leaky), "wb", header=header) as out:
+        a = pysam.AlignedSegment(out.header)
+        a.query_name, a.query_sequence, a.flag = "q9", "ACGTACGTAC", 0x1 | 0x40
+        a.reference_id, a.reference_start, a.mapping_quality = 0, 100, 60
+        a.cigartuples = [(0, 10)]
+        a.next_reference_id, a.next_reference_start = 0, 31_000_000
+        out.write(a)
+    problems = lint_sentinel_contig(str(leaky), fa)
+    assert any("mate position outside its contig" in p for p in problems), problems
+
+
+def test_r4_caption_must_use_the_r4_sample_line(r4_run_set):
+    d = _stim(r4_run_set, "Traw-r4")
+    cap = d / "caption.md"
+    cap.write_text(cap.read_text().replace(stimuli.SAMPLE_LINE_R4, real.SAMPLE_LINE))
+    report = lint_run_set(r4_run_set)
+    assert any("SAMPLE_LINE_R4" in p for p in report.problems), report.problems

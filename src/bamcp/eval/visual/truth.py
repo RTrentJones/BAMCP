@@ -125,7 +125,7 @@ HIFI_MIN_ALT = 3
 HIFI_ALT_FRAC = {"low_vaf": 0.03, "het": 0.25, "hom_alt": 0.80}
 HIFI_NEG_MAX_READS = 1
 HIFI_NEG_MAX_FRAC = 0.02
-HIFI_STUTTER_RATIO = 0.5  # HiFi +/-1-unit fraction must be <= this x the Illumina fraction
+HIFI_STUTTER_MAX_FRAC = 0.25  # candidate length share of HiFi spanning reads (A3)
 HIFI_MIN_DEPTH = 10
 HIFI_HOM_REF_RATIO = 0.5
 TRIO_RECUR_FRAC = 0.05
@@ -751,14 +751,14 @@ def orthogonal_check(row: dict[str, Any], bam: Any) -> dict[str, Any]:
                 ok = set(top[:2]) == {0, delta} if len(top) >= 2 else False
             return {**out, "pass": ok, "reason": None if ok else "hifi_mode_mismatch"}
         frac = hist[delta] / n
-        ill = float((row.get("features") or {}).get("stutter_frac") or 0.0)
         hifi_unit = unit_fraction(hist, unit)
         out.update(alt_reads=hist[delta], alt_frac=frac, unit_frac=hifi_unit)
-        # Design 3.4 (amendment A2): HiFi has its own homopolymer +/-1 error, so the SNV
-        # negatives' cap (<= 1 read and <= 2%) rejected most clean runs; a stutter negative
-        # needs reference as HiFi's modal length and HiFi's +/-1-unit fraction at most half
-        # of Illumina's.
-        ok = bool(top) and top[0] == 0 and hifi_unit <= HIFI_STUTTER_RATIO * ill
+        # Amendments A2/A3 (pre-pilot): HiFi's own +/-1 error in these runs is about 20%
+        # (above Illumina's 5-20% stutter), so neither the SNV negatives' cap (<= 1 read and
+        # <= 2%) nor design 3.4's "at most half of Illumina's" can pass a clean run. HiFi
+        # still settles the germline question the label makes: reference is its modal
+        # length and the candidate length stays far below a heterozygote's ~50%.
+        ok = bool(top) and top[0] == 0 and frac <= HIFI_STUTTER_MAX_FRAC
         return {**out, "pass": ok, "reason": None if ok else "hifi_carries_allele"}
 
     counts = base_counts(bam, chrom, site0, min_mapq=HIFI_MIN_MAPQ)

@@ -293,33 +293,19 @@ def test_orthogonal_check_repeat_lengths(world):
             hifi,
         )
         assert neg["pass"] and neg["unit_frac"] == 0.0
-        # Stutter-free Illumina (0%) cannot pass the "<= half the Illumina fraction" rule
-        # when HiFi also shows the allele: use the Illumina BAM as the "HiFi".
-    with pysam.AlignmentFile(str(world.paths["bam"])) as ill:
-        dirty = T.orthogonal_check(
-            _row(
-                "tr_stutter_neg",
-                W.HP_NEG,
-                polarity="neg",
-                context={"run": nrun, "unit": "T", "delta": -1},
-                features={"stutter_frac": 0.16},
-            ),
-            ill,
-        )
-    assert not dirty["pass"]
 
 
 @pytest.mark.parametrize(
     ("hist", "ok"),
     [
-        ({0: 95, -1: 5}, True),  # HiFi 5% <= half of Illumina's 10%
-        ({0: 90, -1: 6, 1: 4}, False),  # 10% of HiFi reads one unit off > 5%
+        ({0: 56, -1: 7, 1: 5}, True),  # HiFi's usual homopolymer noise: -1 at 10%
+        ({0: 50, -1: 20}, False),  # -1 on 29% of HiFi reads: could be a heterozygote
         ({0: 40, -1: 60}, False),  # HiFi's mode is the -1 length, not reference
     ],
 )
-def test_orthogonal_check_stutter_negative_uses_the_ratio_rule(monkeypatch, hist, ok):
-    """Amendment A2: reference is HiFi's mode and HiFi's +/-1 share <= half of Illumina's
-    (HiFi's own homopolymer error makes the SNV-negative read cap unusable here)."""
+def test_orthogonal_check_stutter_negative_rule(monkeypatch, hist, ok):
+    """Amendment A3: reference is HiFi's mode and the candidate length <= 25% of HiFi reads
+    (HiFi's own homopolymer error makes the read cap and the Illumina ratio unusable)."""
     monkeypatch.setattr(T, "spanning_hist", lambda *a, **k: Counter(hist))
     row = _row(
         "tr_stutter_neg",

@@ -171,7 +171,9 @@ def test_tr_predicates():
     assert S.eligible(s, "default")[0]
     neg = _tr("tr_stutter_neg", run_length=12, alt_reads=4, vaf=0.10)
     assert S.eligible(neg, "alt")[0]
-    assert S.eligible(_tr("tr_stutter_neg", run_length=12, alt_reads=3, vaf=0.2), "default")[1] == (
+    assert S.eligible(_tr("tr_stutter_neg", run_length=12, alt_reads=3, vaf=0.05), "default")[0]
+    assert not S.eligible(_tr("tr_stutter_neg", run_length=12, alt_reads=5, vaf=0.04), "default")[0]
+    assert S.eligible(_tr("tr_stutter_neg", run_length=12, alt_reads=2, vaf=0.2), "default")[1] == (
         "stutter_signal_weak"
     )
 

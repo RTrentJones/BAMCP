@@ -130,8 +130,10 @@ HET_MIN_ALT = 3
 HET_MIN_VAF = 0.10
 HOM_MIN_FRAC = 0.60
 FP_MIN_ALT = 4
-TR_NEG_MIN_READS = 4
-TR_NEG_MIN_FRAC = 0.10
+# Amendment A1 (pre-pilot): 4 reads / 10% left 2 of 299 scanned confident runs (stutter in
+# benchmark-confident homopolymers averages 1-3%); 3 reads / 5% keeps about 5%.
+TR_NEG_MIN_READS = 3
+TR_NEG_MIN_FRAC = 0.05
 TR_HET_ALLELE_MAX = 0.40
 TR_HOM_ALLELE_MAX = 0.85
 PSV_MIN_READS = 3

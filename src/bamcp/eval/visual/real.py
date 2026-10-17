@@ -778,8 +778,8 @@ ANCHOR_CLEAR_BP = 10
 REMOTE_RETRIES = 4
 FETCH_BLOCK = 16_384
 FETCH_BLOCKS_MAX = 512  # bounded: about 8 MB of reference
-TR_NEG_MIN_READS = 4  # = strata_r4.TR_NEG_MIN_READS / TR_NEG_MIN_FRAC (knob-independent)
-TR_NEG_MIN_FRAC = 0.10
+TR_NEG_MIN_READS = 3  # = strata_r4.TR_NEG_MIN_READS / TR_NEG_MIN_FRAC (knob-independent)
+TR_NEG_MIN_FRAC = 0.05
 
 
 # ---------------------------------------------------------------------------

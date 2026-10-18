@@ -87,4 +87,9 @@ that kept the model from producing an answer. No item is dropped after seeing re
 
 ## Amendments
 
-(none)
+- **2026-10-18, after the runs (grading code; no effect on the data).** `grade-r4` had its
+  contrast family hard-wired to the design's `Traw-r4` arms, so it reported no contrasts for
+  this run set; it now uses the family of the run set's baseline arm (`Tmp`). The test,
+  weights and Holm family are as registered above. 240 runs first stopped on a usage limit
+  before answering and were re-run with the identical prompt (Exclusions); one run produced two
+  identical answers and is counted once.

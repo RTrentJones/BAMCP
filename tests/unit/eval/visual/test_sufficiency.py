@@ -45,7 +45,7 @@ def _row(rng: random.Random, pair: str, pol: str, sep: float, partition: str) ->
     feats["vaf"] = rng.gauss(sep if pos else 0.0, 1)
     feats["alt_mismatch_burden"] = rng.gauss(0.0 if pos else sep, 1)
     feats["alt_reads"] = alt
-    del feats["stutter_frac"]  # absent features are imputed
+    del feats["run_length"]  # absent features are imputed
     return {
         "chrom": "chr20",
         "site0": rng.randrange(10**7),
@@ -230,3 +230,7 @@ def test_pool_keeps_only_the_sampling_frame() -> None:
     inside = {**base, "features": {"alt_reads": 6, "vaf": 0.12, "depth": 50}}
     outside = {**base, "features": {"alt_reads": 20, "vaf": 0.45, "depth": 50}}  # VAF > 0.20
     assert pair_pool([inside, outside], "mosaic", partition=None) == [inside]
+
+
+def test_truth_dependent_stutter_fraction_is_not_a_predictor() -> None:
+    assert "stutter_frac" not in FEATURE_KEYS

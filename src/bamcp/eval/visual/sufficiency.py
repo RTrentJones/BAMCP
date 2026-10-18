@@ -29,6 +29,9 @@ import numpy as np
 from .grade import PAIRS_R4
 from .stats import auroc
 
+# Read-level predictors only. ``stutter_frac`` is left out: it is computed around the truth
+# lengths (``truth_deltas``), so the same reads give different values for a het positive and
+# a reference negative, which would leak the label into G8.
 FEATURE_KEYS = (
     "depth",
     "alt_reads",
@@ -54,7 +57,6 @@ FEATURE_KEYS = (
     "linked_mismatch_max_frac",
     "local_nonref_sites_100bp",
     "run_length",
-    "stutter_frac",
 )
 AUROC_PAIR_MIN = 0.80
 AUROC_BAND_MIN = 0.70

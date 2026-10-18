@@ -100,6 +100,57 @@ the reference". The blinded reference and render are correct there (a solid colu
 in every read), so this is a reading error, plausibly because the reference track is fully
 coloured and a column coloured in every read looks like more reference.
 
+## Round 4 — harder items (pre-registered, focused on repeat-run indels)
+
+Goal: find real cases where the text baseline sits near 0.70, so a gain has room to show.
+Design: [`visual-design-r4.md`](visual-design-r4.md) (built by a panel of researcher and ML
+agents, two adversarial reviews). Pilots: [`visual-pilot-r4.md`](visual-pilot-r4.md).
+Pre-registration: [`visual-preregistration-r4.md`](visual-preregistration-r4.md).
+
+**Pilots (text baseline only, 52 items, 156 runs each).** On real HG002 sites from the classes
+where short-read callers fail most — low-fraction mosaic SNVs against caller false positives,
+segmental-duplication variants against paralog look-alikes, repeat-run indels against stutter —
+the models scored **0.961** with an expert text summary and **0.944** with raw
+`samtools mpileup`. The 0.70 regime does not exist there. The one class near it under both
+inputs was indel genotyping in long homopolymers / STRs (0.58–0.67).
+
+**Main run (60 fresh items, 540 runs, 3 models).** 30 true indels (1–4 bp, runs ≥ 12 bp, stutter
+≥ 12% or allele fraction ≤ 0.40 het) and 30 matched stutter negatives; baseline = unfiltered
+mpileup of the site ± 30 bp. Audit: 540/540 answered, 0 violations (240 runs first stopped on a
+usage limit before answering and were re-run with the identical prompt; one run was answered
+twice, identically).
+
+| arm | primary (balanced) | sensitivity | specificity | small / mid / large |
+|---|---:|---:|---:|---|
+| `Tmp` (mpileup) | **0.839** | 0.711 | 0.967 | 0.783 / 0.900 / 0.833 |
+| `Tmp+Tcur` (+ BAMCP text tools) | 0.817 | 0.633 | 1.000 | 0.700 / 0.900 / 0.850 |
+| `V+Tmp` (+ BAMCP viewer) | 0.811 | 0.633 | 0.989 | 0.667 / 0.917 / 0.850 |
+
+**Confirmatory contrasts (Holm over two, cluster sign-flip test):**
+
+| | delta | 95% CI | p | Holm p | TOST ±0.07 | |
+|---|---:|---|---:|---:|---|---|
+| C1 `Tmp+Tcur` vs `Tmp` | −0.022 | −0.086 to +0.040 | 0.60 | 0.82 | p = 0.069 | inconclusive |
+| C2 `V+Tmp` vs `Tmp` | −0.028 | −0.083 to +0.025 | 0.41 | 0.82 | p = 0.064 | inconclusive |
+
+Both null, and neither is shown equivalent (TOST just misses). Both additions cost sensitivity
+(0.711 → 0.633) and both fail the pre-registered guardrail; the loss is concentrated in the
+small model (true-indel accuracy 0.60 → 0.40 with the BAMCP text, 0.37 with the viewer), while
+the mid and large models are flat or slightly better. C1's predicted direction (no gain or harm,
+because the shipped curation summary raises a HIGH homopolymer concern on every indel in a run
+≥ 4 bp) is consistent with the result. The baseline landed at 0.84, not the 0.71 the pilot
+cells suggested: the pilot's 12-run cells overstated the difficulty.
+
+**Secondary: the viewer improved genotype calls.** Counting a true indel as fully right only
+when it is called real *and* its zygosity is right, the viewer arm got **27 / 90** against
+**13 / 90** for mpileup alone (exact McNemar on item × model pairs, 18 vs 4 discordant,
+p = 0.004; the BAMCP text arm 13 / 90). The gain is in the mid and large models (6 → 12,
+4 → 13). Mechanism: in a long run, mpileup's per-column counts make a heterozygous insertion
+look like a ~30% minority, and models called it `low_vaf` (30 of 41 het calls in `Tmp`); with
+the picture they called it `het` (23 of 32). Homozygous indels were called `het` in every arm
+(reads that stop inside the run dilute the fraction). This is a pre-specified secondary
+endpoint, not a confirmatory one, and it is the first picture-specific gain in four rounds.
+
 ## Conclusion across rounds
 
 - On these items, **a picture of the pileup does not beat the reads as text**. Raw read text is
@@ -111,5 +162,13 @@ coloured and a column coloured in every read looks like more reference.
   but did not reach significance, so it is not confirmed.
 - **Model size matters most for images**: the largest model was near-perfect from pictures
   (1.000 synthetic, 0.972 real); the smallest was not (0.81, 0.69).
+- **Harder real items do not open a gap (round 4).** On hard classes of real HG002 sites the
+  text baseline stays at 0.94–0.96; only long-repeat indel genotyping is hard (0.84 on fresh
+  items). There, neither BAMCP's text tools nor the viewer raised joint accuracy (both −0.02 to
+  −0.03, inconclusive), both cost the small model sensitivity, and the viewer roughly doubled
+  correct zygosity calls for the mid and large models (secondary, p = 0.004).
 - For BAMCP this supports the current design: the viewer is for the person; the model should
-  keep getting the read evidence as text.
+  keep getting the read evidence as text. Two product changes follow from round 4: the
+  curation summary's homopolymer concern should depend on the reads, not only the run length
+  (design item J2), and the text tools should report allele fraction among reads that span a
+  repeat run, which is the information the picture was supplying for zygosity.

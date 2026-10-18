@@ -44,6 +44,14 @@ six parallel implementation packages → QA acceptance against real public BAMs 
   all three confirmatory contrasts null after Holm. Raw read text beats the picture alone on
   both tiers; the picture alone ≈ structured JSON; adding the image to raw text changes nothing.
   The model keeps getting text evidence; the viewer is for the person.
+- [x] **Round 4, harder real items** (design by a researcher/ML agent panel; 2 pilots + 540
+  pre-registered runs): hard GIAB classes stay at 0.94–0.96 for text; only long-repeat indel
+  genotyping is hard (0.84). There, BAMCP text and viewer were both inconclusive (−0.02/−0.03)
+  and cost the small model sensitivity; the viewer doubled correct zygosity calls for the mid
+  and large models (secondary, p = 0.004).
+- [ ] **From round 4:** make the curation homopolymer concern read-based, not run-length-only
+  (it fires HIGH on every indel in a run ≥ 4 bp); report allele fraction among reads spanning a
+  repeat run in the text tools (mpileup-style counts make a het insertion look ~30%).
 - [ ] **Open:** viewer: mark the position of interest / mismatch columns so a hom-alt column
   cannot be read as reference (round-3 failure mode); GRCh37 demo cold latency (~27 s);
   dependabot python 3.14 / mcp<3 (lockfile + API work); real-data (GIAB) eval tier.

@@ -268,6 +268,10 @@ def test_ks_two_sample():
     d, p = S.ks_two_sample([0.0] * 20, [1.0] * 20)
     assert d == 1.0 and p < 0.001
     assert S.ks_two_sample([], [1.0]) == (0.0, 1.0)
+    # Ties: 4 insertion-anchor offsets among 30 vs 30 zeros is a redraw (p < 0.2), as in the
+    # leak-lint; a continuous-null p (~0.94) would pass it.
+    _, p = S.ks_two_sample([-1 / 12] * 4 + [0.0] * 26, [0.0] * 30)
+    assert p < 0.2
 
 
 def test_offset_in_run():

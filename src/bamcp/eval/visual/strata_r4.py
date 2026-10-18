@@ -544,22 +544,14 @@ def offset_in_run(row: dict[str, Any]) -> float | None:
 
 
 def ks_two_sample(a: list[float], b: list[float]) -> tuple[float, float]:
-    """Two-sample Kolmogorov-Smirnov statistic and asymptotic p-value (no scipy)."""
+    """Two-sample Kolmogorov-Smirnov statistic and p-value: the leak-lint's tie-aware test, so
+    the selection redraw and the POI-offset lint judge a draw by the same null (offsets are
+    a few repeated values; a continuous-null p is too lenient under ties)."""
     if not a or not b:
         return 0.0, 1.0
-    xs = sorted(set(a) | set(b))
-    sa, sb = sorted(a), sorted(b)
-    import bisect
+    from .leaklint import ks_two_sample as tie_aware
 
-    d = max(
-        abs(bisect.bisect_right(sa, x) / len(sa) - bisect.bisect_right(sb, x) / len(sb)) for x in xs
-    )
-    n = len(a) * len(b) / (len(a) + len(b))
-    lam = (math.sqrt(n) + 0.12 + 0.11 / math.sqrt(n)) * d
-    if lam < 0.2:  # the series is 1 to machine precision here (and converges badly)
-        return d, 1.0
-    p = 2 * sum((-1) ** (k - 1) * math.exp(-2 * k * k * lam * lam) for k in range(1, 101))
-    return d, min(1.0, max(0.0, p))
+    return tie_aware(a, b)
 
 
 def manifest_digest(text: str) -> str:

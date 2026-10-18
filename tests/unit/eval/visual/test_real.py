@@ -696,6 +696,16 @@ def test_write_real_fixtures_keeps_pairs(world, tmp_path):
     assert all(
         abs(r.next_reference_start - r.reference_start) == W.INSERT - W.READ for r in in_slot
     )
+    # Both ends of a fragment share one blinded name (the viewer links mates by name): two
+    # reads of one name point at each other. (A mate outside the fetched window is absent.)
+    by_name: dict[str, list] = {}
+    for r in reads:
+        by_name.setdefault(r.query_name, []).append(r)
+    pairs = [v for v in by_name.values() if len(v) == 2]
+    assert pairs and all(len(v) <= 2 for v in by_name.values())
+    for a, b in pairs:
+        assert a.next_reference_start == b.reference_start
+        assert b.next_reference_start == a.reference_start
     with_mq = [r for r in reads if r.has_tag("MQ")]
     assert with_mq and all(r.get_tag("MQ") == 60 for r in with_mq)
     assert all({t for t, _ in r.get_tags()} <= {"MQ"} for r in reads)

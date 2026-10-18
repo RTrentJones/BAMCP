@@ -27,6 +27,16 @@ from bamcp.eval.visual.sufficiency import (
 STRATUM = {(p, pol): s for s, (p, pol) in STRATUM_PAIRS_R4.items() if p != "anchor"}
 
 
+@pytest.fixture(autouse=True)
+def _whole_pool_in_frame(request, monkeypatch):
+    """The synthetic rows below carry features, not the predicate fields of real candidates;
+    every test except the frame test treats them as inside the sampling frame."""
+    if "frame" not in request.node.name:
+        from bamcp.eval.visual import strata_r4
+
+        monkeypatch.setattr(strata_r4, "eligible", lambda row, level, overrides=None: (True, None))
+
+
 def _row(rng: random.Random, pair: str, pol: str, sep: float, partition: str) -> dict[str, Any]:
     """A candidate: ``vaf`` and ``alt_mismatch_burden`` separate the classes by ``sep`` SDs."""
     pos = pol == "pos"
@@ -211,3 +221,12 @@ def test_excluded_candidates_are_not_labelled_examples() -> None:
     keep = _row(rng, "tr", "neg", 1.0, "pilot")
     dropped = {**_row(rng, "tr", "neg", 1.0, "pilot"), "exclude": "truth_in_run_30bp"}
     assert pair_pool([keep, dropped], "tr") == [keep]
+
+
+def test_pool_keeps_only_the_sampling_frame() -> None:
+    from bamcp.eval.visual.sufficiency import pair_pool
+
+    base = {"pair": "mosaic", "polarity": "neg", "stratum": "mosaic_caller_fp_neg"}
+    inside = {**base, "features": {"alt_reads": 6, "vaf": 0.12, "depth": 50}}
+    outside = {**base, "features": {"alt_reads": 20, "vaf": 0.45, "depth": 50}}  # VAF > 0.20
+    assert pair_pool([inside, outside], "mosaic", partition=None) == [inside]

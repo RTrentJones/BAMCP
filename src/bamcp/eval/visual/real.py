@@ -605,7 +605,10 @@ def write_real_fixtures(
                     shared += 1
                     continue
                 assigned.add(key)
-                name = hashlib.sha1(f"{seed}:{item_id}:{n}".encode()).hexdigest()[:16]  # noqa: S324
+                # With pairs kept, both ends of a fragment share one blinded name (the viewer
+                # links mates by name); otherwise each read is numbered, as in round 3.
+                tag = r.query_name if keep_pairs else n
+                name = hashlib.sha1(f"{seed}:{item_id}:{tag}".encode()).hexdigest()[:16]  # noqa: S324
                 n += 1
                 tid = names.index(contig)
                 rec = _OutRead(

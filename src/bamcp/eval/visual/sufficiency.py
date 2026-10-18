@@ -167,12 +167,18 @@ def pair_pool(
 ) -> list[dict[str, Any]]:
     """The pool rows G8 fits for ``pair`` (all partitions for the mosaic pair). Rows the
     selection excluded (``exclude``: e.g. a truth record in the run, so not a labelled
-    negative; often no features) are not labelled examples and are left out."""
+    negative; often no features) are not labelled examples and are left out, and so are rows
+    outside the sampling frame (failing their stratum predicate at every knob level)."""
+    from .strata_r4 import KNOB_LEVELS, eligible
+
     rows = [
         r
         for r in pool
         if r.get("pair") == pair and r.get("polarity") in ("pos", "neg") and not r.get("exclude")
     ]
+    # Design 7: the sampling frame is the candidates that pass their stratum's predicate at a
+    # piloted knob level; out-of-frame rows would measure a different (often easier) population.
+    rows = [r for r in rows if any(eligible(r, lv)[0] for lv in KNOB_LEVELS)]
     if partition is not None and pair not in ALL_PARTITION_PAIRS:
         rows = [r for r in rows if r.get("partition") == partition]
     return rows

@@ -202,3 +202,12 @@ def test_adjudication_proxy_uses_out_of_fold_for_pool_items() -> None:
     own_in = np.mean(np.where(y == 1, insample, 1 - insample))
     own_oof = np.mean(np.where(y == 1, oof, 1 - oof))
     assert own_in > 0.7 and own_oof < 0.6
+
+
+def test_excluded_candidates_are_not_labelled_examples() -> None:
+    from bamcp.eval.visual.sufficiency import pair_pool
+
+    rng = random.Random(0)  # noqa: S311
+    keep = _row(rng, "tr", "neg", 1.0, "pilot")
+    dropped = {**_row(rng, "tr", "neg", 1.0, "pilot"), "exclude": "truth_in_run_30bp"}
+    assert pair_pool([keep, dropped], "tr") == [keep]

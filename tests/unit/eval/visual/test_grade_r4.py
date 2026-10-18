@@ -318,3 +318,22 @@ def test_mpileup_run_set_uses_the_raw_input_contrasts(tmp_path: Path) -> None:
         "C2": ("V+Tmp", "Tmp"),
     }
     assert all(v["delta"] < 0 and not v["supported"] for v in s["contrasts"].values())
+
+
+def test_ref_fetch_follows_the_builders_relative_path(tmp_path: Path, monkeypatch) -> None:
+    from bamcp.eval.visual.grade import _build_ref_fetch
+
+    run = tmp_path / "experiment"
+    (run / "fixtures").mkdir(parents=True)
+    ref = run / "fixtures" / "ref.fa"
+    ref.write_text(">chr1\nACGTACGTAC\n")
+    Path(str(ref) + ".fai").write_text("chr1\t10\t6\t10\t11\n")
+    # build-r4 --out experiment, run from tmp_path: build.json records a cwd-relative path.
+    (run / "build.json").write_text(json.dumps({"reference": "experiment/fixtures/ref.fa"}))
+    monkeypatch.chdir(tmp_path)
+    assert _build_ref_fetch(run) is not None
+    monkeypatch.chdir(
+        run.parent.parent
+    )  # elsewhere, with a run-relative path: the fallback finds it
+    (run / "build.json").write_text(json.dumps({"reference": "fixtures/ref.fa"}))
+    assert _build_ref_fetch(run) is not None

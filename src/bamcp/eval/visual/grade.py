@@ -940,10 +940,12 @@ def _build_ref_fetch(run_dir: Path) -> RefFetch | None:
     ref = json.loads(meta.read_text()).get("reference")
     if not ref:
         return None
-    path = Path(ref) if Path(ref).is_absolute() else run_dir / ref
-    if not path.exists() or not Path(str(path) + ".fai").exists():
-        return None
-    return fasta_ref_fetch(path)
+    # The builder records the path as it was given (relative to its working directory when
+    # --out was relative); fall back to the run directory for a moved run set.
+    for path in (Path(ref), run_dir / ref):
+        if path.exists() and Path(str(path) + ".fai").exists():
+            return fasta_ref_fetch(path)
+    return None
 
 
 def _write_csv_r4(graded: list[Graded], path: Path, ref_fetch: RefFetch | None) -> None:

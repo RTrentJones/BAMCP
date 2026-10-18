@@ -165,8 +165,14 @@ def _in_band(n: float, band: tuple[int, int | None]) -> bool:
 def pair_pool(
     pool: list[dict[str, Any]], pair: str, *, partition: str | None = "pilot"
 ) -> list[dict[str, Any]]:
-    """The pool rows G8 fits for ``pair`` (all partitions for the mosaic pair)."""
-    rows = [r for r in pool if r.get("pair") == pair and r.get("polarity") in ("pos", "neg")]
+    """The pool rows G8 fits for ``pair`` (all partitions for the mosaic pair). Rows the
+    selection excluded (``exclude``: e.g. a truth record in the run, so not a labelled
+    negative; often no features) are not labelled examples and are left out."""
+    rows = [
+        r
+        for r in pool
+        if r.get("pair") == pair and r.get("polarity") in ("pos", "neg") and not r.get("exclude")
+    ]
     if partition is not None and pair not in ALL_PARTITION_PAIRS:
         rows = [r for r in rows if r.get("partition") == partition]
     return rows

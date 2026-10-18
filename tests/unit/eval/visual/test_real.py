@@ -783,6 +783,24 @@ def test_iter_cmrg_and_psv(world, res):
     assert terr == [(20000, 23000)]
 
 
+def test_iter_cmrg_indel_row_carries_its_run(world, res, monkeypatch):
+    """A CMRG indel's emitted row holds run/unit/delta, so the HiFi check compares lengths."""
+    import dataclasses
+
+    snv = next(iter(res.cmrg.positives(W.CHROM)))
+    ref = res.fetch(W.CHROM, snv.start0, snv.start0 + 1)
+    ins = dataclasses.replace(snv, ref=ref, alts=(ref + "T",))
+    monkeypatch.setattr(res.cmrg, "positives", lambda c: [ins])
+    from bamcp.eval.visual import truth
+
+    # The truth files hold the SNV this record replaces: no isolation or concordance verdict.
+    monkeypatch.setattr(truth, "concordant", lambda *a: None)
+    monkeypatch.setattr(real, "_truth_near", lambda *a, **k: False)
+    rows = [r for r in real.iter_cmrg_sites(res, [W.CHROM]) if not r.get("exclude")]
+    assert rows and {"run", "unit", "delta"} <= set(rows[0]["context"])
+    assert rows[0]["context"]["delta"] == 1
+
+
 def test_iter_indel_adjacent(world, res):
     pos = list(real.iter_indel_adjacent(res, [W.CHROM], polarity="pos", seed=1))
     assert [r["site0"] for r in pos if not r["exclude"]] == [W.ADJ_SNV]

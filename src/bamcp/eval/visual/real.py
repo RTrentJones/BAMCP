@@ -1745,7 +1745,8 @@ def iter_cmrg_sites(res: R4Resources, chroms: Iterable[str]) -> Iterable[dict[st
                 s, e, unit = _span_of(rec, res.fetch)
                 n = len(label["alt_allele"])
                 delta = n if label["variant_type"] == "ins" else -n
-                ctx.update(run=[s, e], unit=unit, delta=delta)
+                # The row holds its own copy of the context: the HiFi check reads run/delta there.
+                row["context"].update(run=[s, e], unit=unit, delta=delta)
                 truth = (0, delta) if label["zygosity"] == "het" else (delta,)
                 feats = res.features(
                     c, row["site0"], run=(s, e), delta=delta, unit=unit, truth_deltas=truth

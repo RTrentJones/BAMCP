@@ -320,6 +320,12 @@ PRIMARY_CONTRASTS_R4: dict[str, tuple[str, str]] = {
     "C1": ("Traw-r4+Tcur", "Traw-r4"),
     "C2": ("V+Traw-r4", "Traw-r4"),
 }
+# The focused round (docs/eval/visual-preregistration-r4.md): same contrasts on the raw-input
+# (samtools mpileup) baseline. A run set uses whichever family its baseline arm belongs to.
+PRIMARY_CONTRASTS_R4_TMP: dict[str, tuple[str, str]] = {
+    "C1": ("Tmp+Tcur", "Tmp"),
+    "C2": ("V+Tmp", "Tmp"),
+}
 # stratum -> (pair, polarity); a label's own ``pair``/``polarity`` fields win when present.
 STRATUM_PAIRS_R4: dict[str, tuple[str, str]] = {
     "mosaic_snv_pos": ("mosaic", "pos"),
@@ -883,7 +889,8 @@ def grade_run_set_r4(
                 groups[f"{m}|{c}"] = summarize_group_r4(mrows, ref_fetch)
 
     contrasts: dict[str, Any] = {}
-    for name, (a, b) in PRIMARY_CONTRASTS_R4.items():
+    family = PRIMARY_CONTRASTS_R4_TMP if "Tmp" in conds else PRIMARY_CONTRASTS_R4
+    for name, (a, b) in family.items():
         res = contrast_r4(graded, a, b, n_flips=n_flips, seed=seed)
         if res is not None:
             contrasts[name] = res

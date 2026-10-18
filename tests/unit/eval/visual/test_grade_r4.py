@@ -304,3 +304,17 @@ def test_cli_grade_r4_and_selftest(tmp_path: Path, capsys: pytest.CaptureFixture
     assert json.loads((rs / "results" / "summary.json").read_text())["n_excluded_items"] == 1
     assert main(["selftest-r4", "--run-dir", str(rs)]) == 0
     assert capsys.readouterr().out.count("PASS") == 4
+
+
+def test_mpileup_run_set_uses_the_raw_input_contrasts(tmp_path: Path) -> None:
+    def fn(lab: dict, c: str, m: str) -> dict:
+        hurt = c != "Tmp" and lab["polarity"] == "pos" and int(lab["item"][2:]) % 2 == 0
+        return ARTIFACT if hurt else oracle_answer(lab)
+
+    rs = make_r4_run_set(tmp_path, n=4, conditions=("Tmp", "Tmp+Tcur", "V+Tmp"), answer_fn=fn)
+    s = _grade(rs)
+    assert {k: (v["a"], v["b"]) for k, v in s["contrasts"].items()} == {
+        "C1": ("Tmp+Tcur", "Tmp"),
+        "C2": ("V+Tmp", "Tmp"),
+    }
+    assert all(v["delta"] < 0 and not v["supported"] for v in s["contrasts"].values())

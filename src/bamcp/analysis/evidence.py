@@ -165,21 +165,36 @@ def homopolymer_run_bounds(variant: dict, seq: str, pos_in_region: int) -> tuple
     return s, e
 
 
-def _net_length_in(read: AlignedRead, start: int, end: int) -> int | None:
+# Marker for a spanning read whose length change inside the run is not a pure change of
+# the run's length (an inserted sequence of another base): it is neither the reference nor
+# any run-length allele.
+FOREIGN_LENGTH = "other"
+
+
+def _net_length_in(read: AlignedRead, start: int, end: int, run_base: str) -> int | str | None:
     """Net inserted-minus-deleted bases a read carries inside reference ``[start, end)``,
-    counting insertions placed at either edge; ``None`` unless the read's alignment covers
-    the run plus one flanking base on each side (only then is its length readable)."""
+    counting insertions placed at either edge; ``FOREIGN_LENGTH`` when an insertion there
+    holds any base other than ``run_base``; ``None`` unless the read's alignment covers the
+    run plus one flanking base on each side (only then is its length readable)."""
     if read.position > start - 1 or read.end_position < end + 1:
         return None
     net = 0
+    foreign = False
     rpos = read.position
+    qpos = 0
+    seq = read.sequence.upper()
     for n_str, op in _CIGAR_RE.findall(read.cigar):
         n = int(n_str)
         if op in ("M", "=", "X"):
             rpos += n
+            qpos += n
         elif op == "I":
             if start <= rpos <= end:
                 net += n
+                foreign = foreign or set(seq[qpos : qpos + n]) != {run_base}
+            qpos += n
+        elif op == "S":
+            qpos += n
         elif op == "D":
             net -= max(0, min(rpos + n, end) - max(rpos, start))
             rpos += n
@@ -187,7 +202,7 @@ def _net_length_in(read: AlignedRead, start: int, end: int) -> int | None:
             if rpos < end and rpos + n > start:
                 return None  # a splice gap through the run hides its length
             rpos += n
-    return net
+    return FOREIGN_LENGTH if foreign else net
 
 
 def repeat_span_evidence(
@@ -204,8 +219,9 @@ def repeat_span_evidence(
     gives the allele fraction a genotype should be read from, and the share of other lengths
     (polymerase slippage) to compare it with. ``None`` for SNVs, runs shorter than
     ``ARTIFACT_HOMOPOLYMER_LENGTH_THRESHOLD``, runs touching the reference window's edge
-    (their extent is unknown), alleles that are not a pure change of the run's length, or
-    without a reference.
+    (their extent is unknown), alleles that are not a pure change of the run's length or
+    that do not fall in the run, or without a reference. A spanning read that inserts
+    another base inside the run counts under ``"other"``, never as the called length.
     """
     if not reference_sequence:
         return None
@@ -224,14 +240,22 @@ def repeat_span_evidence(
         return None
     start, end = bounds[0] + region_start, bounds[1] + region_start
     delta = len(alt) - len(ref)
+    # The event must fall in this run: an insertion at its edges or inside it, a deletion
+    # wholly inside it (a T run downstream of a C>CT anchor is not the one it changes).
+    first = variant["position"] + 1
+    if not start <= first <= end or (delta < 0 and first - delta > end):
+        return None
     counts: dict[int, int] = {}
+    foreign = 0
     for read in reads:
-        net = _net_length_in(read, start, end)
-        if net is not None:
+        net = _net_length_in(read, start, end, run_base)
+        if net == FOREIGN_LENGTH:
+            foreign += 1
+        elif isinstance(net, int):
             counts[net] = counts.get(net, 0) + 1
-    n = sum(counts.values())
+    n = sum(counts.values()) + foreign
     hits = counts.get(delta, 0)
-    other = sum(c for d, c in counts.items() if d not in (0, delta))
+    other = sum(c for d, c in counts.items() if d not in (0, delta)) + foreign
     return {
         "run_start": start,
         "run_length": end - start,
@@ -240,7 +264,10 @@ def repeat_span_evidence(
         "allele_reads": hits,
         "allele_fraction": round(hits / n, 3) if n else None,
         "other_length_fraction": round(other / n, 3) if n else None,
-        "length_counts": {str(d): c for d, c in sorted(counts.items())},
+        "length_counts": {
+            **{str(d): c for d, c in sorted(counts.items())},
+            **({FOREIGN_LENGTH: foreign} if foreign else {}),
+        },
     }
 
 

@@ -31,8 +31,16 @@ INS = {"position": ANCHOR, "ref": A, "alt": A + "T"}
 DEL = {"position": ANCHOR, "ref": A + "T", "alt": A}
 
 
-def _read(i: int, delta: int, *, start: int = START, end: int = START + len(REF)) -> AlignedRead:
-    """A read spanning ``[start, end)`` that carries a ``delta``-bp length change in the run."""
+def _read(
+    i: int,
+    delta: int,
+    *,
+    start: int = START,
+    end: int = START + len(REF),
+    inserted: str = "T",
+) -> AlignedRead:
+    """A read spanning ``[start, end)`` that carries a ``delta``-bp length change in the run
+    (an insertion is made of ``inserted`` bases at the run's left edge)."""
     if delta > 0:
         left = RUN0 - start
         cigar = f"{left}M{delta}I{end - RUN0}M"
@@ -42,9 +50,13 @@ def _read(i: int, delta: int, *, start: int = START, end: int = START + len(REF)
     else:
         cigar = f"{end - start}M"
     qlen = (end - start) + max(delta, 0)
+    sequence = "A" * qlen
+    if delta > 0:
+        left = RUN0 - start
+        sequence = sequence[:left] + inserted * delta + sequence[left + delta :]
     return AlignedRead(
         name=f"r{i}",
-        sequence="A" * qlen,
+        sequence=sequence,
         qualities=[30] * qlen,
         cigar=cigar,
         position=start,
@@ -194,3 +206,27 @@ def test_run_at_the_window_edge_gets_no_span_evidence():
     starts_in_run = REF[len(FLANK) + 2 :]
     shifted = {**INS, "position": RUN0 + 1}
     assert repeat_span_evidence(shifted, [], starts_in_run, RUN0 + 2) is None
+
+
+def test_an_insertion_of_another_base_is_not_the_called_allele():
+    reads = _reads(ref=1) + [_read(100 + i, 1, inserted="G") for i in range(19)] + _reads(ins=1)
+    span = repeat_span_evidence(INS, reads, REF, START)
+    assert span is not None
+    assert span["allele_reads"] == 1 and span["spanning_reads"] == 21
+    assert span["length_counts"] == {"0": 1, "1": 1, "other": 19}
+    hp = [r for r in _risk(INS, reads)["risks"] if r["type"] == "homopolymer"]
+    assert hp and hp[0]["severity"] == "high"
+
+
+def test_an_indel_outside_the_run_gets_no_span_evidence():
+    from bamcp.analysis.evidence import homopolymer_run_bounds
+
+    # A T insertion one base before the run's anchor: the run-length lookup reaches the T
+    # run, but the insertion (between two flank bases) does not change it.
+    b = REF[len(FLANK) - 2]
+    early = {"position": ANCHOR - 1, "ref": b, "alt": b + "T"}
+    assert homopolymer_run_bounds(early, REF, ANCHOR - 1 - START) == (RUN0 - START, RUN_END - START)
+    assert repeat_span_evidence(early, _reads(ref=10), REF, START) is None
+    # A deletion reaching past the run's end is not inside it.
+    long_del = {"position": RUN_END - 3, "ref": "T" * 3 + "G", "alt": "T"}
+    assert repeat_span_evidence(long_del, _reads(ref=10), REF, START) is None

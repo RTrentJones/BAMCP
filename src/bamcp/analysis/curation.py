@@ -267,6 +267,15 @@ def format_curation_summary(summary: dict) -> str:
     return "\n".join(lines)
 
 
+def _length_label(d: str) -> str:
+    """A length key of ``repeat_span["length_counts"]`` as printed: ref, +1, -2, other."""
+    if d == "0":
+        return "ref"
+    if d.lstrip("-").isdigit():
+        return d if d.startswith("-") else "+" + d
+    return f"{d} sequence"
+
+
 def _format_repeat_span(span: dict | None) -> list[str]:
     """The REPEAT RUN block for an indel in a homopolymer: allele lengths among the reads
     that span the run, which is what a repeat indel's genotype should be read from."""
@@ -282,10 +291,7 @@ def _format_repeat_span(span: dict | None) -> list[str]:
     if not n:
         return lines
     af = float(span["allele_fraction"] or 0.0)
-    counts = ", ".join(
-        f"{'ref' if d == '0' else (d if d.startswith('-') else '+' + d)}: {c}"
-        for d, c in span["length_counts"].items()
-    )
+    counts = ", ".join(f"{_length_label(d)}: {c}" for d, c in span["length_counts"].items())
     lines.append(f"  This length on {span['allele_reads']}/{n} spanning reads ({af:.1%})")
     lines.append(f"  Lengths among spanning reads: {counts}")
     hint = zygosity_hint(af)

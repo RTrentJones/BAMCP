@@ -203,30 +203,42 @@ def repeat_span_evidence(
     ~30% minority. Counting only reads that cover the run plus a flanking base on each side
     gives the allele fraction a genotype should be read from, and the share of other lengths
     (polymerase slippage) to compare it with. ``None`` for SNVs, runs shorter than
-    ``ARTIFACT_HOMOPOLYMER_LENGTH_THRESHOLD``, or without a reference.
+    ``ARTIFACT_HOMOPOLYMER_LENGTH_THRESHOLD``, runs touching the reference window's edge
+    (their extent is unknown), alleles that are not a pure change of the run's length, or
+    without a reference.
     """
     if not reference_sequence:
         return None
     bounds = homopolymer_run_bounds(variant, reference_sequence, variant["position"] - region_start)
     if bounds is None or bounds[1] - bounds[0] < ARTIFACT_HOMOPOLYMER_LENGTH_THRESHOLD:
         return None
+    if bounds[0] == 0 or bounds[1] == len(reference_sequence):
+        return None  # the run reaches the window edge: its true extent is unknown
+    ref, alt = str(variant.get("ref", "")).upper(), str(variant.get("alt", "")).upper()
+    short, long_ = (ref, alt) if len(alt) > len(ref) else (alt, ref)
+    changed = long_[len(short) :]
+    run_base = reference_sequence[bounds[0]].upper()
+    if not long_.startswith(short) or set(changed) != {run_base}:
+        # Only a pure expansion/contraction of this run is read as a length; an allele that
+        # also changes flanking bases would never match a read's within-run length.
+        return None
     start, end = bounds[0] + region_start, bounds[1] + region_start
-    delta = len(str(variant.get("alt", ""))) - len(str(variant.get("ref", "")))
+    delta = len(alt) - len(ref)
     counts: dict[int, int] = {}
     for read in reads:
         net = _net_length_in(read, start, end)
         if net is not None:
             counts[net] = counts.get(net, 0) + 1
     n = sum(counts.values())
-    alt = counts.get(delta, 0)
+    hits = counts.get(delta, 0)
     other = sum(c for d, c in counts.items() if d not in (0, delta))
     return {
         "run_start": start,
         "run_length": end - start,
-        "run_base": reference_sequence[bounds[0]].upper(),
+        "run_base": run_base,
         "spanning_reads": n,
-        "allele_reads": alt,
-        "allele_fraction": round(alt / n, 3) if n else None,
+        "allele_reads": hits,
+        "allele_fraction": round(hits / n, 3) if n else None,
         "other_length_fraction": round(other / n, 3) if n else None,
         "length_counts": {str(d): c for d, c in sorted(counts.items())},
     }

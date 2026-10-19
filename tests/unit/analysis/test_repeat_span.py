@@ -173,3 +173,24 @@ def test_recommendations_name_the_homopolymer_concern():
     clean = _risk(INS, _reads(ref=10, ins=10))
     recs = generate_curator_recommendations({**INS, "depth": 60}, evidence, clean)
     assert not any(r.startswith("HOMOPOLYMER") for r in recs)
+
+
+def test_alleles_that_are_not_a_pure_run_length_change_get_no_span_evidence():
+    # Deleting the run plus the next base (here 12 T + G) is not a run-length change.
+    nxt = REF[len(FLANK) + 12]
+    crossing = {"position": ANCHOR, "ref": A + "T" * 12 + nxt, "alt": A}
+    assert repeat_span_evidence(crossing, _reads(ref=10), REF, START) is None
+    wrong_base = {"position": ANCHOR, "ref": A, "alt": A + "G"}
+    assert repeat_span_evidence(wrong_base, _reads(ref=10), REF, START) is None
+    # ...and they keep the run-length rule.
+    hp = [r for r in _risk(crossing, _reads(ref=10))["risks"] if r["type"] == "homopolymer"]
+    assert hp and "repeat_span" not in _risk(crossing, _reads(ref=10))
+
+
+def test_run_at_the_window_edge_gets_no_span_evidence():
+    # Same run, but the reference window ends 3 bases into it: its extent is unknown.
+    clipped = REF[: len(FLANK) + 3]
+    assert repeat_span_evidence(INS, _reads(ref=10, ins=10), clipped, START) is None
+    starts_in_run = REF[len(FLANK) + 2 :]
+    shifted = {**INS, "position": RUN0 + 1}
+    assert repeat_span_evidence(shifted, [], starts_in_run, RUN0 + 2) is None

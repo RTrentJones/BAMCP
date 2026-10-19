@@ -112,7 +112,8 @@ def generate_curator_recommendations(
             )
 
     if any(r.get("type") == "homopolymer" for r in artifact_risk.get("risks") or []):
-        if artifact_risk.get("repeat_span"):
+        span = artifact_risk.get("repeat_span") or {}
+        if span.get("spanning_reads", 0) >= REPEAT_SPAN_MIN_READS:
             recommendations.append(
                 "HOMOPOLYMER SLIPPAGE: The called length is rare among the reads that span "
                 "the run, the pattern of polymerase slippage. Long-read or PCR-free data "

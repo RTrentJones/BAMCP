@@ -185,6 +185,13 @@ def test_recommendations_name_the_homopolymer_concern():
     clean = _risk(INS, _reads(ref=10, ins=10))
     recs = generate_curator_recommendations({**INS, "depth": 60}, evidence, clean)
     assert not any(r.startswith("HOMOPOLYMER") for r in recs)
+    # One spanning read that carries the allele is too little to call slippage, even though
+    # the run-length fallback still flags the homopolymer.
+    thin = _risk(INS, _reads(ins=1, short=20))
+    assert thin["repeat_span"]["spanning_reads"] == 1
+    recs = generate_curator_recommendations({**INS, "depth": 60}, evidence, thin)
+    assert any(r.startswith("HOMOPOLYMER CONTEXT") for r in recs)
+    assert not any(r.startswith("HOMOPOLYMER SLIPPAGE") for r in recs)
 
 
 def test_alleles_that_are_not_a_pure_run_length_change_get_no_span_evidence():

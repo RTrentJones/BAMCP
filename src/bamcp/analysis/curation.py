@@ -495,7 +495,12 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
         else:
             evidence = compute_variant_evidence(build_mismatch_index(data.reads), target_variant)
         artifact_risk = compute_artifact_risk(
-            target_variant, evidence, data.reference_sequence, data.start, reads=data.reads
+            target_variant,
+            evidence,
+            data.reference_sequence,
+            data.start,
+            reads=None if data.reads_truncated else data.reads,
+            min_baseq=data.min_baseq,
         )
     else:
         # The requested site fails the calling filters (or wasn't called at all): evaluate it

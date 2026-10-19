@@ -171,13 +171,20 @@ def homopolymer_run_bounds(variant: dict, seq: str, pos_in_region: int) -> tuple
 FOREIGN_LENGTH = "other"
 
 
-def _net_length_in(read: AlignedRead, start: int, end: int, run_base: str) -> int | str | None:
+def _net_length_in(
+    read: AlignedRead, start: int, end: int, run_base: str, min_baseq: int = 0
+) -> int | str | None:
     """Net inserted-minus-deleted bases a read carries inside reference ``[start, end)``,
     counting insertions placed at either edge; ``FOREIGN_LENGTH`` when an insertion there
     holds any base other than ``run_base`` or a deletion also removes a flanking base;
     ``None`` unless the read's alignment covers the
-    run plus one flanking base on each side (only then is its length readable)."""
+    run plus one flanking base on each side (only then is its length readable), and, under a
+    positive ``min_baseq``, unless the base before the run reaches it: the anchor-base rule
+    indel detection applies to the same reads (the base after a long run is often low
+    quality, so requiring it too would drop the reads that show the length)."""
     if read.position > start - 1 or read.end_position < end + 1:
+        return None
+    if min_baseq and not read.qualities:
         return None
     net = 0
     foreign = False
@@ -187,6 +194,10 @@ def _net_length_in(read: AlignedRead, start: int, end: int, run_base: str) -> in
     for n_str, op in _CIGAR_RE.findall(read.cigar):
         n = int(n_str)
         if op in ("M", "=", "X"):
+            if min_baseq and rpos <= start - 1 < rpos + n:
+                i = qpos + start - 1 - rpos
+                if i >= len(read.qualities) or read.qualities[i] < min_baseq:
+                    return None
             rpos += n
             qpos += n
         elif op == "I":
@@ -214,6 +225,7 @@ def repeat_span_evidence(
     reads: list[AlignedRead],
     reference_sequence: str | None,
     region_start: int,
+    min_baseq: int = 0,
 ) -> dict | None:
     """Allele lengths among the reads that span an indel's homopolymer run.
 
@@ -226,6 +238,8 @@ def repeat_span_evidence(
     (their extent is unknown), alleles that are not a pure change of the run's length or
     that do not fall in the run, or without a reference. A spanning read that inserts
     another base inside the run counts under ``"other"``, never as the called length.
+    Under a positive ``min_baseq`` a read counts only when the base before the run reaches
+    it, so the reads indel detection excluded at the anchor do not return here.
     """
     if not reference_sequence:
         return None
@@ -252,7 +266,7 @@ def repeat_span_evidence(
     counts: dict[int, int] = {}
     foreign = 0
     for read in reads:
-        net = _net_length_in(read, start, end, run_base)
+        net = _net_length_in(read, start, end, run_base, min_baseq)
         if net == FOREIGN_LENGTH:
             foreign += 1
         elif isinstance(net, int):
@@ -585,6 +599,7 @@ def compute_artifact_risk(
     reference_sequence: str | None,
     region_start: int,
     reads: list[AlignedRead] | None = None,
+    min_baseq: int = 0,
 ) -> dict:
     """Compute artifact risk indicators for variant curation.
 
@@ -595,7 +610,11 @@ def compute_artifact_risk(
         region_start: Start position of the region.
         reads: The region's reads, when available. An indel in a homopolymer is then
             judged from the reads spanning the run (see :func:`repeat_span_evidence`),
-            and the result carries ``repeat_span``.
+            and the result carries ``repeat_span``. Pass ``None`` when ``reads`` is
+            incomplete (the ``max_reads`` cap truncated it): a prefix of the reads gives
+            a biased length distribution.
+        min_baseq: The base-quality floor the region was fetched with; a spanning read whose
+            base before the run falls below it is not counted.
 
     Returns:
         Dict with risks list, risk_score, and artifact_likelihood.
@@ -692,7 +711,7 @@ def compute_artifact_risk(
     # anchor alone under-reads the run (CAAAAAAG: anchor C → 1, real A-run → 6); take the
     # longest run over the anchor plus the affected/flanking bases instead.
     span = (
-        repeat_span_evidence(variant, reads, reference_sequence, region_start)
+        repeat_span_evidence(variant, reads, reference_sequence, region_start, min_baseq)
         if reads is not None and is_indel(variant)
         else None
     )
@@ -896,6 +915,9 @@ def enhance_variants_with_evidence(
     reads: list[AlignedRead],
     reference_sequence: str | None,
     region_start: int,
+    *,
+    min_baseq: int = 0,
+    reads_truncated: bool = False,
 ) -> tuple[list[dict], dict]:
     """Attach BAMCP read-level evidence to BAMCP-candidate variants.
 
@@ -907,6 +929,9 @@ def enhance_variants_with_evidence(
     :func:`bamcp.core.parsers.annotate_vcf_snv_support` pileups at each site (immune
     to the ``max_reads`` cap that bounds ``reads`` here); VCF indels/SVs, which BAMCP
     can't corroborate from single-base support, pass through unscored.
+
+    ``min_baseq`` and ``reads_truncated`` describe how ``reads`` was fetched; a truncated
+    read set gets no spanning-read repeat evidence (see :func:`compute_artifact_risk`).
     """
     mismatch_index = build_mismatch_index(reads)
     indel_index: dict | None = None
@@ -937,7 +962,12 @@ def enhance_variants_with_evidence(
         else:
             evidence = compute_variant_evidence(mismatch_index, variant)
         artifact_risk = compute_artifact_risk(
-            variant, evidence, reference_sequence, region_start, reads=reads
+            variant,
+            evidence,
+            reference_sequence,
+            region_start,
+            reads=None if reads_truncated else reads,
+            min_baseq=min_baseq,
         )
         evidence["artifact_risk"] = artifact_risk
         variant_evidence[key] = evidence

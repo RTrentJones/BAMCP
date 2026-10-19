@@ -12,6 +12,7 @@ import pytest
 from bamcp.analysis.curation import format_curation_summary
 from bamcp.analysis.evidence import (
     compute_artifact_risk,
+    enhance_variants_with_evidence,
     interpret_variant,
     repeat_span_evidence,
 )
@@ -291,3 +292,55 @@ def test_too_few_spanning_reads_keep_the_vaf_hint():
     }
     out = format_curation_summary(summary)
     assert "Too few spanning reads" in out and "From spanning reads" not in out
+
+
+def test_spanning_reads_honor_the_base_quality_filter():
+    # Low-quality reads the depth/VAF filter dropped must not dilute the spanning fraction.
+    reads = _reads(ref=10, ins=10)
+    for i in range(180):
+        q0 = _read(100 + i, 0)
+        q0.qualities = [0] * len(q0.qualities)
+        reads.append(q0)
+    unfiltered = repeat_span_evidence(INS, reads, REF, START)
+    assert unfiltered is not None and unfiltered["spanning_reads"] == 200
+    span = repeat_span_evidence(INS, reads, REF, START, min_baseq=13)
+    assert span is not None and span["spanning_reads"] == 20
+    assert span["allele_fraction"] == pytest.approx(0.5)
+    risk = compute_artifact_risk(
+        {**INS, "depth": 20, "vaf": 0.5},
+        {"strand_bias": 0.0, "quality_histogram": [], "mean_quality": 30},
+        REF,
+        START,
+        reads=reads,
+        min_baseq=13,
+    )
+    assert not any(r["type"] == "homopolymer" for r in risk["risks"])
+
+
+def test_only_the_base_before_the_run_is_quality_checked():
+    # The anchor-base rule of indel detection; the base after a long run is often low
+    # quality, and requiring it would drop the reads that show the run's length.
+    low_left = _read(0, 1)
+    low_left.qualities[RUN0 - 1 - START] = 5
+    low_right = _read(1, 0)
+    low_right.qualities[RUN_END - START] = 5
+    inside = _read(2, 0)
+    inside.qualities[RUN0 - START] = 0
+    span = repeat_span_evidence(INS, [low_left, low_right, inside], REF, START, min_baseq=13)
+    assert span is not None and span["spanning_reads"] == 2
+    assert span["allele_reads"] == 0
+    no_qual = _read(3, 0)
+    no_qual.qualities = []
+    span = repeat_span_evidence(INS, [no_qual], REF, START, min_baseq=13)
+    assert span is not None and span["spanning_reads"] == 0
+
+
+def test_a_truncated_read_set_gets_no_spanning_evidence():
+    # A max_reads prefix (here all insertion reads) would give a biased 10/10.
+    variant = {**INS, "source": "bamcp", "depth": 20, "vaf": 0.5, "alt_count": 10}
+    reads = _reads(ins=10)
+    _, full = enhance_variants_with_evidence([variant], reads, REF, START)
+    key = f"{ANCHOR}:{INS['ref']}>{INS['alt']}"
+    assert full[key]["artifact_risk"]["repeat_span"]["spanning_reads"] == 10
+    _, cut = enhance_variants_with_evidence([variant], reads, REF, START, reads_truncated=True)
+    assert "repeat_span" not in cut[key]["artifact_risk"]

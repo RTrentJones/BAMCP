@@ -81,7 +81,12 @@ def build_enhanced_variants(data: RegionData) -> tuple[list[dict], dict]:
     Returns ``(enhanced_variants, variant_evidence)``.
     """
     enhanced, evidence = enhance_variants_with_evidence(
-        data.variants, data.reads, data.reference_sequence, data.start
+        data.variants,
+        data.reads,
+        data.reference_sequence,
+        data.start,
+        min_baseq=data.min_baseq,
+        reads_truncated=data.reads_truncated,
     )
     if not data.reads_truncated:
         return enhanced, evidence

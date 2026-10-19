@@ -30,6 +30,7 @@ from .evidence import (
     compute_variant_evidence,
     is_indel,
     is_read_position_biased,
+    zygosity_hint,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,19 @@ def generate_curator_recommendations(
                 "The genomic region may be repetitive or have multiple mappings."
             )
 
+    if any(r.get("type") == "homopolymer" for r in artifact_risk.get("risks") or []):
+        if artifact_risk.get("repeat_span"):
+            recommendations.append(
+                "HOMOPOLYMER SLIPPAGE: The called length is rare among the reads that span "
+                "the run, the pattern of polymerase slippage. Long-read or PCR-free data "
+                "can confirm a real length change."
+            )
+        else:
+            recommendations.append(
+                "HOMOPOLYMER CONTEXT: Indels in homopolymer runs are a common sequencing "
+                "error; check the allele's share among reads that span the whole run."
+            )
+
     if variant.get("depth", 0) < HIGH_CONFIDENCE_MIN_DEPTH:
         recommendations.append(
             f"LOW COVERAGE: Depth below {HIGH_CONFIDENCE_MIN_DEPTH}x limits confidence. "
@@ -186,6 +200,7 @@ def format_curation_summary(summary: dict) -> str:
         "OBSERVATION",
         f"  VAF: {v['vaf']:.1%} ({v.get('alt_count', 'N/A')} alt reads / {v['depth']} total depth)",
     ]
+    lines.extend(_format_repeat_span(a.get("repeat_span")))
     lines.extend(_format_filter_check(summary.get("filter_check"), summary.get("applied_filters")))
     lines.extend(["", "QUALITY METRICS"])
 
@@ -250,6 +265,33 @@ def format_curation_summary(summary: dict) -> str:
     lines.extend(["", "INTENDED USE", f"  {summary.get('intended_use', INTENDED_USE)}"])
 
     return "\n".join(lines)
+
+
+def _format_repeat_span(span: dict | None) -> list[str]:
+    """The REPEAT RUN block for an indel in a homopolymer: allele lengths among the reads
+    that span the run, which is what a repeat indel's genotype should be read from."""
+    if not span:
+        return []
+    n = span["spanning_reads"]
+    lines = [
+        "",
+        "REPEAT RUN",
+        f"  {span['run_length']}bp {span['run_base']} homopolymer; "
+        f"{n} reads span the whole run (reads ending inside it cannot show its length)",
+    ]
+    if not n:
+        return lines
+    af = float(span["allele_fraction"] or 0.0)
+    counts = ", ".join(
+        f"{'ref' if d == '0' else (d if d.startswith('-') else '+' + d)}: {c}"
+        for d, c in span["length_counts"].items()
+    )
+    lines.append(f"  This length on {span['allele_reads']}/{n} spanning reads ({af:.1%})")
+    lines.append(f"  Lengths among spanning reads: {counts}")
+    hint = zygosity_hint(af)
+    if hint:
+        lines.append(f"  From spanning reads: {hint}")
+    return lines
 
 
 def _format_filter_check(check: dict | None, applied: dict | None) -> list[str]:
@@ -439,7 +481,7 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
         else:
             evidence = compute_variant_evidence(build_mismatch_index(data.reads), target_variant)
         artifact_risk = compute_artifact_risk(
-            target_variant, evidence, data.reference_sequence, data.start
+            target_variant, evidence, data.reference_sequence, data.start, reads=data.reads
         )
     else:
         # The requested site fails the calling filters (or wasn't called at all): evaluate it

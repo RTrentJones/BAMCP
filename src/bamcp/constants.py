@@ -163,3 +163,15 @@ ARTIFACT_NEAR_END_FRACTION_THRESHOLD = 0.5
 ARTIFACT_NEAR_END_EXCESS_OVER_EXPECTED = 0.25
 ARTIFACT_LOW_MAPQ_FRACTION_THRESHOLD = 0.3
 ARTIFACT_HOMOPOLYMER_LENGTH_THRESHOLD = 4
+# Indels in a homopolymer are judged from the reads that span the whole run (a read ending
+# inside the run cannot show its length). With at least this many spanning reads the
+# homopolymer concern is raised only when the called length is rare among them: below
+# HOMOPOLYMER_STUTTER_MAX_AF (HIGH below HOMOPOLYMER_STUTTER_HIGH_AF), or no more than
+# HOMOPOLYMER_STUTTER_OTHER_RATIO times as common as the other non-reference lengths
+# (polymerase slippage spreads reads over several lengths). Fewer spanning reads fall back
+# to the run-length rule. The eval's round 4 found the length-only rule flagged every true
+# repeat indel and moved models toward calling them artifacts.
+REPEAT_SPAN_MIN_READS = 8
+HOMOPOLYMER_STUTTER_MAX_AF = 0.20
+HOMOPOLYMER_STUTTER_HIGH_AF = 0.10
+HOMOPOLYMER_STUTTER_OTHER_RATIO = 2.0

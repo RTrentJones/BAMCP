@@ -230,3 +230,57 @@ def test_an_indel_outside_the_run_gets_no_span_evidence():
     # A deletion reaching past the run's end is not inside it.
     long_del = {"position": RUN_END - 3, "ref": "T" * 3 + "G", "alt": "T"}
     assert repeat_span_evidence(long_del, _reads(ref=10), REF, START) is None
+
+
+def test_a_deletion_that_also_removes_a_flanking_base_is_not_the_called_allele():
+    # Reads deleting the anchor base plus one T: same in-run length as the called -1T, but
+    # a different allele.
+    crossing = []
+    for i in range(19):
+        crossing.append(
+            AlignedRead(
+                name=f"x{i}",
+                sequence="A" * (len(REF) - 2),
+                qualities=[30] * (len(REF) - 2),
+                cigar=f"{RUN0 - START - 1}M2D{len(REF) - (RUN0 - START) - 1}M",
+                position=START,
+                end_position=START + len(REF),
+                mapping_quality=60,
+                is_reverse=False,
+            )
+        )
+    span = repeat_span_evidence(DEL, crossing + _reads(dels=1), REF, START)
+    assert span is not None and span["allele_reads"] == 1
+    assert span["length_counts"].get("other") == 19
+
+
+def test_too_few_spanning_reads_keep_the_vaf_hint():
+    risk = _risk(INS, _reads(ins=1, short=30))
+    assert risk["repeat_span"]["spanning_reads"] == 1
+    variant = {
+        "contig": "chr1",
+        **INS,
+        "alt_count": 50,
+        "depth": 100,
+        "vaf": 0.5,
+        "artifact_risk": risk,
+    }
+    text = interpret_variant(variant, one_based=False)
+    assert "consistent with heterozygous" in text and "spanning" not in text
+    summary = {
+        "variant": {
+            "location": "chr1:1020",
+            "change": "C>CT",
+            "vaf": 0.5,
+            "alt_count": 50,
+            "depth": 100,
+        },
+        "quality_metrics": {"mean_quality": None},
+        "strand_analysis": {},
+        "position_in_read": {},
+        "artifact_assessment": risk,
+        "confidence": "medium",
+        "recommendations": [],
+    }
+    out = format_curation_summary(summary)
+    assert "Too few spanning reads" in out and "From spanning reads" not in out

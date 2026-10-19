@@ -17,6 +17,7 @@ from ..constants import (
     HIGH_CONFIDENCE_MAX_STRAND_BIAS,
     HIGH_CONFIDENCE_MIN_DEPTH,
     LOW_CONFIDENCE_MAX_STRAND_BIAS,
+    REPEAT_SPAN_MIN_READS,
 )
 from ..core.errors import ToolInputError
 from ..core.validation import validate_path, validate_variant_input
@@ -294,6 +295,12 @@ def _format_repeat_span(span: dict | None) -> list[str]:
     counts = ", ".join(f"{_length_label(d)}: {c}" for d, c in span["length_counts"].items())
     lines.append(f"  This length on {span['allele_reads']}/{n} spanning reads ({af:.1%})")
     lines.append(f"  Lengths among spanning reads: {counts}")
+    if n < REPEAT_SPAN_MIN_READS:
+        lines.append(
+            f"  Too few spanning reads (< {REPEAT_SPAN_MIN_READS}) for a genotype hint or a "
+            "read-based homopolymer assessment"
+        )
+        return lines
     hint = zygosity_hint(af)
     if hint:
         lines.append(f"  From spanning reads: {hint}")

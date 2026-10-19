@@ -174,7 +174,8 @@ FOREIGN_LENGTH = "other"
 def _net_length_in(read: AlignedRead, start: int, end: int, run_base: str) -> int | str | None:
     """Net inserted-minus-deleted bases a read carries inside reference ``[start, end)``,
     counting insertions placed at either edge; ``FOREIGN_LENGTH`` when an insertion there
-    holds any base other than ``run_base``; ``None`` unless the read's alignment covers the
+    holds any base other than ``run_base`` or a deletion also removes a flanking base;
+    ``None`` unless the read's alignment covers the
     run plus one flanking base on each side (only then is its length readable)."""
     if read.position > start - 1 or read.end_position < end + 1:
         return None
@@ -196,7 +197,10 @@ def _net_length_in(read: AlignedRead, start: int, end: int, run_base: str) -> in
         elif op == "S":
             qpos += n
         elif op == "D":
-            net -= max(0, min(rpos + n, end) - max(rpos, start))
+            inside = max(0, min(rpos + n, end) - max(rpos, start))
+            if inside and inside < n:
+                foreign = True  # also deletes a flanking base: not a run-length change
+            net -= inside
             rpos += n
         elif op == "N":
             if rpos < end and rpos + n > start:
@@ -1008,6 +1012,8 @@ def interpret_variant(variant: dict, *, one_based: bool = True) -> str:
     parts: list[str] = []
     risk = variant.get("artifact_risk")
     span = risk.get("repeat_span") if isinstance(risk, dict) else None
+    if isinstance(span, dict) and span.get("spanning_reads", 0) < REPEAT_SPAN_MIN_READS:
+        span = None  # too few reads span the run to read a genotype from them
     span_af = span.get("allele_fraction") if isinstance(span, dict) else None
     if isinstance(vaf, (int, float)) and depth:
         seen = f"{alt}/{depth} reads" if alt is not None else f"depth {depth}"

@@ -1810,7 +1810,14 @@ async def probe_site(
     if target is None:
         return None
     evidence = compute_indel_evidence(build_indel_index(loose_data.reads), target)
-    risk = compute_artifact_risk(target, evidence, loose_data.reference_sequence, loose_data.start)
+    risk = compute_artifact_risk(
+        target,
+        evidence,
+        loose_data.reference_sequence,
+        loose_data.start,
+        reads=None if loose_data.reads_truncated else loose_data.reads,
+        min_baseq=loose_data.min_baseq,
+    )
     variant = {
         **target,
         "artifact_risk": risk,

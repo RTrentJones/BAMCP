@@ -61,6 +61,9 @@ class RegionData:
     # prefix of the region's reads, so read-derived evidence is incomplete (coverage
     # and candidate VAF/depth come from uncapped passes and are unaffected).
     reads_truncated: bool = False
+    # The base-quality floor the region was fetched with, for read-derived evidence that
+    # must apply the same filter as the candidate counts.
+    min_baseq: int = 0
 
 
 # Maximum region size to prevent DoS via unbounded memory allocation
@@ -930,6 +933,7 @@ def fetch_region(
         variants=variants,
         reference_sequence=ref_seq,
         reads_truncated=reads_truncated,
+        min_baseq=min_baseq,
     )
 
 

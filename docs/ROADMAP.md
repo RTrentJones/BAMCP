@@ -55,7 +55,7 @@ six parallel implementation packages → QA acceptance against real public BAMs 
   curation summary and variant interpretations report the allele fraction among spanning reads
   and take the zygosity hint from it (mpileup-style counts made a het insertion look ~30%).
   Exploratory re-measure on the round-4 items: mpileup + BAMCP text 0.839 → 0.933 (+0.094,
-  CI +0.042 to +0.144), correct genotypes 13/90 → 45/90.
+  CI +0.042 to +0.144), correct genotypes 13/90 → 42/90.
 - [ ] **Confirm on fresh items:** a pre-registered repeat-indel round on unused main-partition
   sites, mpileup vs mpileup + BAMCP text (read-based rule).
 - [ ] **Open:** viewer: mark the position of interest / mismatch columns so a hom-alt column

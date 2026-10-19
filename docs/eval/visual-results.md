@@ -160,22 +160,24 @@ reports the allele fraction among those reads, with the zygosity hint taken from
 thresholds (≥ 8 spanning reads; concern below 20%, HIGH below 10%, or when no commoner than
 other non-reference lengths) were set from the mechanism before any model run below.
 
-Re-measured on the same 60 round-4 items: the `Tmp+Tcur` arm only, 180 new blind runs (audit
-180/180, 0 violations), with each item's `mpileup.txt` byte-identical to round 4 and the
-round-4 `Tmp` answers reused, so the only change between arms is `tcur.md`.
+Re-measured on the same 60 round-4 items: the `Tmp+Tcur` arm only, 180 blind runs on the final
+code (audit 180/180, 0 violations), with each item's `mpileup.txt` byte-identical to round 4 and
+the round-4 `Tmp` answers reused, so the only change between arms is `tcur.md`. Review fixes made
+after the first pass changed the text on 8 of the 60 items; those 24 runs were redone on the final
+text, and the other 156 keep their answers because their text is byte-identical.
 
 | arm | primary | sensitivity | specificity | true indels: called real *and* right zygosity |
 |---|---:|---:|---:|---:|
 | `Tmp` (mpileup) | 0.839 | 0.711 | 0.967 | 13 / 90 |
 | `Tmp+Tcur`, round 4 (length-only rule) | 0.817 | 0.633 | 1.000 | 13 / 90 |
 | `V+Tmp`, round 4 (viewer) | 0.811 | 0.633 | 0.989 | 27 / 90 |
-| **`Tmp+Tcur`, read-based rule** | **0.933** | **0.867** | **1.000** | **45 / 90** |
+| **`Tmp+Tcur`, read-based rule** | **0.933** | **0.867** | **1.000** | **42 / 90** |
 
 Against mpileup alone: +0.094 (95% CI +0.042 to +0.144, sign-flip p = 0.001), with the
 guardrail holding (sensitivity +0.156, specificity +0.033); all three models improve (small
 0.783 → 0.883, mid 0.900 → 0.950, large 0.833 → 0.967). Against the round-4 text arm the new
 text was right on 22 runs the old one missed and wrong on 1. Genotype calls on true indels:
-45/90 against 13/90 (McNemar 33 vs 1 discordant, p < 0.001).
+42/90 against 13/90 (McNemar 30 vs 1 discordant, p < 0.001).
 
 **Caveats.** This is exploratory, not pre-registered: the items are the ones whose round-4
 results motivated the change, the comparison arms come from an earlier session, and it is one
@@ -201,7 +203,7 @@ unused positives) is the way to confirm it.
   correct zygosity calls for the mid and large models (secondary, p = 0.004). After the
   product fix those results pointed to (read-based homopolymer risk, spanning-read allele
   fraction), BAMCP's text tools raised accuracy on the same items from 0.839 to 0.933 and
-  correct genotypes from 13/90 to 45/90 (exploratory; needs a fresh pre-registered run).
+  correct genotypes from 13/90 to 42/90 (exploratory; needs a fresh pre-registered run).
 - For BAMCP this supports the current design: the viewer is for the person; the model should
   keep getting the read evidence as text. Two product changes follow from round 4: the
   curation summary's homopolymer concern should depend on the reads, not only the run length

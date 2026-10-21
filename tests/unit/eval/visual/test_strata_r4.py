@@ -536,3 +536,16 @@ def test_select_skips_prior_sites_and_their_segdup_clusters():
         )
     assert rep["excluded_prior"]["segdup_clusters"] == 1
     assert rep["excluded_prior"]["candidates"] >= len(prior) + 1
+
+
+def test_exclusion_accepts_prior_manifests_without_clusters():
+    rows = _pool()
+    chosen, _ = real.select_r4(rows, split="pilot", seed=7, log=lambda *_: None)
+    prior = [{"chrom": r["chrom"], "site0": r["site0"]} for r in chosen[:3]]  # round-3 shape
+    again, rep = real.select_r4(rows, split="pilot", seed=7, exclude=prior, log=lambda *_: None)
+    assert rep["excluded_prior"]["segdup_clusters"] == 0
+    for r in again:
+        assert all(
+            r["chrom"] != p["chrom"] or abs(int(r["site0"]) - int(p["site0"])) >= 10_000
+            for p in prior
+        )

@@ -2497,7 +2497,8 @@ def select_r4(
         from .strata_r4 import MIN_SPACING_R4
 
         prior = list(exclude)
-        banned = {x["cluster"] for x in prior if str(x["cluster"]).startswith("sd:")}
+        # Earlier rounds' manifests may lack cluster metadata; their coordinates still count.
+        banned = {str(x["cluster"]) for x in prior if str(x.get("cluster", "")).startswith("sd:")}
         near: dict[str, list[int]] = {}
         for x in prior:
             near.setdefault(x["chrom"], []).append(int(x["site0"]))

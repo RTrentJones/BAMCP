@@ -82,8 +82,25 @@ that kept the model from producing an answer. No item is dropped after seeing re
 
 ## Manifest
 
-(added after the draw, before the first run)
+Drawn 2026-10-21 with `select-r4 --split main --seed 701 --pairs tr --knob tr_indel_pos=alt
+--knob tr_stutter_neg=alt --quota tr_indel_pos=45 --quota tr_stutter_neg=45 --exclude-manifest
+docs/eval/data/r4_tr_main_sites.jsonl` over the chr15–22 pools. Both strata filled (45 + 45, no
+shortfall), so the size rule did not apply. Frozen manifest
+[`data/r5_tr_confirm_sites.jsonl`](data/r5_tr_confirm_sites.jsonl), sha256
+**`23dab8ff8c291ef8973d53410554dc4408c97187f0460a384cff39df730b08d7`**.
+
+- `tr_indel_pos` (45): 31 insertions and 14 deletions; 30 het, 15 hom.
+- `tr_stutter_neg` (45): matched on run-length bin.
+- No site within 10 kb of a round-4 site and no shared segmental-duplication cluster
+  (218 candidates were dropped by the exclusion). Chromosomes: chr15 23, chr16 24, chr17 15,
+  chr18 12, chr19 2, chr20 10, chr21 3, chr22 1.
+- As in round 4, the position-of-interest offset differs between strata (KS p < 0.001 after 5
+  redraws): it can move absolute accuracy but not the paired contrasts.
 
 ## Amendments
 
-(none)
+- **2026-10-21, before the draw (selection speed; no effect on which sites qualify).** The
+  chr15–18 scans read the reference one repeat locus at a time over HTTPS and could not finish
+  inside this environment's two-hour job limit, so `select-r4` gained `--reference` (60ff177)
+  and the scans and the draw used a local copy of chr15–22 written from the same remote
+  analysis-set FASTA (contig lengths identical; 12 random 500 bp slices byte-identical).

@@ -180,6 +180,11 @@ def _add_r4_source_args(p: argparse.ArgumentParser) -> None:
     """Where round-4 selection reads from; every source defaults to its public URL."""
     p.add_argument("--chroms", nargs="+", default=["chr20"], help="scan-driven strata")
     p.add_argument(
+        "--reference",
+        default=None,
+        help="local GRCh38 FASTA (same contig names) instead of the remote analysis set",
+    )
+    p.add_argument(
         "--truth-chroms",
         nargs="+",
         default=None,
@@ -245,6 +250,7 @@ def _r4_rows(args: argparse.Namespace, *, checks: bool) -> tuple[list, object]:
         chroms=args.chroms,
         truth_chroms=truth_chroms,
         bam_index=args.bam_index,
+        **({"ref_path": args.reference} if getattr(args, "reference", None) else {}),
         v421=pair("v421"),
         v5q=pair("v5q"),
         cmrg=pair("cmrg"),

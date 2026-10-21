@@ -337,3 +337,22 @@ def test_ref_fetch_follows_the_builders_relative_path(tmp_path: Path, monkeypatc
     )  # elsewhere, with a run-relative path: the fallback finds it
     (run / "build.json").write_text(json.dumps({"reference": "fixtures/ref.fa"}))
     assert _build_ref_fetch(run) is not None
+
+
+def test_genotype_endpoint_joins_holm_only_when_confirmatory(tmp_path: Path) -> None:
+    def fn(lab: dict, c: str, m: str) -> dict:
+        if c == "Traw-r4+Tcur" or lab["variant_present"] != "yes":
+            return oracle_answer(lab)
+        # Baseline: right call, wrong zygosity on every true variant.
+        wrong = "hom_alt" if lab["zygosity"] != "hom_alt" else "het"
+        return {**oracle_answer(lab), "zygosity": wrong}
+
+    rs = make_r4_run_set(tmp_path, n=6, conditions=("Traw-r4", "Traw-r4+Tcur"), answer_fn=fn)
+    plain = _grade(rs)["contrasts"]["C1"]["genotype"]
+    assert plain["a_only"] == plain["n_pairs"] and plain["b_only"] == 0
+    assert plain["b_correct"] == 0 and plain["p"] < 0.001
+    assert "holm_p" not in plain
+    conf = _grade(rs, genotype_confirmatory=True)["contrasts"]["C1"]
+    assert conf["genotype"]["holm_p"] >= conf["genotype"]["p"]
+    assert conf["genotype"]["supported"]
+    assert conf["holm_p"] >= conf["p"]

@@ -852,6 +852,38 @@ def grade_runs_r4(
     return out
 
 
+def genotype_contrast(
+    rows: list[Graded], a: str, b: str, ref_fetch: RefFetch | None = None
+) -> dict[str, Any] | None:
+    """Genotype endpoint between arms ``a`` and ``b``: among true variants (positive
+    labels), the item × model × repeat pairs where each arm is :func:`genotype_correct`,
+    compared by an exact two-sided McNemar test. ``None`` when the arms share no pair."""
+    idx_b = {
+        (g.run["item"], g.run["model"], g.run["repeat"]): g
+        for g in rows
+        if g.run["condition"] == b and g.label.get("variant_present") == "yes"
+    }
+    pairs = [
+        (genotype_correct(g, ref_fetch), genotype_correct(idx_b[k], ref_fetch))
+        for g in rows
+        if g.run["condition"] == a
+        and (k := (g.run["item"], g.run["model"], g.run["repeat"])) in idx_b
+    ]
+    if not pairs:
+        return None
+    nb, nc, p = mcnemar_exact(pairs)
+    return {
+        "a": a,
+        "b": b,
+        "n_pairs": len(pairs),
+        "a_correct": sum(x for x, _ in pairs),
+        "b_correct": sum(y for _, y in pairs),
+        "a_only": nb,
+        "b_only": nc,
+        "p": p,
+    }
+
+
 def grade_run_set_r4(
     run_dir: str | Path,
     *,
@@ -862,12 +894,16 @@ def grade_run_set_r4(
     n_flips: int = N_FLIPS,
     seed: int = 0,
     ref_fetch: RefFetch | None = None,
+    genotype_confirmatory: bool = False,
 ) -> dict[str, Any]:
     """Round-4 grading → ``<out>/summary.json`` + ``<out>/results.csv``.
 
     ``exclude`` drops runs (infrastructure deviations), ``exclude_items`` drops items
     (the adjudication sensitivity analysis). The reference for allele equivalence defaults
-    to the run set's ``build.json`` ``reference``.
+    to the run set's ``build.json`` ``reference``. Each contrast also carries its
+    :func:`genotype_contrast`; with ``genotype_confirmatory`` (the confirmation round) those
+    p-values join the Holm family, and a genotype endpoint is supported when its Holm p is
+    below alpha and arm ``a`` wins more discordant pairs.
     """
     run_dir = Path(run_dir)
     out = Path(out_dir) if out_dir else run_dir / "results"
@@ -893,9 +929,19 @@ def grade_run_set_r4(
     for name, (a, b) in family.items():
         res = contrast_r4(graded, a, b, n_flips=n_flips, seed=seed)
         if res is not None:
+            res["genotype"] = genotype_contrast(graded, a, b, ref_fetch)
             contrasts[name] = res
     names = [n for n in contrasts if contrasts[n]["p"] is not None]
-    for n, hp in zip(names, holm([contrasts[n]["p"] for n in names]), strict=True):
+    geno = (
+        [n for n in names if contrasts[n]["genotype"] is not None] if genotype_confirmatory else []
+    )
+    family_p = [contrasts[n]["p"] for n in names] + [contrasts[n]["genotype"]["p"] for n in geno]
+    adjusted = holm(family_p)
+    for n, hp in zip(geno, adjusted[len(names) :], strict=True):
+        gc = contrasts[n]["genotype"]
+        gc["holm_p"] = hp
+        gc["supported"] = bool(hp < ALPHA and gc["a_only"] > gc["b_only"])
+    for n, hp in zip(names, adjusted[: len(names)], strict=True):
         c = contrasts[n]
         lo, hi = c["ci95"]
         c["holm_p"] = hp

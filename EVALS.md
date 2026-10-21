@@ -140,7 +140,34 @@ make eval-dry                         # list cases without calling a model
 # Model comparison + tool-use ablation (EVAL_RESULTS.md)
 make eval-matrix                      # real: accuracy-by-model + tool lift (needs key)
 make eval-matrix-mock                 # offline: prove the pipeline with the mock provider
+
+# Publish results to Tracer (best-effort; needs TRACER_INGEST_TOKEN to --post)
+python -m bamcp.eval.truthset --manifest tests/eval/datasets/synthetic_v1/manifest.yaml --json > syn.json
+python -m bamcp.eval.tracer truthset syn.json --out payload.json   # inspect the payload
+python -m bamcp.eval.tracer llm .eval-results .eval-results/comparison --post
 ```
+
+---
+
+## Trending in Tracer
+
+Results are published to [Tracer](https://tracer.rtrentjones.dev/projects/bamcp), the project
+signals dashboard, by `bamcp.eval.tracer`:
+
+- **Ground truth** (`mode=truthset`, one run per manifest, `suite` = dataset). The cases are the
+  gate's floors, evaluated at the thresholds the report records under `floors` (so a floor case can
+  never disagree with the gate), plus each artifact-type check and every missing or spurious call.
+  Pass rate is the fraction of floors met; precision, recall, F1, TP/FP/FN and artifact recall are
+  run metrics that Tracer charts per run.
+- **LLM harness** (`mode=llm-eval`): one run per harness directory, with each case's input and
+  expected answer joined from `test_cases.yaml`, the judge's rationale, and per-category accuracy as
+  metrics. A comparison directory publishes one run per spec (model × tools/vision arm, `suite =
+  comparison`), so Tracer's compare view sets the arms side by side.
+
+CI publishes from `ci.yml` (every push to `main`, ground truth only) and `eval-nightly.yml` (ground
+truth nightly; the LLM harness and comparison when they run). Publishing never changes a job's
+result: without the `TRACER_INGEST_TOKEN` repository secret it skips, and a failed POST is a
+warning annotation. Commit, branch, CI run URL and trigger come from the Actions environment.
 
 ---
 

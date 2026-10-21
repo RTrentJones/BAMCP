@@ -2433,6 +2433,7 @@ def select_r4(
     param_overrides: dict[str, Any] | None = None,
     pairs: Iterable[str] | None = None,
     quota_overrides: dict[str, int] | None = None,
+    exclude: Iterable[dict[str, Any]] | None = None,
     ks_min_p: float = 0.2,
     max_redraws: int = 5,
     log: Any = print,
@@ -2448,6 +2449,10 @@ def select_r4(
     POI-offset-in-run distributions of strata 3 and 4 differ (KS p <= ``ks_min_p``).
     ``quota_overrides`` (``{stratum: n}``) replaces a stratum's quota at every knob level of
     the split (the focused repeat-indel round draws 30 per TR stratum).
+    ``exclude`` (sites of earlier rounds) drops, before the draw, every candidate within
+    10 kb of one of those sites and every candidate in one of their segmental-duplication
+    clusters, so a confirmation round shares no site and no paralog family with them; a
+    1 Mb bin is only a window, so other sites in it stay eligible.
     Returns (manifest rows, report); shortfalls are reported, not raised.
     """
     import functools
@@ -2488,6 +2493,27 @@ def select_r4(
         list(pairs) if pairs is not None else ["mosaic", "tr", "segdup", "indel_adj", "anchor"]
     )
     pool = [r for r in rows if not r["exclude"] and r["partition"] == split]
+    if exclude:
+        from .strata_r4 import MIN_SPACING_R4
+
+        prior = list(exclude)
+        banned = {x["cluster"] for x in prior if str(x["cluster"]).startswith("sd:")}
+        near: dict[str, list[int]] = {}
+        for x in prior:
+            near.setdefault(x["chrom"], []).append(int(x["site0"]))
+
+        def excluded(r: dict[str, Any]) -> bool:
+            if r["cluster"] in banned:
+                return True
+            return any(abs(int(r["site0"]) - s) < MIN_SPACING_R4 for s in near.get(r["chrom"], ()))
+
+        dropped = [r for r in pool if excluded(r)]
+        report["excluded_prior"] = {
+            "sites": len(prior),
+            "segdup_clusters": len(banned),
+            "candidates": len(dropped),
+        }
+        pool = [r for r in pool if not excluded(r)]
     taken_ids: set[tuple[str, str, int]] = set()
 
     def rid(r: dict[str, Any]) -> tuple[str, str, int]:

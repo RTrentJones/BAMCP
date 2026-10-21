@@ -1075,6 +1075,10 @@ def test_r4_cli_dispatch(monkeypatch, tmp_path):
     assert calls["select"]["param_overrides"]["mosaic_caller_fp_neg"]["vaf_floor_override"] == 0.08
     assert man.exists() and (tmp_path / "m.jsonl.report.json").exists()
     assert cli.main([*argv, "--strict"]) == 1  # a short stratum fails a strict draw
+    prior = tmp_path / "prior.jsonl"
+    prior.write_text('{"chrom": "chr20", "site0": 5, "cluster": "sd:chr1:5"}\n\n')
+    assert cli.main([*argv, "--exclude-manifest", str(prior)]) == 0
+    assert calls["select"]["exclude"] == [{"chrom": "chr20", "site0": 5, "cluster": "sd:chr1:5"}]
 
     seen: dict = {}
 

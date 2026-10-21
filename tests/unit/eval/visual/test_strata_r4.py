@@ -516,3 +516,23 @@ def test_select_quota_overrides_replace_a_stratum_quota():
         ("tr_stutter_neg", "default"): 3,
         ("tr_stutter_neg", "alt"): 3,
     }
+
+
+def test_select_skips_prior_sites_and_their_segdup_clusters():
+    rows = _pool()
+    chosen, _ = real.select_r4(rows, split="pilot", seed=7, log=lambda *_: None)
+    prior = [r for r in chosen if r["stratum"] == "tr_indel_pos"]
+    sd = {"chrom": "chrX", "site0": 1, "cluster": "sd:fam1"}
+    in_sd = {**rows[0], "cluster": "sd:fam1"}
+    rows = [*rows, in_sd]
+    again, rep = real.select_r4(
+        rows, split="pilot", seed=7, exclude=[*prior, sd], log=lambda *_: None
+    )
+    for r in again:
+        assert r["cluster"] != "sd:fam1"
+        assert all(
+            r["chrom"] != p["chrom"] or abs(int(r["site0"]) - int(p["site0"])) >= 10_000
+            for p in prior
+        )
+    assert rep["excluded_prior"]["segdup_clusters"] == 1
+    assert rep["excluded_prior"]["candidates"] >= len(prior) + 1

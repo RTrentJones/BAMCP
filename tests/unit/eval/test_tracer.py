@@ -124,6 +124,24 @@ def test_truthset_payload_shape_and_metrics():
     assert "variant recall" in payload["labels"]["failures"]
 
 
+def test_truthset_payload_is_gating():
+    assert tracer.truthset_payload(_json(_report()))["gating"] is True
+
+
+def test_long_case_names_are_clipped_and_the_call_kept_whole():
+    # A 300 bp spurious insertion: the name would overflow Tracer's varchar(255) case name.
+    call = "chr1:50:A>A" + "C" * 300
+    report = _report(detection=PRF(tp=9, fp=1, fn=0), spurious_calls=[call])
+    payload = tracer.truthset_payload(_json(report, min_precision=0.5))
+    case = next(c for c in payload["cases"] if c["name"].startswith("spurious call: "))
+    assert len(case["name"]) == 255
+    assert case["name"].endswith("…")
+    assert case["output"] == call
+    assert all(len(c["name"]) <= 255 for c in payload["cases"])
+    assert tracer._case_name("short") == "short"
+    assert tracer._case_name("x" * 255) == "x" * 255
+
+
 def test_truthset_payload_tolerates_a_report_without_floors():
     data = _json(_report())
     data.pop("floors")
@@ -193,6 +211,14 @@ def test_llm_payload_joins_test_cases_and_skips_skipped(tmp_path: Path):
     assert p["metrics"]["category.lookup"] == 0.5
     assert p["labels"]["judge_model"] == "claude-haiku-5-5"
     assert p["labels"]["trigger"] == "schedule"
+    # LLM runs are trended, not gated.
+    assert p["gating"] is False
+
+
+def test_llm_payload_clips_a_long_case_name(tmp_path: Path):
+    _write_run(tmp_path / "run", [_row("q" * 400, True)])
+    p = tracer.llm_payload(tmp_path / "run")
+    assert len(p["cases"][0]["name"]) == 255
 
 
 def test_comparison_payloads_one_run_per_spec(tmp_path: Path):
@@ -230,6 +256,7 @@ def test_comparison_payloads_one_run_per_spec(tmp_path: Path):
     assert [p["model"] for p in payloads] == ["Sonnet 5.5 + tools", "Sonnet 5.5 (no tools)"]
     assert {p["suite"] for p in payloads} == {"comparison"}
     assert payloads[1]["labels"]["tools"] == "False"
+    assert all(p["gating"] is False for p in payloads)
     assert tracer.llm_dir_payloads(tmp_path / "nothing-here") == []
 
 
@@ -260,6 +287,8 @@ def test_clip_and_metric_hygiene():
     assert tracer._finite_metrics({"category.Region Analysis": 0.5}) == {
         "category.Region_Analysis": 0.5
     }
+    # ASCII identifiers only: Tracer's schema `\\w` doesn't match non-ASCII letters.
+    assert tracer._finite_metrics({"präzision": 0.9}) == {"pr_zision": 0.9}
     assert tracer._clamp01("bad") is None
     assert tracer._clamp01(1.7) == 1.0
 
@@ -285,8 +314,27 @@ def test_publish_skips_without_token(capsys: pytest.CaptureFixture[str]):
     assert "skipping" in capsys.readouterr().out
 
 
+def test_publish_skip_is_written_to_the_step_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    tracer.publish([{"mode": "truthset"}], url="https://t", token="")
+    assert summary.read_text(encoding="utf-8") == (
+        "⚠️ Tracer publish skipped: TRACER_INGEST_TOKEN unset\n"
+    )
+
+
+def test_publish_ignores_an_unwritable_step_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # A directory can't be opened for append: the summary is best-effort, publish still returns.
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path))
+    assert tracer.publish([], url="https://t", token=None) == 0
+
+
 def test_publish_posts_and_warns_on_failure(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     sent: list[Any] = []
 
@@ -301,6 +349,8 @@ def test_publish_posts_and_warns_on_failure(
         return _Resp(b'{"id":"x"}')
 
     monkeypatch.setattr(tracer.urllib.request, "urlopen", fake_urlopen)
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     n = tracer.publish(
         [{"mode": "a"}, {"mode": "b"}, {"mode": "c"}], url="https://tracer.example/", token="tok"
     )
@@ -310,6 +360,12 @@ def test_publish_posts_and_warns_on_failure(
     out = capsys.readouterr().out
     assert "HTTP 422" in out
     assert "::warning" in out
+    lines = summary.read_text(encoding="utf-8").splitlines()
+    assert lines == [
+        "✅ Tracer: published a/None/None (201)",
+        '⚠️ Tracer publish failed: b/None/None: HTTP 422: {"error":"invalid body"}',
+        "⚠️ Tracer publish failed: c/None/None: unreachable: <urlopen error dns>",
+    ]
 
 
 def test_main_writes_and_posts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

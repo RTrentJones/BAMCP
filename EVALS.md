@@ -164,10 +164,29 @@ signals dashboard, by `bamcp.eval.tracer`:
   metrics. A comparison directory publishes one run per spec (model × tools/vision arm, `suite =
   comparison`), so Tracer's compare view sets the arms side by side.
 
+Only the ground truth gates BAMCP's health in Tracer. LLM harness and comparison runs are published
+with `gating: false` ("trended, not gated"): Tracer charts their pass rate and trend and labels the
+signal *tracked*, but a model flicker never turns the project, badge or attention list red. Case
+names longer than Tracer's 255-character limit (a long spurious indel, say) are clipped with `…`;
+the full call stays in the case's output or expected value.
+
 CI publishes from `ci.yml` (every push to `main`, ground truth only) and `eval-nightly.yml` (ground
 truth nightly; the LLM harness and comparison when they run). Publishing never changes a job's
 result: without the `TRACER_INGEST_TOKEN` repository secret it skips, and a failed POST is a
 warning annotation. Commit, branch, CI run URL and trigger come from the Actions environment.
+
+**Enabling it.** Set the repository secret once, with the same value as the wrapper repo's
+`TF_VAR_TRACER_INGEST_TOKEN` (the token Tracer is deployed with):
+
+```bash
+gh secret set TRACER_INGEST_TOKEN -R RTrentJones/BAMCP
+```
+
+**Confirming it worked.** Each publish step writes its outcome to the job summary: `✅ Tracer:
+published truthset/synthetic_v1/deterministic (201)` on success, or a `⚠️ Tracer publish failed` /
+`⚠️ Tracer publish skipped: TRACER_INGEST_TOKEN unset` line otherwise. After the next push to
+`main` (or a manual `eval-nightly` dispatch), the runs appear at
+[tracer.rtrentjones.dev/projects/bamcp](https://tracer.rtrentjones.dev/projects/bamcp).
 
 ---
 

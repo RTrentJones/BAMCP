@@ -46,6 +46,9 @@ DEFAULT_URL = "https://tracer.rtrentjones.dev"
 TEXT_MAX = 16_000
 MAX_CASES = 1000
 MAX_METRICS = 64
+# Tracer stores case names in a varchar(255); a long spurious indel allele would otherwise 422 on
+# an older Tracer (newer ones clip server-side). The full call stays in the case's expected/output.
+NAME_MAX = 255
 
 # The floors meets_floors() applies without a CLI override. The truthset CLI only exposes
 # min_recall / min_precision (and records them in the report's "floors"); everything else is the
@@ -70,6 +73,10 @@ def _clip(text: Any) -> str | None:
     return s if len(s) <= TEXT_MAX else s[:TEXT_MAX] + "… [truncated]"
 
 
+def _case_name(s: str) -> str:
+    return s if len(s) <= NAME_MAX else s[: NAME_MAX - 1] + "…"
+
+
 def _clamp01(x: Any) -> float | None:
     try:
         v = float(x)
@@ -90,7 +97,8 @@ def _finite_metrics(m: Mapping[str, Any]) -> dict[str, float]:
             continue
         # Tracer metric keys are identifiers (`[\w.:/-]`, ≤80 chars); categories like
         # "Region Analysis" would otherwise 422 the whole payload.
-        key = re.sub(r"[^\w.:/-]+", "_", str(k))[:80]
+        # ASCII-only: Tracer's `\w` is ASCII, so "präzision" must not pass through as-is.
+        key = re.sub(r"[^\w.:/-]+", "_", str(k), flags=re.ASCII)[:80]
         out[key] = int(fv) if isinstance(v, int) else round(fv, 6)
         if len(out) >= MAX_METRICS:
             break
@@ -222,7 +230,7 @@ def _floor_cases(report: Mapping[str, Any], floors: Mapping[str, float]) -> list
     ]
     return [
         {
-            "name": f"floor: {name}",
+            "name": _case_name(f"floor: {name}"),
             "category": "floors",
             "passed": ok,
             "score": score if score is not None else (1.0 if ok else 0.0),
@@ -249,7 +257,7 @@ def truthset_payload(
         found = bool(chk.get("found"))
         cases.append(
             {
-                "name": f"artifact: {chk.get('site')} ({chk.get('expected_type')})",
+                "name": _case_name(f"artifact: {chk.get('site')} ({chk.get('expected_type')})"),
                 "category": "artifact checks",
                 "passed": found,
                 "score": 1.0 if found else 0.0,
@@ -264,7 +272,7 @@ def truthset_payload(
     for call in report.get("missing_calls") or []:
         cases.append(
             {
-                "name": f"missing call: {call}",
+                "name": _case_name(f"missing call: {call}"),
                 "category": "calls",
                 "passed": False,
                 "score": 0.0,
@@ -275,7 +283,7 @@ def truthset_payload(
     for call in report.get("spurious_calls") or []:
         cases.append(
             {
-                "name": f"spurious call: {call}",
+                "name": _case_name(f"spurious call: {call}"),
                 "category": "calls",
                 "passed": False,
                 "score": 0.0,
@@ -310,6 +318,8 @@ def truthset_payload(
         # The system under test is BAMCP's deterministic tool pipeline; no model is involved.
         "model": "deterministic",
         "mode": "truthset",
+        # The deterministic gate is what CI enforces, so it gates project health in Tracer.
+        "gating": True,
         "env": env,
         "suite": str(report.get("dataset") or "unknown"),
         # Pass rate = floors met. The gate is the floors; artifact/call cases are evidence.
@@ -393,7 +403,7 @@ def llm_payload(
         )
         cases.append(
             {
-                "name": name,
+                "name": _case_name(name),
                 "category": cat,
                 "input": _clip(tc.get("input")),
                 "expected": _clip(expected),
@@ -423,6 +433,9 @@ def llm_payload(
         "tool": TOOL,
         "model": model,
         "mode": "llm-eval",
+        # Trended, not gated: LLM runs (and the comparison arms built from them) are evidence of
+        # model behaviour, not a ship-gate, so a flicker never marks BAMCP failing in Tracer.
+        "gating": False,
         "env": env,
         "suite": suite or (tc_path.stem if tc_path else "test_cases"),
         "duration_ms": int(sum(durations)) if durations else None,
@@ -512,10 +525,26 @@ def post(
         return False, f"unreachable: {e}"
 
 
+def _step_summary(line: str) -> None:
+    """Append one Markdown line to the Actions job summary, when running in Actions."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(" ".join(line.split()) + "\n")  # one line, even for a multi-line error
+    except OSError:
+        pass  # the summary is a convenience; publishing must never fail on it
+
+
 def publish(payloads: Sequence[Mapping[str, Any]], *, url: str, token: str | None) -> int:
-    """POST each payload; returns the number that landed. Skips (0) without a token."""
+    """POST each payload; returns the number that landed. Skips (0) without a token.
+
+    Each outcome is also written to ``$GITHUB_STEP_SUMMARY`` so a skipped or failed publish is
+    visible on the run page, not only in the log."""
     if not token:
         print("tracer: TRACER_INGEST_TOKEN unset — skipping publish.")
+        _step_summary("⚠️ Tracer publish skipped: TRACER_INGEST_TOKEN unset")
         return 0
     ok_count = 0
     for p in payloads:
@@ -524,9 +553,11 @@ def publish(payloads: Sequence[Mapping[str, Any]], *, url: str, token: str | Non
         if ok:
             ok_count += 1
             print(f"tracer: published {label} → {msg}")
+            _step_summary(f"✅ Tracer: published {label} ({msg.split(' ', 1)[0]})")
         else:
             # A GitHub annotation, not a failure: the eval's own gate owns the exit code.
             print(f"::warning title=Tracer publish failed::{label}: {msg}")
+            _step_summary(f"⚠️ Tracer publish failed: {label}: {msg}")
     return ok_count
 
 

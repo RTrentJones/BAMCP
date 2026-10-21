@@ -105,11 +105,15 @@ jobs:
       # regression lands on the dashboard too. Best-effort: inert without TRACER_INGEST_TOKEN,
       # and never fails the job (the gate above owns pass/fail).
       - name: Publish ground truth to Tracer (main only)
-        if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           TRACER_INGEST_TOKEN: ${{ secrets.TRACER_INGEST_TOKEN }}
         run: |
-          if [ -z "$TRACER_INGEST_TOKEN" ]; then echo "TRACER_INGEST_TOKEN unset — skipping"; exit 0; fi
+          if [ -z "$TRACER_INGEST_TOKEN" ]; then
+            echo "TRACER_INGEST_TOKEN unset — skipping"
+            echo "⚠️ Tracer publish skipped: TRACER_INGEST_TOKEN unset" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           python -m bamcp.eval.truthset --manifest tests/eval/datasets/synthetic_v1/manifest.yaml \
             --json > truthset-synthetic.json || true
           python -m bamcp.eval.truthset --manifest tests/eval/datasets/indel_v1/manifest.yaml \

@@ -49,7 +49,7 @@ jobs:
         # Best-effort: trends recall/precision/F1 and each floor per night at
         # tracer.rtrentjones.dev/projects/bamcp. Skips cleanly without the secret, and a
         # failed POST is a warning, never a red job (the gate above owns pass/fail).
-        if: ${{ always() }}
+        if: ${{ !cancelled() }}
         env:
           TRACER_INGEST_TOKEN: ${{ secrets.TRACER_INGEST_TOKEN }}
         run: |
@@ -144,7 +144,7 @@ jobs:
         # One Tracer run for the harness, plus one per comparison spec (model × tools arm), so
         # Tracer's compare view sets the models side by side. Best-effort, like the truthset step.
         # mock is a --dry-run parse smoke, not a scored run, so it isn't published.
-        if: ${{ always() && steps.key.outputs.available == 'true' && github.event.inputs.provider != 'mock' }}
+        if: ${{ !cancelled() && steps.key.outputs.available == 'true' && github.event.inputs.provider != 'mock' }}
         env:
           TRACER_INGEST_TOKEN: ${{ secrets.TRACER_INGEST_TOKEN }}
         run: |

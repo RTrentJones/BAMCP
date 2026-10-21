@@ -4,6 +4,7 @@
 
 [![CI](https://github.com/RTrentJones/BAMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/RTrentJones/BAMCP/actions/workflows/ci.yml)
 [![Security](https://github.com/RTrentJones/BAMCP/actions/workflows/security.yml/badge.svg)](https://github.com/RTrentJones/BAMCP/actions/workflows/security.yml)
+[![Tracer](https://tracer.rtrentjones.dev/api/badge/bamcp)](https://tracer.rtrentjones.dev/projects/bamcp)
 [![MCP](https://img.shields.io/badge/MCP-Apps%20Extension-blue)](https://modelcontextprotocol.io)
 [![Python](https://img.shields.io/badge/python-3.10+-green)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

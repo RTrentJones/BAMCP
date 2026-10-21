@@ -187,6 +187,42 @@ run per item and model. It is the first BAMCP output in four rounds to beat the 
 a pre-registered run on fresh main-partition items (the repeat pools hold several hundred
 unused positives) is the way to confirm it.
 
+## Round 5 — confirmation on fresh items (pre-registered)
+
+Pre-registration: [`visual-preregistration-r5.md`](visual-preregistration-r5.md), committed
+(36513ba) before the item draw; manifest frozen (7866bbb) before any run. 90 sites no earlier
+round has seen: 45 true repeat-run indels and 45 matched stutter negatives from chr15–22, none
+within 10 kb of a round-4 site and none in a round-4 segmental-duplication cluster. Same rules,
+prompt, caption and models as round 4; BAMCP at `main` (24538b8). Arms: `Tmp` (mpileup) and
+`Tmp+Tcur` (+ BAMCP text tools with the spanning-read rule). 540 blind runs; audit 540/540
+answered, 0 violations, no re-runs.
+
+| arm | primary (balanced) | sensitivity | specificity | small / mid / large | true indels: real *and* right genotype |
+|---|---:|---:|---:|---|---:|
+| `Tmp` (mpileup) | 0.826 | 0.659 | 0.993 | 0.756 / 0.867 / 0.856 | 30 / 135 |
+| `Tmp+Tcur` (spanning-read rule) | **0.885** | **0.770** | **1.000** | 0.822 / 0.922 / 0.911 | **54 / 135** |
+
+**Confirmatory (Holm over two):**
+
+| | effect | 95% CI | p | Holm p | |
+|---|---:|---|---:|---:|---|
+| H1 balanced accuracy | +0.059 | +0.009 to +0.109 | 0.027 | 0.027 | **supported** (guardrail holds) |
+| H2 genotype on true indels | 54 vs 30 of 135 | discordant 33 vs 9 | 0.0003 | 0.0005 | **supported** |
+
+Both registered hypotheses are supported on fresh items. The primary effect is smaller than
+the follow-up's +0.072, as expected for a re-test, and lies inside the follow-up's interval;
+TOST at ±0.07 does not apply to a supported effect. Each model improves by a similar amount
+(+0.067, +0.056, +0.056), and none of the per-model differences is significant on its own.
+Sensitivity rises by 0.111 and specificity does not fall (0.993 → 1.000).
+
+**Where the gain is.** It is in heterozygous true indels: joint accuracy 0.52 → 0.69, with
+correct genotypes 20 → 38 of 90. Without BAMCP's text, models called a true het insertion
+`low_vaf` 27 times and `het` 20 times; with it, 24 and 38. Homozygous indels stay at 0.93 joint
+accuracy in both arms, and most correct calls on them still say `het` (29 and 24 of 42),
+because reads that stop inside a long run dilute every fraction the models see. Insertions
+gain more than deletions (joint 0.70 → 0.80 and 0.57 → 0.71; genotype 18 → 39 of 93 and
+12 → 15 of 42).
+
 ## Conclusion across rounds
 
 - On these items, **a picture of the pileup does not beat the reads as text**. Raw read text is
@@ -205,7 +241,12 @@ unused positives) is the way to confirm it.
   correct zygosity calls for the mid and large models (secondary, p = 0.004). After the
   product fix those results pointed to (read-based homopolymer risk, spanning-read allele
   fraction), BAMCP's text tools raised accuracy on the same items from 0.839 to 0.911 and
-  correct genotypes from 13/90 to 42/90 (exploratory; needs a fresh pre-registered run).
+  correct genotypes from 13/90 to 42/90 (exploratory).
+- **Confirmed on fresh items (round 5).** On 90 sites no earlier round had seen, BAMCP's text
+  tools beat raw mpileup on both pre-registered endpoints: balanced accuracy +0.059 (0.826 →
+  0.885, Holm p = 0.027) and correct genotypes on true indels 30 → 54 of 135 (Holm p < 0.001),
+  with specificity unchanged. This is the first confirmed gain from a BAMCP output in five
+  rounds, and it comes from the text tools, not the viewer.
 - For BAMCP this supports the current design: the viewer is for the person; the model should
   keep getting the read evidence as text. Two product changes follow from round 4: the
   curation summary's homopolymer concern should depend on the reads, not only the run length

@@ -18,6 +18,7 @@ Subcommands::
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -145,6 +146,14 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="measured contamination; above 0.01 moves stratum 2's VAF floor to 0.08",
     )
+    sr4.add_argument(
+        "--exclude-manifest",
+        action="append",
+        default=[],
+        metavar="JSONL",
+        help="skip sites within 10 kb of, or in a segdup cluster of, this earlier manifest's sites"
+        " (repeatable)",
+    )
     sr4.add_argument("--no-hifi", action="store_true", help="skip the HiFi label check")
     sr4.add_argument("--no-trio", action="store_true", help="skip trio recurrence")
     sr4.add_argument("--no-gnomad", action="store_true", help="skip the gnomAD AF filter")
@@ -170,6 +179,11 @@ def _parser() -> argparse.ArgumentParser:
 def _add_r4_source_args(p: argparse.ArgumentParser) -> None:
     """Where round-4 selection reads from; every source defaults to its public URL."""
     p.add_argument("--chroms", nargs="+", default=["chr20"], help="scan-driven strata")
+    p.add_argument(
+        "--reference",
+        default=None,
+        help="local GRCh38 FASTA (same contig names) instead of the remote analysis set",
+    )
     p.add_argument(
         "--truth-chroms",
         nargs="+",
@@ -236,6 +250,7 @@ def _r4_rows(args: argparse.Namespace, *, checks: bool) -> tuple[list, object]:
         chroms=args.chroms,
         truth_chroms=truth_chroms,
         bam_index=args.bam_index,
+        **({"ref_path": args.reference} if getattr(args, "reference", None) else {}),
         v421=pair("v421"),
         v5q=pair("v5q"),
         cmrg=pair("cmrg"),
@@ -327,6 +342,7 @@ def _r4_command(args: argparse.Namespace) -> int:
         param_overrides=params,
         pairs=args.pairs,
         quota_overrides={k: int(v) for k, _, v in (q.partition("=") for q in args.quota)},
+        exclude=_manifest_sites(args.exclude_manifest),
     )
     report["check_failures"] = dict(checks.counts)
     digest = real.manifest_to_jsonl(chosen, args.out)
@@ -334,6 +350,15 @@ def _r4_command(args: argparse.Namespace) -> int:
     _write_json(args.draw_report or str(args.out) + ".report.json", report)
     print(f"{len(chosen)} sites → {args.out} (sha256 {digest})")
     return 1 if args.strict and report["short"] else 0
+
+
+def _manifest_sites(paths: list[str]) -> list[dict]:
+    """Every site row in the given manifest .jsonl files."""
+    out: list[dict] = []
+    for path in paths:
+        with open(path) as fh:
+            out.extend(json.loads(line) for line in fh if line.strip())
+    return out
 
 
 def _lint(run_dir: str, bam: str | None = None) -> bool:

@@ -38,6 +38,11 @@ def add_r4_analysis_commands(sub: Any) -> None:
     g.add_argument("--reference", default=None, help="default: build.json's reference")
     g.add_argument("--n-flips", type=int, default=None)
     g.add_argument("--seed", type=int, default=0)
+    g.add_argument(
+        "--genotype-confirmatory",
+        action="store_true",
+        help="add each contrast's genotype McNemar to the Holm family (confirmation round)",
+    )
 
     c = sub.add_parser("calibrate", help="B-only pilot calibration → calibration.json")
     c.add_argument("--run-dir", action="append", default=[], help="pilot run set (repeatable)")
@@ -91,6 +96,7 @@ def _grade(args: argparse.Namespace) -> int:
         n_flips=args.n_flips or N_FLIPS,
         seed=args.seed,
         ref_fetch=fasta_ref_fetch(args.reference) if args.reference else None,
+        genotype_confirmatory=args.genotype_confirmatory,
     )
     for key, g in s["groups"].items():
         print(
@@ -105,6 +111,17 @@ def _grade(args: argparse.Namespace) -> int:
             f"p={_fmt(c['p'])} holm={_fmt(c.get('holm_p'))} guardrail="
             f"{'ok' if c['guardrail']['holds'] else 'FAIL'} → {c.get('verdict', 'n/a')}"
         )
+        gc = c.get("genotype")
+        if gc:
+            extra = ""
+            if "holm_p" in gc:
+                verdict = "supported" if gc["supported"] else "not supported"
+                extra = f" holm={_fmt(gc['holm_p'])} → {verdict}"
+            print(
+                f"{name} genotype: {gc['a_correct']}/{gc['n_pairs']} vs {gc['b_correct']}/"
+                f"{gc['n_pairs']}, discordant {gc['a_only']} vs {gc['b_only']}, "
+                f"p={_fmt(gc['p'])}{extra}"
+            )
     st = s["directional_sign_test"]
     print(
         f"directional sign test: {st['n_matched']}/{st['n_counted']} matched, "

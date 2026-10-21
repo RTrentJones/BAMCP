@@ -1075,6 +1075,10 @@ def test_r4_cli_dispatch(monkeypatch, tmp_path):
     assert calls["select"]["param_overrides"]["mosaic_caller_fp_neg"]["vaf_floor_override"] == 0.08
     assert man.exists() and (tmp_path / "m.jsonl.report.json").exists()
     assert cli.main([*argv, "--strict"]) == 1  # a short stratum fails a strict draw
+    prior = tmp_path / "prior.jsonl"
+    prior.write_text('{"chrom": "chr20", "site0": 5, "cluster": "sd:chr1:5"}\n\n')
+    assert cli.main([*argv, "--exclude-manifest", str(prior)]) == 0
+    assert calls["select"]["exclude"] == [{"chrom": "chr20", "site0": 5, "cluster": "sd:chr1:5"}]
 
     seen: dict = {}
 
@@ -1151,3 +1155,27 @@ def test_anchor_spans_reach_the_whole_poi_run(world):
     seq = "C" * 5 + "A" * 120 + "G" * 5
     fetch = lambda chrom, a, b: seq[max(0, a) : b]  # noqa: E731
     assert real.anchoring_safe(fetch, W.CHROM, 10, [(110, 111)]) is False
+
+
+def test_r4_reference_flag_reaches_resources(monkeypatch):
+    from bamcp.eval.visual import cli
+
+    seen: dict = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake_open(**kw):
+        seen.update(kw)
+        raise Stop
+
+    monkeypatch.setattr(real, "open_r4_resources", fake_open)
+    args = cli._parser().parse_args(["pools-r4", "--out", "x.json", "--reference", "local.fa"])
+    with pytest.raises(Stop):
+        cli._r4_rows(args, checks=False)
+    assert seen["ref_path"] == "local.fa"
+    args = cli._parser().parse_args(["pools-r4", "--out", "x.json"])
+    seen.clear()
+    with pytest.raises(Stop):
+        cli._r4_rows(args, checks=False)
+    assert "ref_path" not in seen  # the remote analysis set stays the default

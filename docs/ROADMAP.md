@@ -56,8 +56,11 @@ six parallel implementation packages → QA acceptance against real public BAMs 
   and take the zygosity hint from it (mpileup-style counts made a het insertion look ~30%).
   Exploratory re-measure on the round-4 items: mpileup + BAMCP text 0.839 → 0.911 (+0.072,
   CI +0.011 to +0.131), correct genotypes 13/90 → 42/90.
-- [ ] **Confirm on fresh items:** a pre-registered repeat-indel round on unused main-partition
-  sites, mpileup vs mpileup + BAMCP text (read-based rule).
+- [x] **Confirm on fresh items (round 5, pre-registered):** 90 unseen repeat-indel sites,
+  mpileup vs mpileup + BAMCP text. Balanced accuracy 0.826 → 0.885 (+0.059, Holm p = 0.027);
+  correct genotypes on true indels 30 → 54 of 135 (Holm p < 0.001). Both supported.
+- [ ] **Homozygous repeat indels are still called `het`** (24 of 42 correct calls in round 5):
+  consider a hom hint when the called length dominates the spanning reads.
 - [ ] **Open:** viewer: mark the position of interest / mismatch columns so a hom-alt column
   cannot be read as reference (round-3 failure mode); GRCh37 demo cold latency (~27 s);
   dependabot python 3.14 / mcp<3 (lockfile + API work); real-data (GIAB) eval tier.

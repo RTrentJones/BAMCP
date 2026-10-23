@@ -44,9 +44,10 @@ from .providers import (
     get_provider,
     resolve_judge,
 )
+from .report import write_reports
 from .router import InProcessRouter, RouterResult, ToolRouter
 from .runner import run_cases
-from .schema import EvalCase, EvalResult, apply_subset, load_cases
+from .schema import EvalCase, EvalResult, RunConfig, apply_subset, load_cases
 
 # Local (offline, no-network) tools the mock is willing to "call". Excludes
 # ClinVar / gnomAD / gene search, which need the network.
@@ -341,10 +342,14 @@ async def run_comparison(
     judge_provider: str | None = None,
     judge_model: str | None = None,
     rendering_mode: str = "expanded",
+    test_cases_path: Path | None = None,
 ) -> ComparisonReport:
     """Run every spec over the shared case set and aggregate the outcomes.
 
-    Specs with ``vision`` on render UI tool results at ``rendering_mode``.
+    Specs with ``vision`` on render UI tool results at ``rendering_mode``. Each spec's
+    per-case results are written to ``output_dir/<spec.slug>/`` in the single-run layout
+    (``results.json`` + ``run_config.yaml``), so the case-level evidence survives the
+    aggregate and ``bamcp.eval.tracer`` can publish one run per spec.
     """
     # Resolve every judge up front so a self-grading config fails before any spend.
     judges = [build_judge(spec, judge_provider, judge_model) for spec in specs]
@@ -362,6 +367,20 @@ async def run_comparison(
             # every tools_expected case in the tools-off arm (it has no tools to call)
             # and bias the lift; the lift must measure answer quality.
             grade_tools=False,
+        )
+        resolved = resolve_judge(spec.provider, spec.model, judge_provider, judge_model)
+        write_reports(
+            results,
+            RunConfig(
+                test_cases_path=test_cases_path or Path(),
+                output_dir=output_dir / spec.slug,
+                provider=spec.provider,
+                model=spec.model,
+                judge_provider=resolved[0] if resolved else None,
+                judge_model=resolved[1] if resolved else None,
+                router="in-process" if spec.tools else "none",
+            ),
+            output_dir / spec.slug,
         )
         spec_results.append(aggregate(spec, results))
     return ComparisonReport(spec_results)
@@ -461,6 +480,7 @@ def main(argv: list[str] | None = None) -> int:
             judge_provider=args.judge_provider,
             judge_model=args.judge_model,
             rendering_mode=args.rendering_mode,
+            test_cases_path=Path(args.test_cases),
         )
     )
 

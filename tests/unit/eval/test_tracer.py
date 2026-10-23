@@ -98,6 +98,15 @@ def test_floor_cases_agree_with_meets_floors(over: dict[str, Any], floors: dict[
     assert sum(not c["passed"] for c in floor_cases) == len(data["failures"])
 
 
+def test_floor_verdicts_use_unrounded_counts():
+    # TP=2, FP=1 → precision 0.666…, serialized as 0.6667; a 0.66668 floor fails the gate, so the
+    # exported precision floor must fail too.
+    data = _json(_report(detection=PRF(tp=2, fp=1, fn=0)), min_precision=0.66668)
+    assert data["detection"]["precision"] == 0.6667 and data["passed"] is False
+    floors = {c["name"]: c for c in tracer.truthset_payload(data)["cases"]}
+    assert floors["floor: variant precision"]["passed"] is False
+
+
 def test_truthset_payload_shape_and_metrics():
     report = _report(
         detection=PRF(tp=8, fp=1, fn=1),

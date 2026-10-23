@@ -145,9 +145,14 @@ def _floor_cases(report: Mapping[str, Any], floors: Mapping[str, float]) -> list
     """One case per check in TruthsetReport.meets_floors, in the same order and at the same
     thresholds, so the case verdicts agree with the report's own ``passed``."""
     det = report.get("detection", {})
-    tp, fn = int(det.get("tp", 0)), int(det.get("fn", 0))
-    recall, precision = float(det.get("recall", 0.0)), float(det.get("precision", 0.0))
-    art = float(report.get("artifact_recall", 0.0))
+    tp, fp, fn = int(det.get("tp", 0)), int(det.get("fp", 0)), int(det.get("fn", 0))
+    # Recompute from the raw counts exactly as PRF / metrics.artifact_recall do: the serialized
+    # rates are rounded to 4 dp, which could flip a verdict at a threshold the gate compares
+    # unrounded.
+    precision = tp / (tp + fp) if tp + fp else 1.0
+    recall = tp / (tp + fn) if tp + fn else 1.0
+    checks = report.get("artifact_checks") or []
+    art = sum(1 for c in checks if c.get("found")) / len(checks) if checks else 1.0
 
     def count(key: str) -> int:
         return len(report.get(key) or [])

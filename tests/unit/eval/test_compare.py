@@ -7,6 +7,7 @@ including the tool-vs-no-tool contrast — is proven without an API key.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -208,6 +209,11 @@ async def test_ablation_grades_no_tools_arm_on_answer_only(tmp_path, monkeypatch
     )
     report = await run_comparison([spec], [case], tmp_path)
     assert report.specs[0].passed == 1
+    # Per-spec case results are persisted in the single-run layout for the Tracer exporter.
+    spec_dir = tmp_path / spec.slug
+    rows = json.loads((spec_dir / "results.json").read_text(encoding="utf-8"))
+    assert [r["passed"] for r in rows] == [True]
+    assert (spec_dir / "run_config.yaml").is_file()
 
 
 async def test_run_comparison_refuses_self_judging_before_running(tmp_path):

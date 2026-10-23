@@ -3,8 +3,9 @@ name: Eval (nightly)
 # The deterministic ground-truth gate runs on every PR (ci.yml::eval-smoke).
 # This workflow adds the parts that are too slow or too costly for a PR gate:
 # a nightly re-run of the gate, plus an optional LLM-driven eval that only runs
-# when an API key is configured. Results are uploaded as artifacts so the
-# numbers can be tracked over time.
+# when an API key is configured. Results are uploaded as artifacts and, when the
+# TRACER_INGEST_TOKEN secret is set, published to Tracer
+# (https://tracer.rtrentjones.dev/projects/bamcp) so the numbers trend over time.
 
 on:
   schedule:
@@ -44,6 +45,16 @@ jobs:
           python -m bamcp.eval.truthset \
             --manifest tests/eval/datasets/indel_v1/manifest.yaml --min-precision 1.0 --json \
             | tee truthset-indel-report.json
+      - name: Publish ground truth to Tracer
+        # Best-effort: trends recall/precision/F1 and each floor per night at
+        # tracer.rtrentjones.dev/projects/bamcp. Skips cleanly without the secret, and a
+        # failed POST is a warning, never a red job (the gate above owns pass/fail).
+        if: ${{ !cancelled() }}
+        env:
+          TRACER_INGEST_TOKEN: ${{ secrets.TRACER_INGEST_TOKEN }}
+        run: |
+          python -m bamcp.eval.tracer truthset \
+            truthset-synthetic-report.json truthset-indel-report.json --env ci --post
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: truthset-report
@@ -129,6 +140,22 @@ jobs:
           python scripts/run_comparison.py \
             --provider "${{ github.event.inputs.provider || 'anthropic' }}" \
             --output-dir .eval-results/comparison
+      - name: Publish LLM eval + comparison to Tracer
+        # One Tracer run for the harness, plus one per comparison spec (model × tools arm), so
+        # Tracer's compare view sets the models side by side. Best-effort, like the truthset step.
+        # mock is a --dry-run parse smoke, not a scored run, so it isn't published.
+        if: ${{ !cancelled() && steps.key.outputs.available == 'true' && github.event.inputs.provider != 'mock' }}
+        env:
+          TRACER_INGEST_TOKEN: ${{ secrets.TRACER_INGEST_TOKEN }}
+        run: |
+          dirs=""
+          [ -f .eval-results/results.json ] && dirs=".eval-results"
+          [ -f .eval-results/comparison/comparison.json ] && dirs="$dirs .eval-results/comparison"
+          if [ -n "$dirs" ]; then
+            python -m bamcp.eval.tracer llm $dirs --test-cases tests/eval/test_cases.yaml --env ci --post
+          else
+            echo "no LLM results to publish"
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.key.outputs.available == 'true'
         with:

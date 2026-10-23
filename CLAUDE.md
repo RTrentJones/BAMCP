@@ -81,6 +81,10 @@ whichever editable install is on the path), restores the tracked fixtures that
   (**85%**) on 3.12. Target 85.
 - **`make eval-smoke` is a required ship-gate**, in both `ci.yml` and `greenlight-build.yml`.
   It needs `python tests/create_fixtures.py` to have run and the `[eval]` extra installed.
+- **Eval results publish to Tracer** (`bamcp.eval.tracer`, see EVALS.md "Trending in Tracer") from
+  `ci.yml` on `main` and from `eval-nightly.yml`. It is best-effort and never fails a job; it needs the
+  `TRACER_INGEST_TOKEN` repo secret. If you change `TruthsetReport.meets_floors`, keep
+  `tracer.DEFAULT_FLOORS` and `_floor_cases` in step (`test_tracer.py` pins both).
 - **The frontend has its own gate.** In `src/bamcp/static/`: `npm run typecheck`, `npm run lint`
   (eslint), `npm test` (vitest), `npm run build` — all four run in CI.
 - **mypy targets Python 3.12** (not the 3.10 floor). New imports from the `[eval]` or

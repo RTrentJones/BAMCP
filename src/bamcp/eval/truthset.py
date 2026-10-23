@@ -607,7 +607,15 @@ def main(argv: list[str] | None = None) -> int:
         min_recall=args.min_recall, min_precision=args.min_precision
     )
     if args.json:
-        print(json.dumps({**report.as_dict(), "passed": passed, "failures": failures}, indent=2))
+        # `floors` records the thresholds this verdict was computed at, so a consumer (e.g. the
+        # Tracer exporter, bamcp.eval.tracer) can reproduce each floor's verdict exactly.
+        floors = {"min_recall": args.min_recall, "min_precision": args.min_precision}
+        print(
+            json.dumps(
+                {**report.as_dict(), "passed": passed, "failures": failures, "floors": floors},
+                indent=2,
+            )
+        )
     else:
         print(_format_report(report, passed, failures))
     return 0 if passed else 1

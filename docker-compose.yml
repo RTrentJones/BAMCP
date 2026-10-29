@@ -2,8 +2,8 @@
 # BAMCP Docker Compose
 #
 # Profiles:
-#   dev   — Development: mounts source, runs tests, hot-reload friendly
-#   beta    — Pre-release: legacy SSE transport with debug logging, no auth
+#   dev     — Development: mounts source, runs tests, hot-reload friendly
+#   beta    — Pre-release: legacy SSE transport at /sse, no auth
 #   preview — Streamable HTTP at /mcp, no auth (matches prod's transport)
 #   prod    — Production: Streamable HTTP, auth enabled, locked-down
 #
@@ -115,7 +115,7 @@ services:
       - PYTHONUNBUFFERED=1
 
   # --------------------------------------------------------------------------
-  # Production: SSE transport, OAuth enabled, locked-down
+  # Production: Streamable HTTP, auth enabled, locked-down
   # --------------------------------------------------------------------------
   prod:
     build:

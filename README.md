@@ -65,8 +65,8 @@ allow-list of genomics hosts — `ftp-trace.ncbi.nlm.nih.gov`, `ftp.ncbi.nlm.nih
 `ftp.1000genomes.ebi.ac.uk`, `1000genomes.s3.amazonaws.com`, `ftp.ensembl.org`,
 `hgdownload.soe.ucsc.edu`. For anything else (or private data), run BAMCP locally
 ([Installation](#installation)). Running it yourself, remote files are off by default: set
-`BAMCP_ALLOW_REMOTE_FILES=true` (and `BAMCP_ALLOWED_REMOTE_HOSTS`) to use the `demo:` aliases or
-any URL.
+`BAMCP_ALLOW_REMOTE_FILES=true` (ideally with a `BAMCP_ALLOWED_REMOTE_HOSTS` allow-list) to use
+the `demo:` aliases or any URL.
 
 **Default filters** for candidate variants:
 `min_mapq 20`, `min_baseq 13`, `min_vaf 0.10`, `min_depth 2`, `min_alt_count 3` — every variant
@@ -142,7 +142,7 @@ Existing genomics MCP servers (bio-mcp-samtools, AWS HealthOmics MCP) provide co
                                   │ MCP Protocol (JSON-RPC over stdio/SSE/HTTP)
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                       BAMCP MCP Server (Python + FastMCP)                    │
+│                       BAMCP MCP Server (Python + FastMCP)                   │
 │                                                                             │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
 │  │                 │  │                 │  │                             │  │
@@ -150,17 +150,17 @@ Existing genomics MCP servers (bio-mcp-samtools, AWS HealthOmics MCP) provide co
 │  │                 │  │                 │  │                             │  │
 │  │  • AlignmentFile│  │  • 13 tools:    │  │  • ui://bamcp/viewer        │  │
 │  │  • fetch()      │  │  • get_variants │  │  • text/html;profile=mcp-app│  │
-│  │  • pileup()     │  │  • visualize_…  │  │  • Sandboxed iframe content │  │
+│  │  • pileup()     │  │  • visualize_*  │  │  • Sandboxed iframe content │  │
 │  │  • CRAM support │  │  • lookup_*     │  │                             │  │
 │  │                 │  │  • +9 more      │  │                             │  │
 │  └─────────────────┘  └─────────────────┘  └─────────────────────────────┘  │
 │                                                                             │
-│  ┌─────────────────┐  ┌─────────────────────────────────────────────────┐  │
-│  │  Auth (opt-in)  │  │  Config (env vars)                              │  │
-│  │  • OAuth 2.0 AS │  │  • Transport, host, port                        │  │
-│  │  • Token mgmt   │  │  • Reference path, read limits                  │  │
-│  │  • Client reg   │  │  • Auth settings                                │  │
-│  └─────────────────┘  └─────────────────────────────────────────────────┘  │
+│  ┌─────────────────┐  ┌──────────────────────────────────────────────────┐  │
+│  │  Auth (opt-in)  │  │  Config (env vars)                               │  │
+│  │  • OAuth 2.0 AS │  │  • Transport, host, port                         │  │
+│  │  • Token mgmt   │  │  • Reference path, read limits                   │  │
+│  │  • Client reg   │  │  • Auth settings                                 │  │
+│  └─────────────────┘  └──────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -389,7 +389,8 @@ Every variant-producing response (`get_variants`, `visualize_region`, `jump_to`,
 "Filters applied" line) echoes what it **actually applied** — `applied_filters` (`min_vaf`,
 `min_depth`, `min_mapq`, `min_baseq`, `min_alt_count`, `excluded_reads`, `overlapping_mates`,
 `reference_source`, `max_reads` / `reads_truncated` where reads are shown, and whether SNV and
-indel detection ran) plus a `filter_note`. This makes a variant's **absence** interpretable: an empty result
+indel detection ran); `get_variants`, `scan_variants` and the viewer tools also add a
+`filter_note`. This makes a variant's **absence** interpretable: an empty result
 at a site may reflect an aggressive `min_vaf`/`min_depth` rather than a true reference call. Loosen
 the thresholds (per-call `min_vaf`/`min_depth`, or the server defaults) to widen the net.
 
@@ -419,7 +420,8 @@ Regions are **1-based, inclusive** (samtools-style):
 - `chr1:1000` — A single base (same as `chr1:1000-1000`)
 - `1:1000-2000` — Without "chr" prefix (must match the BAM header; `list_contigs` shows the style)
 
-A region string is at most 100 characters and spans at most 1 Mbp.
+A region string is at most 100 characters and spans at most 1 Mbp (`scan_variants` accepts up to
+250 Mbp and resumes via `next_region`).
 
 ---
 
@@ -468,14 +470,6 @@ A region string is at most 100 characters and spans at most 1 Mbp.
 | `BAMCP_ALLOW_DYNAMIC_REGISTRATION` | Allow OAuth dynamic client registration | `false` |
 | `BAMCP_VERIFY_TOKEN` | M2M service token (a single bearer accepted statelessly) | None |
 
-### Telemetry Settings
-
-| Environment Variable | Description | Default |
-|---------------------|-------------|---------|
-| `BAMCP_TELEMETRY_ENABLED` | Enable tool-call telemetry | `false` |
-| `BAMCP_TELEMETRY_PATH` | JSONL output file (empty disables file output) | None |
-| `BAMCP_TELEMETRY_OTEL` | Export via OpenTelemetry (needs the `[telemetry]` extra) | `false` |
-
 **Trust model.** BAMCP is a single-instance server, not a multi-tenant identity provider. Access
 is a **service token** (`BAMCP_VERIFY_TOKEN`) — a stateless bearer that survives restarts.
 Dynamic client registration is **off by default**: an open `/register` endpoint would let any
@@ -487,6 +481,14 @@ unauthenticated request is rejected (401) and only the service token (or, with d
 registration on, a registered client's token) is authorized; the server refuses to start with
 auth on but neither `BAMCP_VERIFY_TOKEN` nor dynamic registration set. The `/__version`
 deploy-identity route is unauthenticated.
+
+### Telemetry Settings
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `BAMCP_TELEMETRY_ENABLED` | Enable tool-call telemetry | `false` |
+| `BAMCP_TELEMETRY_PATH` | JSONL output file (empty disables file output) | None |
+| `BAMCP_TELEMETRY_OTEL` | Export via OpenTelemetry (needs the `[telemetry]` extra) | `false` |
 
 ### Security Settings
 
@@ -534,7 +536,8 @@ BAMCP performs simple pileup-based candidate detection (it needs a reference):
 
 1. Count A/C/G/T at each position from reads passing `min_mapq` (unmapped, secondary,
    supplementary, duplicate and QC-fail reads excluded), counting only bases at or above `min_baseq`
-2. Calculate VAF = alt_count / depth, where depth includes reads carrying a deletion at the position
+2. Calculate VAF = alt_count / depth, where depth includes reads carrying a deletion at the
+   position (in regions up to 100 kb, where the indel pass runs)
 3. Report SNVs where VAF ≥ `min_vaf`, depth ≥ `min_depth` and alt reads ≥ `min_alt_count`
 4. Detect indels with a separate pileup pass for regions up to 100 kb (`scan_variants` is SNV-only)
 
@@ -715,7 +718,7 @@ npx @modelcontextprotocol/inspector python -m bamcp
 ### Running Tests
 
 ```bash
-# Every CI gate in one command (run before pushing; VERIFY_E2E=1 adds Playwright)
+# Every ci.yml gate except the docker build, in one command (run before pushing; VERIFY_E2E=1 adds Playwright)
 make verify
 
 # Unit + integration tests
@@ -815,7 +818,7 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 
 1. Fork the repository
 2. Create a branch off `main` (`git checkout -b feat/amazing-feature`, or `fix/...`)
-3. Write tests for your changes and run `make verify`
+3. Write tests for your changes and run `make verify` (every ci.yml gate except the docker build)
 4. Commit in conventional style (`git commit -m 'feat(viewer): amazing feature'`)
 5. Push to the branch (`git push origin feat/amazing-feature`)
 6. Open a Pull Request against `main`

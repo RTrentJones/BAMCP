@@ -85,7 +85,7 @@ make typecheck
 1. Fork the repository
 2. Create a branch off `main` (`git checkout -b feat/amazing-feature` or `fix/<slug>`; there is no `develop` branch)
 3. Write tests for your changes
-4. Ensure all checks pass (`make verify` runs every ci.yml gate: lockfile, viewer typecheck/lint/test/build, ruff format + check, mypy, tests at the 85% coverage bar, eval-smoke)
+4. Ensure all checks pass (`make verify` runs every ci.yml gate except the docker build: lockfile, viewer typecheck/lint/test/build, ruff format + check, mypy, tests at the 85% coverage bar, eval-smoke, eval-visual-dry; `VERIFY_E2E=1` adds e2e)
 5. Commit in conventional style (`git commit -m 'feat(viewer): amazing feature'`); the merged commit carries the PR number, e.g. `fix(viewer): distinct ruler tick labels at zoom (#53)`
 6. Push to the branch (`git push origin feat/amazing-feature`)
 7. Open a Pull Request against `main`

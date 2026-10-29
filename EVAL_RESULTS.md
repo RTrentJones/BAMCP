@@ -1,4 +1,10 @@
-# BAMCP model comparison & tool-use ablation
+# BAMCP model comparison & tool-use ablation harness
+
+> **No real-model results are committed here.** This file documents the comparison harness and
+> its mock-provider validation. BAMCP's committed evaluation results are elsewhere:
+> the CI ground-truth gate ([EVALS.md](EVALS.md), truth sets in `tests/eval/datasets/`), the
+> [GIAB benchmark](tests/eval/datasets/giab/GIAB_RESULTS.md), and the
+> [visual-vs-text study](docs/eval/visual-results.md).
 
 Two questions a deployment actually asks, answered by re-running the eval
 harness across configurations (`bamcp.eval.compare`):
@@ -17,28 +23,25 @@ withheld, same cases) and reports the lift.
 - **Pipeline: done and validated.** The comparison runner, aggregation, and the
   Markdown/JSON tables are implemented and proven end-to-end with the `mock`
   provider (see the validation table below and `tests/unit/eval/test_compare.py`).
-- **Real numbers: pending an API key.** A real run is a drop-in swap of the
-  provider/model — no code changes:
+- **Real-model results: not run.** No real-model comparison results are committed to this
+  repository. A real run needs an API key and no code changes:
 
   ```bash
-  export ANTHROPIC_API_KEY=...        # or OPENAI_API_KEY for --provider openai
-  make eval-matrix                     # defaults to claude-opus-4-8 + claude-sonnet-4-5
-  # or, explicitly:
-  python scripts/run_comparison.py --provider anthropic \
-    --models claude-opus-4-8 claude-sonnet-4-5 \
-    --test-cases tests/eval/test_cases.yaml \
-    --results-md EVAL_RESULTS.md
+  export ANTHROPIC_API_KEY=...
+  make eval-matrix   # models: COMPARISON_MODELS in src/bamcp/eval/models.py
   ```
 
-  Paste the generated table into the [Results](#results) section below.
+  `make eval-matrix` runs `scripts/run_comparison.py --provider anthropic --results-md
+  EVAL_RESULTS.md`; pass `--models` to choose others. The OpenAI provider is gated off in the
+  nightly workflow until the runner translates its message format.
 
 ---
 
 ## Results
 
-> _Placeholder — populated by the first real run. The tables below are the
-> **mock-provider validation**, which proves the pipeline produces a
-> well-formed, differentiated report without a key._
+> _No real-model results. The tables below are the **mock-provider validation**,
+> which proves the pipeline produces a well-formed, differentiated report without a
+> key; they say nothing about any real model._
 
 ### Pipeline validation (`--provider mock`)
 
@@ -83,5 +86,7 @@ already supports them with no changes.
 - The "no tools" arm uses a router that advertises zero tools, so the model
   genuinely cannot call BAMCP — the honest counterfactual.
 - Output: `comparison.json` (machine-readable) and a Markdown table
-  (`--results-md`). Nightly CI runs this when `ANTHROPIC_API_KEY` is present and
-  uploads both as artifacts.
+  (`--results-md`). The nightly workflow (`.github/workflows/eval-nightly.yml`) runs the
+  comparison only when the `ANTHROPIC_API_KEY` secret is configured (otherwise it reports the
+  skip), uploads `.eval-results/` as an artifact, and publishes to Tracer when
+  `TRACER_INGEST_TOKEN` is set.

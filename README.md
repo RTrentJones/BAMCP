@@ -88,6 +88,7 @@ conclude. BAMCP is a research and education tool, **not** a diagnostic test — 
 - [Tools Reference](#tools-reference)
 - [Configuration](#configuration)
 - [Implementation Details](#implementation-details)
+- [Evaluation](#evaluation)
 - [Development](#development)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
@@ -327,21 +328,24 @@ Returns coverage statistics without visualization.
 
 ## Tools Reference
 
+All 13 tools are registered in [`src/bamcp/server.py`](src/bamcp/server.py); descriptions
+below are condensed from each tool's registered description.
+
 | Tool | Description | Required Args | Optional Args |
 |------|-------------|---------------|---------------|
-| `visualize_region` | View aligned reads with interactive UI (keep windows ≤200 bp) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source` |
-| `get_variants` | Detect and return candidate variants in a region, sorted by position | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_vaf`, `min_depth`, `min_alt_count` |
-| `get_coverage` | Calculate depth statistics (fast; fine for a whole gene) | `file_path`, `region` | `reference` |
-| `list_contigs` | List chromosomes and detect genome build | `file_path` | `reference`, `include_all` |
-| `jump_to` | Jump to a specific genomic position | `file_path`, `contig`, `position` | `window`, `reference`, `vcf_path`, `variant_source` |
-| `get_region_summary` | Text summary for LLM reasoning (no UI) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_alt_count` |
-| `scan_variants` | Time-bounded SNV scan of a contig or region; a truncated scan returns `next_region` to resume | `file_path` | `contig`, `region`, `reference`, `min_vaf`, `min_depth`, `min_alt_count` |
-| `lookup_clinvar` | Look up variant in ClinVar | `chrom`, `pos`, `ref`, `alt` | `build` |
-| `lookup_gnomad` | Look up variant in gnomAD | `chrom`, `pos`, `ref`, `alt` | `build` |
-| `get_variant_curation_summary` | Detailed curation with artifact risk; evaluates the named site even when it fails the calling filters (`filter_check`) | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference`, `format` (`text`/`rubric`; `json` = `rubric`), `include_clinical` |
-| `classify_variant` | ACMG reasoning scaffold over BAM + ClinVar + gnomAD evidence | `file_path`, `chrom`, `pos`, `ref`, `alt` | `gene`, `window`, `reference` |
-| `search_gene` | Search gene by symbol (NCBI); returns build-consistent coordinates | `symbol` | `file_path`, `build` |
-| `cleanup_cache` | Clean up session's index cache | — | — |
+| `visualize_region` | Visualize aligned reads in a genomic region with the interactive MCP Apps viewer | `file_path`, `region` | `reference`, `vcf_path`, `variant_source` |
+| `get_variants` | Detect and return candidate variants in a region; each carries `artifact_risk`, confidence, concerns and a plain-language interpretation (with a zygosity hint) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_vaf`, `min_depth`, `min_alt_count` |
+| `get_coverage` | Calculate depth of coverage statistics for a region | `file_path`, `region` | `reference` |
+| `list_contigs` | Detect the genome build (GRCh37 vs GRCh38) and contig naming style and list primary chromosomes; use this first on new BAM files | `file_path` | `reference`, `include_all` |
+| `jump_to` | Jump to a specific genomic position (1-based) and view surrounding reads | `file_path`, `contig`, `position` | `window`, `reference`, `vcf_path`, `variant_source` |
+| `get_region_summary` | Text summary of a region (read count, coverage, candidate variants with interpretations) for LLM reasoning | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_alt_count` |
+| `scan_variants` | Scan a contig or region for candidate SNVs (fast, coverage-based; needs a reference); returns up to 500 candidates sorted by position, and `next_region` when the time budget truncates the scan | `file_path` | `contig`, `region`, `reference`, `min_vaf`, `min_depth`, `min_alt_count` |
+| `lookup_clinvar` | Look up a variant in ClinVar for clinical significance, review status and associated conditions (1-based, in `build`) | `chrom`, `pos`, `ref`, `alt` | `build` |
+| `lookup_gnomad` | Look up a variant in gnomAD for population allele frequency (GRCh37 queries gnomAD v2.1, GRCh38 queries v4) | `chrom`, `pos`, `ref`, `alt` | `build` |
+| `get_variant_curation_summary` | Detailed curation summary with artifact risk, quality metrics and recommendations; evaluates the named site even when it fails the calling filters (`filter_check`) | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference`, `format` (`text`/`rubric`; `json` = `rubric`), `include_clinical` |
+| `classify_variant` | Assemble BAM + ClinVar + gnomAD evidence and return an ACMG reasoning scaffold (research-grade, not a clinical determination) | `file_path`, `chrom`, `pos`, `ref`, `alt` | `gene`, `window`, `reference` |
+| `search_gene` | Search for a gene by symbol and return 1-based coordinates; pass `file_path` so the build is auto-detected | `symbol` | `file_path`, `build` |
+| `cleanup_cache` | Clear the server's downloaded BAM index files and region cache (single-client stdio servers only; shared HTTP servers expire their cache by TTL) | — | — |
 
 > **Genome build & `search_gene`.** Gene coordinates are build-specific — a GRCh38 locus in a
 > GRCh37 BAM is silently ~0.5–2 Mb off the real gene. Pass the BAM's **`file_path`** to
@@ -517,6 +521,84 @@ CRAM files require a reference FASTA for decoding. Set `BAMCP_REFERENCE` or pass
 
 ---
 
+## Evaluation
+
+BAMCP is evaluated three ways; each result below links to the document it comes from.
+Methodology for the harnesses is in [EVALS.md](EVALS.md).
+
+### CI gate: deterministic ground truth
+
+The `eval-smoke` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) generates the
+test fixtures and runs `make eval-smoke`, which scores BAMCP's own tools with
+`bamcp.eval.truthset` against two planted truth sets. It needs no LLM, API key or network, and a
+missed floor exits non-zero, which fails the job; the same `make eval-smoke` is the ship-gate in
+`greenlight-build.yml`.
+
+- [`synthetic_v1`](tests/eval/datasets/synthetic_v1/manifest.yaml): 9 planted variant alleles
+  across 8 sites, 3 reference-only negative regions and 5 artifact sites (strand bias,
+  read-position bias, low MAPQ, homopolymer, low depth), scored at the manifest's pinned
+  operating point (`min_vaf 0.02`, `min_depth 2`, `min_mapq 0`, `min_baseq 0`,
+  `min_alt_count 1`).
+- [`indel_v1`](tests/eval/datasets/indel_v1/manifest.yaml): a planted 3 bp deletion and 2 bp
+  insertion, scored with `--min-precision 1.0`.
+
+The floors are defined in `TruthsetReport.meets_floors`
+([`src/bamcp/eval/truthset.py`](src/bamcp/eval/truthset.py)): variant recall ≥ 1.0, precision ≥
+0.95 (1.0 for `indel_v1`), artifact-type recall ≥ 1.0, 0 calls in negative regions, 0 tool
+failures, 0 artifact-likelihood mismatches, 0 VAF mismatches (tolerance 0.02 in the manifest),
+0 confidence mismatches, the clean control scored below the artifact sites, and 0 sites
+reported as both high artifact likelihood and high confidence (the overconfidence guard in
+[SAFETY.md](SAFETY.md)). The same job also runs `make eval-visual-dry`, the hermetic self-test
+of the visual-study harness.
+
+### GIAB benchmark
+
+[`tests/eval/datasets/giab/GIAB_RESULTS.md`](tests/eval/datasets/giab/GIAB_RESULTS.md) scores
+BAMCP's variant detection against NIST Genome-in-a-Bottle truth for HG001 / NA12878 (v4.2.1,
+GRCh38) on chr20:1,000,000–1,060,000 (60 kb): 66 truth SNVs (59 hom, 7 het). The reads are
+simulated (30×, 100 bp, base-error rate 0.001, seed 1), so this is real variant catalog and
+sequence with simulated reads. Reproduce with `make giab-benchmark` (network-gated, not in CI).
+
+| Operating point (as named in GIAB_RESULTS.md) | min VAF | min depth | min MAPQ | Recall | Precision | F1 | FP (neg. regions) |
+|---|---|---|---|---|---|---|---|
+| A — curation sensitivity | 0.02 | 2 | 0 | 1.000 | 0.034 | 0.066 | 171 |
+| B — variant calling | 0.20 | 8 | 20 | 1.000 | 1.000 | 1.000 | 0 |
+
+Per that document: SNVs only (the 7 indel truth records in the slice are skipped), clean
+simulated reads make precision at point B an upper bound, and real-read failure modes are not
+measured. Its 2026-07-26 coordinate-basis correction explains why these numbers were briefly
+unreproducible after the variant tools moved to 1-based positions; the manifest was regenerated
+1-based and the published numbers reproduce.
+
+### Visual-vs-text study
+
+The [visual-vs-text study](docs/eval/visual-results.md) asks whether a model reviewing a
+candidate variant does better with BAMCP's viewer image, BAMCP's text output, or the reads as
+text. Rounds 1, 3, 4 and 5 were pre-registered before any model run
+([round 1](docs/eval/visual-preregistration.md), [round 3](docs/eval/visual-preregistration-r3.md),
+[round 4](docs/eval/visual-preregistration-r4.md), [round 5](docs/eval/visual-preregistration-r5.md)),
+and every run was a fresh, blind model from one of three Claude tiers (small/mid/large)
+comparing raw read text (later raw `samtools mpileup`), BAMCP's structured JSON (later its text
+tools), the viewer image, and image plus text. The pre-registered primary contrast was
+null: adding the picture to raw text changed joint accuracy by +0.038 (CI −0.026 to +0.103,
+p = 0.375) in the pilot, and none of round 3's three contrasts was supported. In round 4, on
+long-repeat indels, neither BAMCP's text tools nor the viewer raised accuracy, and both cost the
+small model true-indel accuracy (0.60 → 0.40 with the text tools, 0.37 with the viewer); after
+the resulting spanning-read change, round 5 on 90 fresh sites found BAMCP's text tools raised
+balanced accuracy from 0.826 to 0.885 (Holm p = 0.027) and correct genotypes on true indels from
+30 to 54 of 135 (Holm p < 0.001). The document's stated limits apply: rounds 1–2 used 26
+synthetic items with one run per cell, and the iteration-2 viewer gain (0.821 → 0.910) was
+measured on the items that motivated the fix, so it is an upper estimate.
+
+### Model comparison harness
+
+[EVAL_RESULTS.md](EVAL_RESULTS.md) describes the model-comparison and tool-ablation harness; no
+real-model results from it are committed.
+
+The eval harnesses and the visual-vs-text study were built by directing Claude Code.
+
+---
+
 ## Development
 
 ### Project Structure
@@ -646,9 +728,10 @@ docker compose --profile prod up
 - [x] **v0.4** — Docker infrastructure (prod/dev/beta), CI/CD
 - [x] **v0.5** — MCP Apps SDK integration (`updateModelContext`, display modes, auto-fetch)
 - [x] **v0.6** — ClinVar + gnomAD API clients, gene search, variant curation tools
-- [x] **v0.7** — Evaluation harness: deterministic ground-truth gate (variant P/R/F1, artifact-type recall) wired into CI, plus LLM + vision harness ([EVALS.md](EVALS.md)). GIAB real-data set scaffolded.
+- [x] **v0.7** — Evaluation harness: deterministic ground-truth gate (variant P/R/F1, artifact-type recall) wired into CI, plus LLM + vision harness ([EVALS.md](EVALS.md)). GIAB benchmark run on a chr20 slice with simulated reads ([results](tests/eval/datasets/giab/GIAB_RESULTS.md)); visual-vs-text study, five rounds ([results](docs/eval/visual-results.md)).
 - [ ] **v0.8** — Gene annotation track (RefSeq)
-- [ ] **v0.9** — VCF overlay, multi-sample comparison
+- [x] **v0.9 (part)** — VCF/BCF overlay (`vcf_path` + `variant_source`, including multi-sample VCF genotypes in the viewer)
+- [ ] **v0.9** — Multi-sample comparison
 - [ ] **v1.0** — Stable release
 
 ---

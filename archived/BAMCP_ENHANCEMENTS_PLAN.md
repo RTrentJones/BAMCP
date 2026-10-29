@@ -1,3 +1,5 @@
+> **Archived — superseded planning doc, kept for history only. Not current design; see [docs/ROADMAP.md](../docs/ROADMAP.md).**
+
 # BAMCP Phase 1 Enhancements — Rendering, Rubric, Telemetry, and Eval Harness
 
 ## Context
@@ -25,7 +27,7 @@ Two new viewer modes, both selectable from the existing display-mode dropdown:
 
 ### Backend changes
 
-**[src/bamcp/core/serialization.py](src/bamcp/core/serialization.py)** — `_serialize_read()` currently omits `qualities`. The `AlignedRead.qualities` list is already extracted in [src/bamcp/core/parsers.py:281](src/bamcp/core/parsers.py#L281).
+**[src/bamcp/core/serialization.py](../src/bamcp/core/serialization.py)** — `_serialize_read()` currently omits `qualities`. The `AlignedRead.qualities` list is already extracted in [src/bamcp/core/parsers.py:281](../src/bamcp/core/parsers.py#L281).
 - Add `qualities: list[int]` to the serialized read, gated on `compact=False`.
 - Payload impact: ~1 byte/base; bounded by the existing 500bp compact threshold.
 
@@ -33,23 +35,23 @@ No changes to `parsers.py` — data is already extracted.
 
 ### Viewer changes (TypeScript)
 
-**[src/bamcp/static/types.ts](src/bamcp/static/types.ts)** — extend the `ReadDisplayMode` union to `'squished' | 'compact' | 'expanded' | 'dv-strips' | 'dv-composite'`. Add `qualities?: number[]` to the read type.
+**[src/bamcp/static/types.ts](../src/bamcp/static/types.ts)** — extend the `ReadDisplayMode` union to `'squished' | 'compact' | 'expanded' | 'dv-strips' | 'dv-composite'`. Add `qualities?: number[]` to the read type.
 
-**[src/bamcp/static/constants.ts](src/bamcp/static/constants.ts)** — extend `DISPLAY_MODE_CONFIGS`:
+**[src/bamcp/static/constants.ts](../src/bamcp/static/constants.ts)** — extend `DISPLAY_MODE_CONFIGS`:
 - `dv-strips`: `{ readHeight: 36, readGap: 4 }`
 - `dv-composite`: `{ readHeight: 8, readGap: 1 }`
 
 Add two new palettes: `variantSupport` (gray → ref / alt color), `refDiffers` (black → cyan).
 
-**[src/bamcp/static/viewer.html](src/bamcp/static/viewer.html)** — add two `<option>` entries to `#display-mode-select`.
+**[src/bamcp/static/viewer.html](../src/bamcp/static/viewer.html)** — add two `<option>` entries to `#display-mode-select`.
 
-**[src/bamcp/static/renderer.ts](src/bamcp/static/renderer.ts)** — split `renderReads()` (currently monolithic, lines 471–699). Branch by mode and add:
+**[src/bamcp/static/renderer.ts](../src/bamcp/static/renderer.ts)** — split `renderReads()` (currently monolithic, lines 471–699). Branch by mode and add:
 - `renderDeepVariantStrips(ctx, read, x, y, scale, activeVariantPos)` — six per-base strips.
 - `renderDeepVariantComposite(ctx, read, x, y, scale, activeVariantPos)` — packed RGB row with a single packing helper for clarity.
 
-**[src/bamcp/static/state.ts](src/bamcp/static/state.ts)** — add `activeVariantPosition: number | null` to settings. Variant-panel clicks set this; renderer reads it for the "supports-variant" channel.
+**[src/bamcp/static/state.ts](../src/bamcp/static/state.ts)** — add `activeVariantPosition: number | null` to settings. Variant-panel clicks set this; renderer reads it for the "supports-variant" channel.
 
-**[src/bamcp/static/mcp-app.ts](src/bamcp/static/mcp-app.ts)** — extend the existing display-mode handler (lines 403–410) to pass through the new modes (no special-case logic; dimensions come from `DISPLAY_MODE_CONFIGS`).
+**[src/bamcp/static/mcp-app.ts](../src/bamcp/static/mcp-app.ts)** — extend the existing display-mode handler (lines 403–410) to pass through the new modes (no special-case logic; dimensions come from `DISPLAY_MODE_CONFIGS`).
 
 ### Build
 
@@ -59,19 +61,19 @@ Add two new palettes: `variantSupport` (gray → ref / alt color), `refDiffers` 
 
 ## Feature 2 — Structured Rubric Output for `get_variant_curation_summary`
 
-The structured dict is already assembled at [src/bamcp/analysis/curation.py:209-237](src/bamcp/analysis/curation.py#L209) before being passed through `format_curation_summary()` (line 240). Expose it as opt-in.
+The structured dict is already assembled at [src/bamcp/analysis/curation.py:209-237](../src/bamcp/analysis/curation.py#L209) before being passed through `format_curation_summary()` (line 240). Expose it as opt-in.
 
 ### Changes
 
-**[src/bamcp/analysis/curation.py](src/bamcp/analysis/curation.py)** — modify `handle_get_variant_curation_summary`:
+**[src/bamcp/analysis/curation.py](../src/bamcp/analysis/curation.py)** — modify `handle_get_variant_curation_summary`:
 - Add `format: Literal["text", "rubric"] = "text"` kwarg.
 - When `format == "rubric"`: skip `format_curation_summary()`; return structured dict as JSON in the tool content envelope.
 - Add `rubric_version: "1.0"` so the eval harness can pin behavior.
 - Add a `scores` sub-dict with normalized 0–1 floats for: `vaf_quality`, `depth_quality`, `strand_balance`, `mapq_quality`, `position_quality`, `artifact_risk_inverse`. All computable from existing histograms — no new evidence pipeline.
 
-**[src/bamcp/core/tools.py](src/bamcp/core/tools.py)** — propagate the `format` arg through the handler.
+**[src/bamcp/core/tools.py](../src/bamcp/core/tools.py)** — propagate the `format` arg through the handler.
 
-**[src/bamcp/server.py](src/bamcp/server.py)** — add `format: str = "text"` to the FastMCP wrapper (lines 211–231). FastMCP infers schema from signature.
+**[src/bamcp/server.py](../src/bamcp/server.py)** — add `format: str = "text"` to the FastMCP wrapper (lines 211–231). FastMCP infers schema from signature.
 
 ---
 
@@ -81,7 +83,7 @@ Wrap every handler in `core/tools.py` with a telemetry decorator. JSONL is alway
 
 ### New file
 
-**[src/bamcp/middleware/telemetry.py](src/bamcp/middleware/telemetry.py)** — new module exporting:
+**[src/bamcp/middleware/telemetry.py](../src/bamcp/middleware/telemetry.py)** — new module exporting:
 
 ```python
 def telemetry_wrapper(tool_name: str):
@@ -90,7 +92,7 @@ def telemetry_wrapper(tool_name: str):
     Always writes JSONL when enabled; emits an OTel span when OTel is configured."""
 ```
 
-Event schema (matches `tool_invocations` table from [archived/BAMCP_EVAL_HARNESS.md:848-857](archived/BAMCP_EVAL_HARNESS.md#L848-L857)):
+Event schema (matches `tool_invocations` table from [archived/BAMCP_EVAL_HARNESS.md:848-857](BAMCP_EVAL_HARNESS.md#L848-L857)):
 
 ```json
 {
@@ -115,16 +117,16 @@ Sanitization helper (single function):
 
 ### Config
 
-**[src/bamcp/config.py](src/bamcp/config.py)** — extend `BAMCPConfig` and `from_env`, following the existing `*_enabled` pattern (lines 52–54, 136–137):
+**[src/bamcp/config.py](../src/bamcp/config.py)** — extend `BAMCPConfig` and `from_env`, following the existing `*_enabled` pattern (lines 52–54, 136–137):
 - `telemetry_enabled: bool = False` ← `BAMCP_TELEMETRY_ENABLED`
 - `telemetry_path: str = ""` ← `BAMCP_TELEMETRY_PATH` (empty disables JSONL output)
 - `telemetry_otel_enabled: bool = False` ← `BAMCP_TELEMETRY_OTEL`
 
 ### Wiring
 
-**[src/bamcp/core/tools.py](src/bamcp/core/tools.py)** — apply `@telemetry_wrapper("<tool_name>")` to each `handle_*` handler (~11 handlers, mechanical edit).
+**[src/bamcp/core/tools.py](../src/bamcp/core/tools.py)** — apply `@telemetry_wrapper("<tool_name>")` to each `handle_*` handler (~11 handlers, mechanical edit).
 
-**[src/bamcp/__main__.py](src/bamcp/__main__.py)** — initialize OTel tracer at startup when `config.telemetry_otel_enabled`. Uses `opentelemetry-sdk` + `opentelemetry-exporter-otlp-proto-http`, in a `[telemetry]` extras group so the base install stays slim.
+**[src/bamcp/__main__.py](../src/bamcp/__main__.py)** — initialize OTel tracer at startup when `config.telemetry_otel_enabled`. Uses `opentelemetry-sdk` + `opentelemetry-exporter-otlp-proto-http`, in a `[telemetry]` extras group so the base install stays slim.
 
 ---
 
@@ -134,7 +136,7 @@ A scriptable benchmark runner mirroring MARRVEL-MCP's eval CLI so the two system
 
 ### Schema (test cases)
 
-**[tests/eval/test_cases.yaml](tests/eval/test_cases.yaml)** — YAML adopting MARRVEL-MCP's exact field names (`name`, `category`, `input`, `expected`) plus two BAMCP-specific optional fields:
+**[tests/eval/test_cases.yaml](../tests/eval/test_cases.yaml)** — YAML adopting MARRVEL-MCP's exact field names (`name`, `category`, `input`, `expected`) plus two BAMCP-specific optional fields:
 
 ```yaml
 - case:
@@ -152,7 +154,7 @@ A scriptable benchmark runner mirroring MARRVEL-MCP's eval CLI so the two system
 
 ### Runner
 
-**[scripts/run_eval.py](scripts/run_eval.py)** — new CLI mirroring MARRVEL's flags:
+**[scripts/run_eval.py](../scripts/run_eval.py)** — new CLI mirroring MARRVEL's flags:
 
 ```
 python scripts/run_eval.py [--cache] [--subset N-M] \
@@ -178,7 +180,7 @@ This matches what MARRVEL-MCP appears to use (its README leaves grading unspecif
 
 ### Provider abstraction
 
-**[src/bamcp/eval/](src/bamcp/eval/)** — new package:
+**[src/bamcp/eval/](../src/bamcp/eval/)** — new package:
 - `runner.py` — main loop (case → LLM → tool calls → grading → result).
 - `providers.py` — `AnthropicProvider`, `OpenAIProvider`, `OpenRouterProvider` (thin wrappers around their SDKs; each implements `chat_with_tools(messages, tools) -> response`).
 - `grader.py` — deterministic + LLM-judge graders.
@@ -208,7 +210,7 @@ Install: `pip install -e ".[eval]"` (mirrors MARRVEL's `uv sync --extra eval`).
 
 ### Makefile
 
-**[Makefile](Makefile)** — add:
+**[Makefile](../Makefile)** — add:
 ```make
 eval: build-viewer
     python scripts/run_eval.py --output-dir .eval-results
@@ -228,7 +230,7 @@ eval-marrvel-compat:
 
 ## Feature 5 — Full Coverage Discipline
 
-Existing setup: `[tool.coverage.report] fail_under = 80` in [pyproject.toml:89](pyproject.toml#L89), `make test` runs everything except e2e, `make coverage` produces HTML.
+Existing setup: `[tool.coverage.report] fail_under = 80` in [pyproject.toml:89](../pyproject.toml#L89), `make test` runs everything except e2e, `make coverage` produces HTML.
 
 This phase preserves that floor and *applies it to all new code* (which means real tests, not coverage-shy stubs).
 
@@ -265,35 +267,35 @@ Extend `tests/create_fixtures.py` to generate at least one small BAM with a know
 
 | File | Change |
 |------|--------|
-| [src/bamcp/core/serialization.py](src/bamcp/core/serialization.py) | Add `qualities` field |
-| [src/bamcp/static/types.ts](src/bamcp/static/types.ts) | Extend `ReadDisplayMode`; add `qualities?` to read type |
-| [src/bamcp/static/constants.ts](src/bamcp/static/constants.ts) | DV mode configs + 2 new palettes |
-| [src/bamcp/static/viewer.html](src/bamcp/static/viewer.html) | 2 dropdown options |
-| [src/bamcp/static/renderer.ts](src/bamcp/static/renderer.ts) | Split `renderReads`; add DV strip + composite functions |
-| [src/bamcp/static/state.ts](src/bamcp/static/state.ts) | `activeVariantPosition` |
-| [src/bamcp/static/mcp-app.ts](src/bamcp/static/mcp-app.ts) | Wire variant click → active position |
-| [src/bamcp/analysis/curation.py](src/bamcp/analysis/curation.py) | `format` param + `scores` dict |
-| [src/bamcp/core/tools.py](src/bamcp/core/tools.py) | `@telemetry_wrapper` on all handlers; pass `format` |
-| [src/bamcp/server.py](src/bamcp/server.py) | Add `format` to curation tool |
-| [src/bamcp/middleware/telemetry.py](src/bamcp/middleware/telemetry.py) | **NEW** decorator + JSONL + OTel hook |
-| [src/bamcp/config.py](src/bamcp/config.py) | 3 telemetry env vars |
-| [src/bamcp/__main__.py](src/bamcp/__main__.py) | OTel tracer init |
-| [src/bamcp/eval/](src/bamcp/eval/) | **NEW** package — `runner.py`, `providers.py`, `grader.py`, `report.py`, `comparison.py` |
-| [scripts/run_eval.py](scripts/run_eval.py) | **NEW** CLI entry |
-| [tests/eval/test_cases.yaml](tests/eval/test_cases.yaml) | **NEW** benchmark cases (MARRVEL-compatible schema) |
-| [tests/create_fixtures.py](tests/create_fixtures.py) | Add TP53 variant fixture |
-| [pyproject.toml](pyproject.toml) | `[eval]` + `[telemetry]` extras; `branch = true` |
-| [Makefile](Makefile) | `eval`, `eval-cached`, `eval-compare`, `coverage-strict` targets |
-| [.github/workflows/ci.yml](.github/workflows/ci.yml) | Run `make coverage-strict` on touched paths |
+| [src/bamcp/core/serialization.py](../src/bamcp/core/serialization.py) | Add `qualities` field |
+| [src/bamcp/static/types.ts](../src/bamcp/static/types.ts) | Extend `ReadDisplayMode`; add `qualities?` to read type |
+| [src/bamcp/static/constants.ts](../src/bamcp/static/constants.ts) | DV mode configs + 2 new palettes |
+| [src/bamcp/static/viewer.html](../src/bamcp/static/viewer.html) | 2 dropdown options |
+| [src/bamcp/static/renderer.ts](../src/bamcp/static/renderer.ts) | Split `renderReads`; add DV strip + composite functions |
+| [src/bamcp/static/state.ts](../src/bamcp/static/state.ts) | `activeVariantPosition` |
+| [src/bamcp/static/mcp-app.ts](../src/bamcp/static/mcp-app.ts) | Wire variant click → active position |
+| [src/bamcp/analysis/curation.py](../src/bamcp/analysis/curation.py) | `format` param + `scores` dict |
+| [src/bamcp/core/tools.py](../src/bamcp/core/tools.py) | `@telemetry_wrapper` on all handlers; pass `format` |
+| [src/bamcp/server.py](../src/bamcp/server.py) | Add `format` to curation tool |
+| [src/bamcp/middleware/telemetry.py](../src/bamcp/middleware/telemetry.py) | **NEW** decorator + JSONL + OTel hook |
+| [src/bamcp/config.py](../src/bamcp/config.py) | 3 telemetry env vars |
+| [src/bamcp/__main__.py](../src/bamcp/__main__.py) | OTel tracer init |
+| [src/bamcp/eval/](../src/bamcp/eval/) | **NEW** package — `runner.py`, `providers.py`, `grader.py`, `report.py`, `comparison.py` |
+| [scripts/run_eval.py](../scripts/run_eval.py) | **NEW** CLI entry |
+| [tests/eval/test_cases.yaml](../tests/eval/test_cases.yaml) | **NEW** benchmark cases (MARRVEL-compatible schema) |
+| [tests/create_fixtures.py](../tests/create_fixtures.py) | Add TP53 variant fixture |
+| [pyproject.toml](../pyproject.toml) | `[eval]` + `[telemetry]` extras; `branch = true` |
+| [Makefile](../Makefile) | `eval`, `eval-cached`, `eval-compare`, `coverage-strict` targets |
+| [.github/workflows/ci.yml](../.github/workflows/ci.yml) | Run `make coverage-strict` on touched paths |
 
 ## Reused Patterns / Utilities
 
-- **Display-mode dropdown precedent** — [viewer.html:602-606](src/bamcp/static/viewer.html#L602-L606) + [DISPLAY_MODE_CONFIGS](src/bamcp/static/constants.ts#L46-L50). New modes drop in.
-- **Structured-dict-before-text pattern** — already at [curation.py:209-237](src/bamcp/analysis/curation.py#L209-L237). Rubric mode is "skip the formatter".
-- **Config flag pattern** — `BAMCP_<FEATURE>_ENABLED` at [config.py:52-54, 136-137](src/bamcp/config.py#L52). Telemetry follows.
-- **Handler signature** — `async def handle_<x>(args, config) -> dict` at [tools.py:197-217](src/bamcp/core/tools.py#L197). Telemetry decorator wraps this exact signature.
-- **Async-safe TTL cache** — [clients/ttl_cache.py](src/bamcp/clients/ttl_cache.py) for any judge-verdict caching in eval grader.
-- **OAuth-secured HTTP transport** already in [middleware/auth.py](src/bamcp/middleware/auth.py) — eval runner can target either stdio or HTTPS transports.
+- **Display-mode dropdown precedent** — [viewer.html:602-606](../src/bamcp/static/viewer.html#L602-L606) + [DISPLAY_MODE_CONFIGS](../src/bamcp/static/constants.ts#L46-L50). New modes drop in.
+- **Structured-dict-before-text pattern** — already at [curation.py:209-237](../src/bamcp/analysis/curation.py#L209-L237). Rubric mode is "skip the formatter".
+- **Config flag pattern** — `BAMCP_<FEATURE>_ENABLED` at [config.py:52-54, 136-137](../src/bamcp/config.py#L52). Telemetry follows.
+- **Handler signature** — `async def handle_<x>(args, config) -> dict` at [tools.py:197-217](../src/bamcp/core/tools.py#L197). Telemetry decorator wraps this exact signature.
+- **Async-safe TTL cache** — [clients/ttl_cache.py](../src/bamcp/clients/ttl_cache.py) for any judge-verdict caching in eval grader.
+- **OAuth-secured HTTP transport** already in [middleware/auth.py](../src/bamcp/middleware/auth.py) — eval runner can target either stdio or HTTPS transports.
 
 ## Verification
 
@@ -341,8 +343,8 @@ BAMCP_TELEMETRY_OTEL=true BAMCP_TELEMETRY_ENABLED=true \
 
 ## Out of Scope (Phase 2)
 
-- SpliceAI / AlphaMissense annotation clients (follow [clients/clinvar.py](src/bamcp/clients/clinvar.py) pattern).
+- SpliceAI / AlphaMissense annotation clients (follow [clients/clinvar.py](../src/bamcp/clients/clinvar.py) pattern).
 - ACMG criterion scaffolding (will read evidence dict + external lookups).
 - MARRVEL-MCP interop / `/manifest.json` discovery endpoint.
 - Auto-mode selection for DV in `visualize_region` (Phase 1 is manual toggle only).
-- Continuous-improvement loop from [archived/BAMCP_EVAL_HARNESS.md:591-654](archived/BAMCP_EVAL_HARNESS.md#L591-L654) (scaffold corrections fed back from eval data). Phase 1 produces the data; the loop is Phase 2.
+- Continuous-improvement loop from [archived/BAMCP_EVAL_HARNESS.md:591-654](BAMCP_EVAL_HARNESS.md#L591-L654) (scaffold corrections fed back from eval data). Phase 1 produces the data; the loop is Phase 2.

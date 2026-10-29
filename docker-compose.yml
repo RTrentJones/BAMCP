@@ -3,14 +3,16 @@
 #
 # Profiles:
 #   dev   — Development: mounts source, runs tests, hot-reload friendly
-#   beta  — Pre-release: SSE transport with debug logging, no auth
-#   prod  — Production: SSE transport, OAuth enabled, locked-down
+#   beta    — Pre-release: legacy SSE transport with debug logging, no auth
+#   preview — Streamable HTTP at /mcp, no auth (matches prod's transport)
+#   prod    — Production: Streamable HTTP, auth enabled, locked-down
 #
 # Usage:
 #   docker compose --profile dev run test    # Run unit+integration tests
 #   docker compose --profile dev run e2e     # Run Playwright E2E tests
 #   docker compose --profile beta up         # Run beta server on :8000
-#   docker compose --profile prod up         # Run production server on :8000
+#   docker compose --profile preview up      # Run preview server on :8000
+#   BAMCP_VERIFY_TOKEN=<token> docker compose --profile prod up   # Run production server on :8000
 # ============================================================================
 
 services:

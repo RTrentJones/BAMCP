@@ -140,7 +140,7 @@ def _in_intervals(pos: int, starts: list[int], intervals: list[tuple[int, int]])
 def fetch_truth_snvs(
     chrom: str, start: int, end: int, intervals: list[tuple[int, int]]
 ) -> tuple[list[TruthSNV], int]:
-    """Stream the GIAB truth VCF for PASS biallelic SNVs inside the BED.
+    """Stream the GIAB truth VCF for biallelic SNVs inside the high-confidence BED.
 
     Returns ``(snvs, skipped_indels)``. The indel count is reported rather than
     silently dropped: an unstated skip would make the truth set look complete
@@ -341,7 +341,9 @@ def write_manifest(
         "    Semi-synthetic. Measures recovery of real variant structures and",
         "    noise rejection; NOT robustness to real alignment/mapping artifacts.",
         "",
-        f"detection_region: {chrom}:{start}-{end}",
+        # Region strings are 1-based inclusive (samtools-style), as BAMCP's parse_region
+        # reads them since #63; the generator's own windows are 0-based half-open.
+        f"detection_region: {chrom}:{start + 1}-{end}",
         "",
         "variant_sites:",
     ]
@@ -359,7 +361,7 @@ def write_manifest(
             # The note is quoted: an unquoted comma would make YAML parse the
             # tail as a second key ("no truth SNV": null) inside the mapping.
             lines.append(
-                f"  - {{region: '{chrom}:{n_start}-{n_end}', "
+                f"  - {{region: '{chrom}:{n_start + 1}-{n_end}', "
                 f"note: 'high-confidence, no truth SNV'}}"
             )
     else:

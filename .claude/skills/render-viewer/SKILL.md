@@ -20,15 +20,15 @@ Skip it for pure-Python changes that don't touch the static directory.
 
 ## Workflow
 
-1. **Rebuild the viewer.** `npm run build` regenerates `dist/viewer.html`, which is what the renderer serves. The script warns when source TS files are newer than the dist bundle:
+1. **Rebuild the viewer.** `make build-viewer` regenerates `dist/viewer.html` (what the renderer serves) and stamps the sources' content hash; the `render-viewer*` targets run it automatically. The script warns when the sources' hash no longer matches the stamp (falling back to an mtime check if unstamped):
 
    ```bash
-   cd src/bamcp/static && npm run build && cd -
+   make build-viewer
    ```
 
    If the build emits TS errors, fix those first — they're real type issues the renderer would crash on.
 
-2. **Render the modes you care about.** For renderer.ts changes, default to rendering all three rendering modes side-by-side:
+2. **Render the modes you care about.** For renderer.ts changes, default to rendering the three modes `render-viewer-all-modes` covers (expanded, dv-strips, dv-composite) side-by-side:
 
    ```bash
    make render-viewer-all-modes \
@@ -68,5 +68,5 @@ Skip it for pure-Python changes that don't touch the static directory.
 
 ## Underlying tools
 
-- `scripts/render_viewer.py` — full CLI with `--bam`, `--ui-init-json`, `--mode`, `--active-variant`, `--width`, `--out`, `--print-path-only`.
+- `scripts/render_viewer.py` — thin entry point for `src/bamcp/eval/render_cli.py`, the full CLI: `--bam`/`--ui-init-json`, `--reference`, `--region`, `--mode` (squished/compact/expanded/dv-strips/dv-composite), `--active-variant`, `--width`, `--height`, `--blind`, `--clip`, `--out`, `--print-path-only`.
 - `src/bamcp/eval/renderer.py` — the `ViewerRenderer` class that the CLI wraps. Same class powers the visual eval harness, so what you see in `render-viewer` is exactly what the eval LLM sees.

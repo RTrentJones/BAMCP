@@ -1,3 +1,5 @@
+> **Archived — superseded planning doc, kept for history only. Not current design; see [docs/ROADMAP.md](../docs/ROADMAP.md).**
+
 # Plan: Standalone Web Viewer at `/standalone`
 
 ## Context

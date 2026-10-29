@@ -109,3 +109,11 @@ insertions called stutter by the small model.
 where short-read callers fail most (low-fraction mosaic, caller false positives, segmental
 duplications, homopolymer indels), current models are at 0.94–0.96 with either a text summary or
 raw mpileup. A 0.70 text baseline exists only for long-homopolymer indel genotyping.
+
+## Corrections (2026-10-29)
+
+- Section *Go/no-go*: the `tr_indel_pos` alternative-knob cell had 4 errors (8 of 12 runs right),
+  not 5, and all 4 called a true heterozygous insertion stutter (`no` / `artifact` /
+  `homopolymer_indel`), as did the stratum's one default-knob error. Read "all 4 errors called a
+  true insertion stutter". No result changes.
+

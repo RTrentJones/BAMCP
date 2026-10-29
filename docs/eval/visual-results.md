@@ -19,7 +19,11 @@ over models, 95% CIs by item-cluster bootstrap.
 | `V` — viewer image only | 0.821 | 0.705–0.923 | 0.147 |
 | `V+Traw` — image + raw text | 0.987 | 0.962–1.000 | 0.051 |
 
-**Primary contrast (V+Traw − Traw): +0.038, CI −0.026 to +0.103, p = 0.375. Not significant.**
+**Primary contrasts (both pre-registered):**
+- **H1 (V+Traw − Traw): +0.038, CI −0.026 to +0.103, p = 0.375. Not significant.**
+- **H2 (V − Tjson): −0.038, CI −0.167 to +0.077, McNemar 6 vs 9 discordant, p = 0.61. Not
+  significant.**
+
 Text alone is near the ceiling on these items.
 
 The image-only arm failed hom-alt SNVs (0.17) and low-base-quality artifacts (0.33). Root cause
@@ -65,7 +69,7 @@ Pre-registration: [`visual-preregistration-r3.md`](visual-preregistration-r3.md)
 - **S — fresh synthetic:** 36 never-seen items (seed 2, all 18 case types × 2), `Traw`, `Tjson`,
   `V`; 324 runs.
 - **R — real reads:** 36 sites from the GIAB HG002 60x BAM on chr20, truth from GIAB v4.2.1
-  (26 truth variants, half of them indels or SNVs in repeats; 8 noisy negatives where ≥ 3 reads
+  (26 truth variants: 10 indels, 4 SNVs in repeats and 12 SNVs outside repeats; 8 noisy negatives where ≥ 3 reads
   disagree with a reference call; 2 clean negatives), blinded onto re-indexed contigs; `Traw`,
   `Tjson`, `V`, `V+Traw`; 432 runs. Site manifest [`data/r3_real_sites.jsonl`](data/r3_real_sites.jsonl).
 
@@ -87,7 +91,7 @@ excluding it changes nothing reported below).
 | C3 R: `V` vs `Tjson` | −0.056 | −0.139 to +0.019 | 0.210 | 0.50 | not supported |
 
 **Secondary (descriptive):** raw read text beats the picture alone on both tiers (S −0.093,
-CI −0.167 to −0.028, p = 0.006; R −0.120, CI −0.204 to −0.056, p = 0.001), and beats structured
+CI −0.167 to −0.028, p = 0.006; R −0.120, CI −0.204 to −0.046, p = 0.001), and beats structured
 JSON (S −0.157; R −0.065). Image-only accuracy by model tier: S 0.806 / 0.861 / 1.000,
 R 0.694 / 0.944 / 0.972 (small / mid / large). Among real variants, `V` got zygosity right 85%
 and the allele 80% of the time, against 96% and 99% for `Traw`. Brier: `Traw` 0.042 / 0.034,
@@ -136,19 +140,21 @@ twice, identically).
 Both null, and neither is shown equivalent (TOST just misses). Both additions cost sensitivity
 (0.711 → 0.633) and both fail the pre-registered guardrail; the loss is concentrated in the
 small model (true-indel accuracy 0.60 → 0.40 with the BAMCP text, 0.37 with the viewer), while
-the mid and large models are flat or slightly better. C1's predicted direction (no gain or harm,
+the mid model's true-indel accuracy falls a little (0.87 → 0.80 and 0.83) and the large model's
+rises (0.67 → 0.70 in both). C1's predicted direction (no gain or harm,
 because the shipped curation summary raises a HIGH homopolymer concern on every indel in a run
 ≥ 4 bp) is consistent with the result. The baseline landed at 0.84, not the 0.71 the pilot
 cells suggested: the pilot's 12-run cells overstated the difficulty.
 
 **Secondary: the viewer improved genotype calls.** Counting a true indel as fully right only
-when it is called real *and* its zygosity is right, the viewer arm got **27 / 90** against
+when it is called real with the right zygosity, variant type and allele (`genotype_correct`), the viewer arm got **27 / 90** against
 **13 / 90** for mpileup alone (exact McNemar on item × model pairs, 18 vs 4 discordant,
 p = 0.004; the BAMCP text arm 13 / 90). The gain is in the mid and large models (6 → 12,
 4 → 13). Mechanism: in a long run, mpileup's per-column counts make a heterozygous insertion
-look like a ~30% minority, and models called it `low_vaf` (30 of 41 het calls in `Tmp`); with
-the picture they called it `het` (23 of 32). Homozygous indels were called `het` in every arm
-(reads that stop inside the run dilute the fraction). This is a pre-specified secondary
+look like a ~30% minority, and models called it `low_vaf` (30 of the 41 `Tmp` runs that gave a
+true het indel a zygosity); with the picture they called it `het` (23 of 32). Homozygous indels
+were mostly called `het` in every arm (22 of 30 runs in each; `hom_alt` only 2, 0 and 4 times),
+because reads that stop inside the run dilute the fraction. This is a pre-specified secondary
 endpoint, not a confirmatory one, and it is the first picture-specific gain in four rounds.
 
 ### Round 4 follow-up — read-based homopolymer risk (exploratory)
@@ -168,7 +174,7 @@ spanning reads had to pass the same base-quality floor as the VAF); every run wh
 was redone on the final text, and the rest keep answers given on byte-identical text. The first
 pass, before those fixes, scored 0.933.
 
-| arm | primary | sensitivity | specificity | true indels: called real *and* right zygosity |
+| arm | primary | sensitivity | specificity | true indels: called real *and* right genotype (`genotype_correct`) |
 |---|---:|---:|---:|---:|
 | `Tmp` (mpileup) | 0.839 | 0.711 | 0.967 | 13 / 90 |
 | `Tmp+Tcur`, round 4 (length-only rule) | 0.817 | 0.633 | 1.000 | 13 / 90 |
@@ -216,12 +222,12 @@ TOST at ±0.07 does not apply to a supported effect. Each model improves by a si
 Sensitivity rises by 0.111 and specificity does not fall (0.993 → 1.000).
 
 **Where the gain is.** It is in heterozygous true indels: joint accuracy 0.52 → 0.69, with
-correct genotypes 20 → 38 of 90. Without BAMCP's text, models called a true het insertion
-`low_vaf` 27 times and `het` 20 times; with it, 24 and 38. Homozygous indels stay at 0.93 joint
+correct genotypes 20 → 38 of 90. Among runs that called a true het indel real, models without
+BAMCP's text gave it `low_vaf` 27 times and `het` 20 times; with it, 24 and 38. Homozygous indels stay at 0.93 joint
 accuracy in both arms, and most correct calls on them still say `het` (29 and 24 of 42),
 because reads that stop inside a long run dilute every fraction the models see. Insertions
-gain more than deletions (joint 0.70 → 0.80 and 0.57 → 0.71; genotype 18 → 39 of 93 and
-12 → 15 of 42).
+gain more than deletions in genotype (18 → 39 of 93 against 12 → 15 of 42); joint accuracy
+rises by a similar amount in both (0.70 → 0.80 and 0.57 → 0.71).
 
 ## Conclusion across rounds
 
@@ -237,18 +243,33 @@ gain more than deletions (joint 0.70 → 0.80 and 0.57 → 0.71; genotype 18 →
 - **Harder real items do not open a gap (round 4).** On hard classes of real HG002 sites the
   text baseline stays at 0.94–0.96; only long-repeat indel genotyping is hard (0.84 on fresh
   items). There, neither BAMCP's text tools nor the viewer raised joint accuracy (both −0.02 to
-  −0.03, inconclusive), both cost the small model sensitivity, and the viewer roughly doubled
-  correct zygosity calls for the mid and large models (secondary, p = 0.004). After the
+  −0.03, inconclusive), both cost the small model sensitivity, and the viewer raised
+  correct genotype calls for the mid and large models from 10 to 25 of 60 (secondary, p = 0.004). After the
   product fix those results pointed to (read-based homopolymer risk, spanning-read allele
   fraction), BAMCP's text tools raised accuracy on the same items from 0.839 to 0.911 and
   correct genotypes from 13/90 to 42/90 (exploratory).
 - **Confirmed on fresh items (round 5).** On 90 sites no earlier round had seen, BAMCP's text
   tools beat raw mpileup on both pre-registered endpoints: balanced accuracy +0.059 (0.826 →
   0.885, Holm p = 0.027) and correct genotypes on true indels 30 → 54 of 135 (Holm p < 0.001),
-  with specificity unchanged. This is the first confirmed gain from a BAMCP output in five
+  with specificity not lower (0.993 → 1.000). This is the first confirmed gain from a BAMCP output in five
   rounds, and it comes from the text tools, not the viewer.
 - For BAMCP this supports the current design: the viewer is for the person; the model should
-  keep getting the read evidence as text. Two product changes follow from round 4: the
-  curation summary's homopolymer concern should depend on the reads, not only the run length
-  (design item J2), and the text tools should report allele fraction among reads that span a
-  repeat run, which is the information the picture was supplying for zygosity.
+  keep getting the read evidence as text. Two product changes followed from round 4 and are
+  now made (#71): the curation summary's homopolymer concern depends on the reads that span the
+  run, not only its length (design item J2), and the text tools report allele fraction among
+  those spanning reads, which is the information the picture was supplying for zygosity.
+
+## Corrections (2026-10-29)
+
+An audit of this document against the graded run sets and the committed manifests changed the
+following; no result or conclusion changed. The pilot's second pre-registered primary contrast
+(H2, `V` vs `Tjson`) was missing and is now reported; the round-3 real-tier `V` vs `Traw` upper
+CI bound was −0.056 and is −0.046; round 4's mid-model true-indel accuracy fell slightly rather
+than staying flat; the round-4 zygosity counts and the round-5 het counts now state the runs
+they are counted over; "called `het` in every arm" now gives the counts (22 of 30 per arm);
+"roughly doubled" is replaced by the counts (10 → 25 of 60); the insertion-vs-deletion sentence
+no longer claims a larger joint-accuracy gain for insertions; the genotype endpoint is named as
+`genotype_correct` (zygosity, type and allele), which gives the same counts as zygosity alone in
+every arm; the round-3 truth composition is stated exactly; and the round-4 product changes are
+described as made.
+

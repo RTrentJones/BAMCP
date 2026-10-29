@@ -6,8 +6,8 @@ counterpart to the deterministic `synthetic_v1` gate: `synthetic_v1` proves the
 harness and guards regressions on every PR; this shows the caller's behavior on
 authentic variant coordinates, alleles, and zygosity.
 
-Reproduce (or just `make giab-benchmark`, which pins every generation
-parameter):
+Reproduce point B (or just `make giab-benchmark`, which pins every generation
+parameter and scores point B only):
 
 ```bash
 python tests/eval/datasets/giab/fetch_giab.py --region chr20:1000000-1060000 \
@@ -16,6 +16,19 @@ python -m bamcp.eval.truthset --manifest tests/eval/datasets/giab/manifest.yaml 
   --min-vaf 0.2 --min-depth 8 --min-mapq 20 --max-reads 50000 \
   --min-recall 0.90 --min-precision 0.90
 ```
+
+Point A scores the same reads at the curation-sensitivity thresholds (the manifest
+pins no operating point, so every threshold is given explicitly; `--min-alt-count 1`
+is required because the current default is 3):
+
+```bash
+python -m bamcp.eval.truthset --manifest tests/eval/datasets/giab/manifest.yaml \
+  --min-vaf 0.02 --min-depth 2 --min-mapq 0 --min-alt-count 1 \
+  --min-recall 0.90 --min-precision 0.0
+```
+
+`fetch_giab.py`'s `--region` is a 0-based half-open window; the region strings it
+writes into the manifest are 1-based inclusive, as BAMCP reads them.
 
 ## Coordinate-basis correction (2026-07-26)
 
@@ -36,16 +49,24 @@ variant detection  P=0.000 R=0.000 F1=0.000  (tp=0 fp=66 fn=66)
   spurious: chr20:1002295:G>A ...
 ```
 
-Same 66 variants on both lists, one apart. The manifest is now regenerated
-1-based (`TruthSNV.pos1`), the results below reproduce exactly as originally
+Same 66 variants on both lists, one apart. The manifest was regenerated
+1-based (`TruthSNV.pos1`), the results reproduced exactly as originally
 published, and `test_manifest_positions_are_one_based` fails against the old
 writer so this cannot recur.
 
-Note the asymmetry that made this easy to get wrong, which still holds: BAMCP's
-region *strings* are 0-based half-open (`parse_region` hands `start`/`end`
-straight to pysam), while reported variant *positions* are 1-based. So
-`detection_region` and `negative_regions` in this manifest are correct as
-0-based; only `variant_sites[].pos` needed the shift.
+## Region-string correction (2026-10-29)
+
+The same mismatch then recurred for the region strings. #63 made BAMCP's region
+*strings* 1-based inclusive (`parse_region` subtracts one from the start), but
+`fetch_giab.py` still wrote `detection_region` and `negative_regions` 0-based, so
+each window started one base early. Two negative regions then began on a
+homozygous truth SNV (chr20:1008797 A>T, chr20:1011613 C>T), and `make
+giab-benchmark` reported `false positives 2 (negative regions)` and failed, with
+precision and recall unchanged. The generator now writes 1-based strings
+(`chr20:1000001-1060000`; negatives `chr20:1000001-1002000`,
+`chr20:1008798-1010797`, `chr20:1011614-1013613`), the regenerated manifest differs
+only in those four strings, and `test_manifest_region_strings_are_one_based` pins
+them. Re-measured on 2026-10-29, both rows below reproduce exactly.
 
 ## Dataset
 
@@ -71,23 +92,24 @@ operating point**, measured on the same reads:
 
 | Operating point | min VAF | min depth | min MAPQ | Recall | Precision | F1 | FP (neg. regions) |
 |---|---|---|---|---|---|---|---|
-| **A — default (curation sensitivity)** | 0.02 | 2 | 0 | **1.000** | 0.034 | 0.066 | 171 |
+| **A — curation sensitivity (pre-2026-10 defaults)** | 0.02 | 2 | 0 | **1.000** | 0.034 | 0.066 | 171 |
 | **B — variant calling** | 0.20 | 8 | 20 | **1.000** | **1.000** | **1.000** | **0** |
 
 - **Recall is 1.000 at both points**: all 66 real NIST SNVs are recovered,
   including the 7 heterozygous sites at ~50 % VAF.
-- **Precision depends entirely on the threshold.** BAMCP's *default* thresholds
-  (`min_vaf=0.02`, `min_depth=2`, `min_mapq=0`) are deliberately tuned for
-  curation sensitivity — surface everything, let a human review — so at Q30
-  noise they emit many low-VAF noise calls (precision 0.034). Thresholded for
-  *calling* (VAF ≥ 0.20, depth ≥ 8, MAPQ ≥ 20), the same tool on the same reads
-  reaches **precision 1.000 with no loss of recall**.
+- **Precision depends entirely on the threshold.** Point A (`min_vaf=0.02`,
+  `min_depth=2`, `min_mapq=0`, `min_alt_count=1`, BAMCP's defaults before
+  2026-10) is a curation-sensitivity point — surface everything, let a human
+  review — so at Q30 noise it emits many low-VAF noise calls (precision 0.034).
+  Thresholded for *calling* (VAF ≥ 0.20, depth ≥ 8, MAPQ ≥ 20), the same tool on
+  the same reads reaches **precision 1.000 with no loss of recall**.
+- The current server defaults (`min_vaf=0.10`, `min_depth=2`, `min_mapq=20`,
+  `min_baseq=13`, `min_alt_count=3`) are neither point and were not measured here.
 
-The practical takeaway: BAMCP's caller is correct, but its defaults are a
-max-sensitivity operating point. Anything doing automated calling (rather than
-human-in-the-loop curation) should raise the thresholds — the `--min-vaf` /
-`--min-depth` / `--min-mapq` knobs on the scorer exist to make the operating
-point explicit and measurable.
+The practical takeaway: on this slice the caller recovers every truth SNV, and
+precision is set by the operating point. The scorer's `--min-vaf` /
+`--min-depth` / `--min-mapq` / `--min-alt-count` flags make the operating point
+explicit and measurable.
 
 ## Limitations
 

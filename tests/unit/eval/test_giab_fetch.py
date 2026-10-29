@@ -140,3 +140,21 @@ def test_manifest_negative_region_note_is_quoted(tmp_path):
     (negative,) = doc["negative_regions"]
     assert set(negative) == {"region", "note"}
     assert negative["note"] == "high-confidence, no truth SNV"
+
+
+def test_manifest_region_strings_are_one_based(tmp_path):
+    """Region strings must round-trip through BAMCP's 1-based parse_region to the
+    generator's 0-based windows; a 0-based string starts one base early and can pull a
+    truth SNV into a negative region."""
+    from bamcp.core.parsers import parse_region
+
+    doc = _write_manifest(
+        tmp_path,
+        [giab.TruthSNV(pos0=1008796, ref="A", alt="T", zygosity="hom")],
+        negatives=[(1008797, 1010797)],
+    )
+
+    assert doc["detection_region"] == "chr20:1000001-1060000"
+    assert parse_region(doc["detection_region"]) == ("chr20", 1000000, 1060000)
+    (negative,) = doc["negative_regions"]
+    assert parse_region(negative["region"]) == ("chr20", 1008797, 1010797)

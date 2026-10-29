@@ -45,9 +45,8 @@ withheld, same cases) and reports the lift.
 
 ### Pipeline validation (`--provider mock`)
 
-The `mock` model is scripted to behave like a capable agent: with tools
-advertised it parses the prompt and calls the right BAMCP tools; with tools
-withheld it can only answer from text. Measured on 2026-10-29 with
+The `mock` model is scripted: with tools advertised it calls a fixed set of
+BAMCP tools and returns a fixed answer; with tools withheld it can only answer from text. Measured on 2026-10-29 with
 `make eval-matrix-mock` on the 4 cases in `tests/eval/test_cases.yaml`:
 
 | Configuration | Tools | Passed | Cases | Accuracy |
@@ -59,24 +58,13 @@ withheld it can only answer from text. Measured on 2026-10-29 with
 |---|---:|---:|---:|
 | `mock-model` | 25% | 0% | **+25 pts** |
 
-Only the case with rubric score thresholds (Variant Curation) is graded
-deterministically offline. The other three need the LLM judge, which the mock
-run does not have, and calling the right tools never passes a case on its own
-(`grader.py`), so they score as not passed. This confirms the wiring: accuracy
+Two cases carry a deterministic answer check. Variant Curation (rubric score
+thresholds) passes; List contigs (`expected_claims: ["chr1"]`) fails because the
+mock's fixed answer does not name the contig. The other two need the LLM judge,
+which the mock run does not configure, and calling tools never passes a case on
+its own (`grader.py`), so they score as not passed. This confirms the wiring: accuracy
 aggregates per config and per category, the ablation pairs tools-on/tools-off by
 model, and the tables render. It is not a measurement of any model.
-
----|---|---:|---:|---:|
-| mock-model (tools) | on | 4 | 4 | **100%** |
-| mock-model (no tools) | off | 0 | 4 | **0%** |
-
-| Model | With tools | Without tools | Lift from tools |
-|---|---:|---:|---:|
-| `mock-model` | 100% | 0% | **+100 pts** |
-
-This confirms the wiring: accuracy aggregates per config and per category, the
-ablation pairs tools-on/tools-off by model, and the tables render. Swap in a
-real provider and the same tables fill with real accuracy.
 
 ---
 

@@ -43,8 +43,8 @@ These are implemented in-tree; the module is named for each.
 
 | Control | Where | Notes |
 | ------- | ----- | ----- |
-| SSRF prevention | `core/validation.py::validate_remote_url` | http/https on ports 80/443 only. Rejects `#` (htslib `##idx##` smuggling), userinfo, and backslash/control characters. Resolves the host and blocks every non-global address (loopback, RFC1918, link-local/metadata, CGNAT, multicast, reserved; IPv4-mapped IPv6 judged by the embedded IPv4). Redirects inside htslib can't be checked per-URL, so the exact-host allow-list `BAMCP_ALLOWED_REMOTE_HOSTS` is the real SSRF control; startup warns when it is unset. |
-| Path validation | `core/validation.py::validate_path` | When `BAMCP_ALLOWED_DIRECTORIES` is set, resolved paths must fall inside it (unset means no directory restriction). Only `.bam`/`.cram` extensions; paths ≤2048 chars, regions ≤100 chars. |
+| SSRF prevention | `core/validation.py::validate_remote_url` | http/https on ports 80/443 only. Rejects `#` (htslib `##idx##` smuggling), userinfo, and backslash/control characters. Resolves the host and blocks every non-global address (loopback, RFC1918, link-local/metadata, CGNAT, multicast, reserved; IPv4-mapped IPv6 judged by the embedded IPv4). Redirects inside htslib can't be checked per-URL, so the exact-host allow-list `BAMCP_ALLOWED_REMOTE_HOSTS` is the real SSRF control; startup warns when remote files are enabled and it is unset. |
+| Path validation | `core/validation.py::validate_path` | When `BAMCP_ALLOWED_DIRECTORIES` is set, resolved paths must fall inside it (unset means no directory restriction). Only `.bam`/`.cram` extensions; paths ≤2048 chars (regions ≤100 chars, via `validate_region`). |
 | Input validation | `core/validation.py` | Region/variant strings checked against strict patterns before reaching pysam. |
 | DNS-rebinding protection | `__main__.py` (`TrustedHostMiddleware`) | Configured via `BAMCP_TRUSTED_HOSTS`. |
 | Security headers | `middleware/security.py` | X-Content-Type-Options, X-Frame-Options, CSP, etc. |

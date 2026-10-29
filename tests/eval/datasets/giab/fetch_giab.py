@@ -328,7 +328,7 @@ def write_manifest(
         "dataset: giab_hg001_grch38_v4.2.1",
         "version: 1",
         "description: >-",
-        f"  {len(truth)} real NIST truth SNVs on {chrom}:{start}-{end} inside the",
+        f"  {len(truth)} real NIST truth SNVs on {chrom}:{start + 1}-{end} inside the",
         f"  high-confidence BED, simulated at {depth}x with base-error rate {error_rate}.",
         "",
         "provenance:",

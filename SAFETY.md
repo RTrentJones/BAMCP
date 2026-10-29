@@ -59,7 +59,8 @@ Alignment files can contain identifiable human genomic data. BAMCP:
 
 - does not write read data to disk — parsed regions are held only in a bounded
   in-memory LRU cache (≤128 entries / 512 MB, TTL ≤ `BAMCP_CACHE_TTL`) and are
-  cleared by `cleanup_cache`; on disk, only remote *index* files are cached
+  cleared by `cleanup_cache` on stdio servers (on shared HTTP servers they
+  expire by TTL/LRU); on disk, only remote *index* files are cached
   (24h TTL, session-isolated);
 - treats remote access as opt-in and SSRF-filtered (see [SECURITY.md](SECURITY.md));
 - emits sanitized errors that avoid echoing file paths or config.

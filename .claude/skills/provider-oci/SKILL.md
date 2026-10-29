@@ -55,7 +55,8 @@ another — the only time you touch it.)
 "Configuration file preview" (the `[DEFAULT]` block) and you download the `.pem`. Pass both:
 `greenlight secrets gather <tool> --repo <o/r> --oci-config ~/path/config [--oci-key ~/path/key.pem]`
 — it auto-fills the 5 auth secrets (incl. the multi-line PEM, read from the file so it's never
-pasted) and only prompts for the optional compartment + the option-B deploy PATs.
+pasted) and only prompts for the optional compartment, the optional container-instance OCID (the deploy
+workflow can also resolve it by name), and the option-B deploy PATs.
 
 ## Deploy = restart (re-pull)
 

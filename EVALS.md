@@ -82,8 +82,8 @@ It uses the same manifest schema, so `bamcp.eval.truthset` scores it unchanged.
 
 Headline result on a 60 kb chr20 slice (66 real NIST SNVs): **recall 1.000 at
 both operating points; precision goes from 0.034 at the curation-sensitivity
-point (VAF ≥ 0.02, depth ≥ 2, MAPQ ≥ 0, alt reads ≥ 1; the server defaults before
-2026-10) to 1.000 when thresholded for calling** (VAF ≥ 0.20, depth ≥ 8,
+point (VAF ≥ 0.02, depth ≥ 2, MAPQ ≥ 0, alt reads ≥ 1; the server's VAF, depth,
+MAPQ and alt-count defaults before 2026-10) to 1.000 when thresholded for calling** (VAF ≥ 0.20, depth ≥ 8,
 MAPQ ≥ 20). This is **one 60 kb slice of simulated reads over real
 truth genotypes** — evidence that the detector recovers planted SNVs on this slice, not a
 general claim of caller correctness across genomes, indels, SVs, or real sequencer error.
@@ -134,9 +134,9 @@ captures tool-call telemetry, and grades two ways:
   judge prompt. The judge is **fixed and separate from the model under test**
   (default `models.JUDGE_PROVIDER` / `models.JUDGE_MODEL` in
   `src/bamcp/eval/models.py`; override with `--judge-provider` / `--judge-model`;
-  a judge equal to the subject is refused). Temperature 0 is sent only to judge
-  models that accept sampling parameters (`models.accepts_sampling_params`); the
-  default judge does not, so its consistency rests on the fixed model and prompt
+  a judge equal to the subject is refused). The Anthropic provider sends temperature 0
+  only to models that accept sampling parameters (`models.accepts_sampling_params`);
+  the default judge does not, so its consistency rests on the fixed model and prompt
   rather than on deterministic sampling. Verdict parsing tolerates markdown
   (`**VERDICT: PASS**`); no recognizable verdict is a fail.
 - **Tool-use ablation** (`bamcp.eval.compare`) grades both arms on answer
@@ -170,7 +170,7 @@ make eval-visual-dry
 
 # LLM harness (needs ANTHROPIC_API_KEY + [eval] extras)
 make eval                             # run text cases
-make eval-cached                      # skip cases already in .eval-results/results.json
+make eval-cached                      # skip cases that already passed for this provider+model
 make eval-compare                     # add vanilla + rendering-mode comparison
 make eval-dry                         # parse and validate the cases without calling a model
 

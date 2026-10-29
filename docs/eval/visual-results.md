@@ -222,12 +222,12 @@ TOST at ±0.07 does not apply to a supported effect. Each model improves by a si
 Sensitivity rises by 0.111 and specificity does not fall (0.993 → 1.000).
 
 **Where the gain is.** It is in heterozygous true indels: joint accuracy 0.52 → 0.69, with
-correct genotypes 20 → 38 of 90. Among runs that called a true het indel real, models without
-BAMCP's text gave it `low_vaf` 27 times and `het` 20 times; with it, 24 and 38. Homozygous indels stay at 0.93 joint
+correct genotypes 20 → 38 of 90. Among jointly correct runs on true het indels, models without
+BAMCP's text answered `low_vaf` 27 times and `het` 20 times; with it, 24 and 38. Homozygous indels stay at 0.93 joint
 accuracy in both arms, and most correct calls on them still say `het` (29 and 24 of 42),
 because reads that stop inside a long run dilute every fraction the models see. Insertions
 gain more than deletions in genotype (18 → 39 of 93 against 12 → 15 of 42); joint accuracy
-rises by a similar amount in both (0.70 → 0.80 and 0.57 → 0.71).
+rises in both (insertions 0.70 → 0.80, deletions 0.57 → 0.71).
 
 ## Conclusion across rounds
 
@@ -268,7 +268,7 @@ CI bound was −0.056 and is −0.046; round 4's mid-model true-indel accuracy f
 than staying flat; the round-4 zygosity counts and the round-5 het counts now state the runs
 they are counted over; "called `het` in every arm" now gives the counts (22 of 30 per arm);
 "roughly doubled" is replaced by the counts (10 → 25 of 60); the insertion-vs-deletion sentence
-no longer claims a larger joint-accuracy gain for insertions; the genotype endpoint is named as
+no longer claims a larger joint-accuracy gain for insertions (deletions gain slightly more); the genotype endpoint is named as
 `genotype_correct` (zygosity, type and allele), which gives the same counts as zygosity alone in
 every arm; the round-3 truth composition is stated exactly; and the round-4 product changes are
 described as made.

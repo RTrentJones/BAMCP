@@ -17,15 +17,20 @@ python -m bamcp.eval.truthset --manifest tests/eval/datasets/giab/manifest.yaml 
   --min-recall 0.90 --min-precision 0.90
 ```
 
-Point A scores the same reads at the curation-sensitivity thresholds (the manifest
-pins no operating point, so every threshold is given explicitly; `--min-alt-count 1`
-is required because the current default is 3):
+Point A scores the same reads at the curation-sensitivity thresholds. The manifest
+pins no operating point, so the thresholds are given on the command line;
+`--min-alt-count 1` is required because the current default is 3. The CLI has no
+`--min-baseq` flag, so base quality stays at the current default of 13 (it was 0
+before 2026-10); no base in these Q30 simulated reads falls below it.
 
 ```bash
 python -m bamcp.eval.truthset --manifest tests/eval/datasets/giab/manifest.yaml \
   --min-vaf 0.02 --min-depth 2 --min-mapq 0 --min-alt-count 1 \
   --min-recall 0.90 --min-precision 0.0
 ```
+
+This run prints FAIL and exits non-zero: its 171 negative-region false positives
+fail the zero-false-positive floor regardless of `--min-precision`.
 
 `fetch_giab.py`'s `--region` is a 0-based half-open window; the region strings it
 writes into the manifest are 1-based inclusive, as BAMCP reads them.
@@ -92,14 +97,14 @@ operating point**, measured on the same reads:
 
 | Operating point | min VAF | min depth | min MAPQ | Recall | Precision | F1 | FP (neg. regions) |
 |---|---|---|---|---|---|---|---|
-| **A — curation sensitivity (pre-2026-10 defaults)** | 0.02 | 2 | 0 | **1.000** | 0.034 | 0.066 | 171 |
+| **A — curation sensitivity (pre-2026-10 VAF/depth/MAPQ/alt-count defaults)** | 0.02 | 2 | 0 | **1.000** | 0.034 | 0.066 | 171 |
 | **B — variant calling** | 0.20 | 8 | 20 | **1.000** | **1.000** | **1.000** | **0** |
 
 - **Recall is 1.000 at both points**: all 66 real NIST SNVs are recovered,
   including the 7 heterozygous sites at ~50 % VAF.
 - **Precision depends entirely on the threshold.** Point A (`min_vaf=0.02`,
-  `min_depth=2`, `min_mapq=0`, `min_alt_count=1`, BAMCP's defaults before
-  2026-10) is a curation-sensitivity point — surface everything, let a human
+  `min_depth=2`, `min_mapq=0`, `min_alt_count=1`, BAMCP's VAF, depth, MAPQ and
+  alt-count defaults before 2026-10) is a curation-sensitivity point — surface everything, let a human
   review — so at Q30 noise it emits many low-VAF noise calls (precision 0.034).
   Thresholded for *calling* (VAF ≥ 0.20, depth ≥ 8, MAPQ ≥ 20), the same tool on
   the same reads reaches **precision 1.000 with no loss of recall**.

@@ -5,7 +5,7 @@
 dataset: giab_hg001_grch38_v4.2.1
 version: 1
 description: >-
-  66 real NIST truth SNVs on chr20:1000000-1060000 inside the
+  66 real NIST truth SNVs on chr20:1000001-1060000 inside the
   high-confidence BED, simulated at 30x with base-error rate 0.001.
 
 provenance:

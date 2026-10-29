@@ -1,3 +1,5 @@
+> **Archived — superseded planning doc, kept for history only. Not current design; see [docs/ROADMAP.md](../docs/ROADMAP.md).**
+
 # BAMCP Evaluation Harness: Architecture for LLM Genomic Reasoning Assessment
 
 ## The Core Idea

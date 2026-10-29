@@ -23,6 +23,10 @@ plan and `docs/ENGINEERING_RETROSPECTIVE.md` for the write-up.
 
 ### Fixed
 
+- GIAB benchmark manifest wrote its region strings 0-based after region strings became 1-based
+  (#63), so two negative regions started on a truth SNV and `make giab-benchmark` failed with 2
+  false positives; `fetch_giab.py` now writes 1-based strings, and both published operating
+  points reproduce.
 - Viewer lost the reference genome on pan/zoom/detail refetches (mismatch evidence vanished,
   CRAM failed to decode after navigation) — the full data-source context is now preserved.
 - Negative ClinVar/gnomAD results (variant-not-found) were re-fetched every lookup — a distinct
@@ -40,14 +44,16 @@ plan and `docs/ENGINEERING_RETROSPECTIVE.md` for the write-up.
   the still-running previous image. Unauthenticated; a build without the arg reports `null`.
 - `schema_version` stamp on the viewer payload + a server↔viewer compatibility test.
 - Eval grader scores **tool selection and answer correctness separately** (a case can no longer
-  pass on the tool call alone); nightly runs both truth sets and both LLM providers.
+  pass on the tool call alone); nightly runs both truth sets and the Anthropic provider (the
+  OpenAI path is gated until the runner translates provider-specific messages).
 - Frontend static/test layer: `tsc --noEmit` (strict), ESLint, and vitest, wired into CI.
 
 ### Changed
 
 - Docs lead remote deployment with **Streamable HTTP** (SSE is deprecated by the MCP spec).
-- Test suite is hermetic by default (live-network tests behind a `network` marker); CI installs
-  from the frozen `uv.lock`.
+- Test suite is hermetic by default (live-network tests behind a `network` marker); CI's
+  `lockfile` job checks `uv.lock` is fresh and runs the ship-gate from the frozen lock, while the
+  3.10–3.12 `test` matrix installs broad ranges as the compatibility check.
 
 ### Biological correctness (peer-review round)
 

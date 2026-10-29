@@ -1,13 +1,18 @@
 # BAMCP Evaluation
 
-BAMCP ships with two complementary evaluation tracks:
+BAMCP ships with three evaluation tracks:
 
 1. **A deterministic ground-truth gate** (`bamcp.eval.truthset`) — no LLM, no
-   network. It scores the BAMCP tools against a labeled truth set and runs on
+   network. It scores the BAMCP tools against labeled truth sets and runs on
    every PR. This is the regression gate that keeps the tools honest.
-2. **An LLM-driven harness** (`bamcp.eval` runner) — drives a real model
-   (Anthropic / OpenAI) through the tools and grades the conversation, with an
-   optional vision path that feeds rendered screenshots back to the model.
+2. **An LLM-driven harness** (`bamcp.eval` runner) — drives a real model through
+   the tools and grades the conversation, with an optional vision path that feeds
+   rendered screenshots back to the model. The Anthropic provider is the runnable
+   one; an OpenAI provider exists, but tool-calling cases fail until the runner
+   translates message formats (the nightly workflow gates it off).
+3. **The visual-vs-text study** (`bamcp.eval.visual`) — pre-registered rounds of
+   blind model runs on fixed items; results in
+   [`docs/eval/visual-results.md`](docs/eval/visual-results.md).
 
 This document covers the methodology. To run things, see the [Commands](#commands).
 
@@ -53,9 +58,17 @@ every likelihood and VAF label within bounds,
 clean control correctly discriminated, 0 overconfident sites, and the
 high-confidence positive control reaches high confidence.**
 
+`tests/eval/datasets/indel_v1/` is a second deterministic truth set on the same
+fixture: a planted 3 bp deletion (chr1:3021 ACGT>A) and a 2 bp insertion
+(chr1:3061 A>ATT), scored by `make eval-smoke` with `--min-precision 1.0`. Both
+sets pin the pre-2026-10 detection operating point in their manifests
+(`operating_point:` min_vaf 0.02, min_depth 2, min_mapq 0, min_baseq 0,
+min_alt_count 1); the current server defaults would filter the planted low-MAPQ
+and low-depth artifact sites out before curation could flag them.
+
 The positive control matters: a guard that says "no high-artifact site is
 high-confidence" is vacuous if the tool can *never* report high confidence. The
-chr1:2800 site (120bp reads, centered variant, balanced strands, high MAPQ, no
+chr1:2801 site (120bp reads, centered variant, balanced strands, high MAPQ, no
 artifact context) is engineered to be the one site that legitimately earns it —
 so the guard is discriminating, not just trivially satisfied.
 
@@ -68,16 +81,17 @@ it honoring the real genotypes — a semi-synthetic benchmark over real biology.
 It uses the same manifest schema, so `bamcp.eval.truthset` scores it unchanged.
 
 Headline result on a 60 kb chr20 slice (66 real NIST SNVs): **recall 1.000 at
-both operating points; precision goes from 0.034 at BAMCP's default
-curation-sensitivity thresholds to 1.000 when thresholded for calling** (VAF ≥
-0.20, depth ≥ 8, MAPQ ≥ 20). This is **one 60 kb slice of simulated reads over real
+both operating points; precision goes from 0.034 at the curation-sensitivity
+point (VAF ≥ 0.02, depth ≥ 2, MAPQ ≥ 0, alt reads ≥ 1; the server's VAF, depth,
+MAPQ and alt-count defaults before 2026-10) to 1.000 when thresholded for calling** (VAF ≥ 0.20, depth ≥ 8,
+MAPQ ≥ 20). This is **one 60 kb slice of simulated reads over real
 truth genotypes** — evidence that the detector recovers planted SNVs on this slice, not a
 general claim of caller correctness across genomes, indels, SVs, or real sequencer error.
 That precision/recall tradeoff — and an honest statement of what a simulated-read benchmark
 can and cannot show — is in
 [`tests/eval/datasets/giab/GIAB_RESULTS.md`](tests/eval/datasets/giab/GIAB_RESULTS.md).
-GIAB data is large and network-gated, so this is a manual / nightly job, not a
-PR gate.
+GIAB data is large and network-gated, so this is a manual job (`make
+giab-benchmark`, point B only); no CI workflow runs it.
 
 ### Adding a truth set
 
@@ -86,16 +100,21 @@ A manifest is a single YAML file:
 ```yaml
 dataset: my_set
 version: 1
-detection_region: chr1:1000-2600
+detection_region: chr1:1000-2900
 provenance:
   bam: path/to/reads.bam
   reference: path/to/ref.fa
+operating_point: {min_vaf: 0.02, min_depth: 2, min_mapq: 0, min_baseq: 0, min_alt_count: 1}
 variant_sites:
-  - {chrom: chr1, pos: 1050, ref: A, alt: T, expected_artifact: strand_bias}
-  - {chrom: chr1, pos: 1150, ref: A, alt: G, is_clean_control: true}
+  - {chrom: chr1, pos: 1051, ref: A, alt: T, expected_artifact: strand_bias}
+  - {chrom: chr1, pos: 1151, ref: A, alt: G, is_clean_control: true}
 negative_regions:
   - {region: chr1:2100-2150}
 ```
+
+Positions and region strings are 1-based inclusive (samtools-style).
+`operating_point` is optional; its keys must come from min_vaf, min_depth,
+min_mapq, min_baseq, min_alt_count and max_reads, and CLI flags override it.
 
 Then: `python -m bamcp.eval.truthset --manifest path/to/manifest.yaml`.
 
@@ -106,22 +125,33 @@ Then: `python -m bamcp.eval.truthset --manifest path/to/manifest.yaml`.
 The runner (`bamcp.eval.runner`) drives one model through the tools per case,
 captures tool-call telemetry, and grades two ways:
 
-- **Deterministic** when a case declares `tools_expected` or inline rubric
-  thresholds (`score_at_least: depth_quality=0.5`).
+- **Deterministic** answer checks when a case declares `expected_claims` or
+  inline rubric thresholds (`score_at_least: depth_quality=0.5`).
+  `tools_expected` is a tool-selection check: a missing tool fails the case, but
+  calling the right tools never passes a case on its own; without an answer check
+  the LLM judge grades the answer.
 - **LLM judge** for free-form `expected` criteria, falling back to a small
   judge prompt. The judge is **fixed and separate from the model under test**
-  (default `anthropic` / `claude-haiku-5-5`, override with `--judge-provider` /
-  `--judge-model`; a judge equal to the subject is refused) and runs at
-  **temperature 0**, so every configuration is graded by the same deterministic
-  judge. Verdict parsing tolerates markdown (`**VERDICT: PASS**`); no
-  recognizable verdict is a fail.
+  (default `models.JUDGE_PROVIDER` / `models.JUDGE_MODEL` in
+  `src/bamcp/eval/models.py`; override with `--judge-provider` / `--judge-model`;
+  a judge equal to the subject is refused). The Anthropic provider sends temperature 0
+  only to models that accept sampling parameters (`models.accepts_sampling_params`);
+  the default judge does not, so its consistency rests on the fixed model and prompt
+  rather than on deterministic sampling. Verdict parsing tolerates markdown
+  (`**VERDICT: PASS**`); no recognizable verdict is a fail.
 - **Tool-use ablation** (`bamcp.eval.compare`) grades both arms on answer
   correctness only — the tools-off arm cannot call tools, so grading it on
   `tools_expected` would fail it by construction.
 
 Cases live in `tests/eval/test_cases.yaml` (text) and
-`tests/eval/vision_cases.yaml` (vision-required). The harness is
-MARRVEL-MCP-compatible so the two can be compared head-to-head.
+`tests/eval/vision_cases.yaml` (vision-required). The case schema, CLI flags and
+output layout mirror MARRVEL-MCP's eval harness.
+
+`tests/eval/datasets/acmg_v1/` (9 labeled variants) scores `classify_variant`
+with a live model and ClinVar/gnomAD access: `python -m bamcp.eval.acmg --bam
+<bam> [--reference <fa>]`. It gates on exact accuracy ≥ 0.5, strictly above a
+constant-VUS baseline, with every Benign/Pathogenic anchor on the correct side.
+No CI workflow runs it.
 
 ---
 
@@ -132,10 +162,17 @@ MARRVEL-MCP-compatible so the two can be compared head-to-head.
 make eval-smoke                       # CLI report + nonzero exit on regression
 pytest tests/eval/test_truthset_smoke.py   # same gate as pytest assertions
 
-# LLM harness (needs ANTHROPIC_API_KEY or OPENAI_API_KEY + [eval] extras)
+# Real GIAB slice (network; point B only — see GIAB_RESULTS.md)
+make giab-benchmark
+
+# Visual-vs-text study harness self-test (hermetic; runs in CI's eval-smoke job)
+make eval-visual-dry
+
+# LLM harness (needs ANTHROPIC_API_KEY + [eval] extras)
 make eval                             # run text cases
+make eval-cached                      # skip cases that already passed for this provider+model
 make eval-compare                     # add vanilla + rendering-mode comparison
-make eval-dry                         # list cases without calling a model
+make eval-dry                         # parse and validate the cases without calling a model
 
 # Model comparison + tool-use ablation (EVAL_RESULTS.md)
 make eval-matrix                      # real: accuracy-by-model + tool lift (needs key)
@@ -199,10 +236,10 @@ The ground-truth gate is the foundation. Planned build-out, in priority order:
    BAMCP's remote-BAM support) to also capture real error/mapping behavior.
 2. **Judge validation** — human-label a 20-case subset and report
    judge–human concordance; add position-swap bias checks.
-3. **Model comparison + tool-use ablation** — *infrastructure built and
-   validated offline* (`bamcp.eval.compare`, `make eval-matrix`): runs each
-   model with and without the tools, aggregates accuracy by config and
-   category, and emits a Markdown/JSON table. Real numbers pending an API key —
-   a real run is a drop-in provider swap. See
+3. **Model comparison + tool-use ablation** — *infrastructure built; runs
+   offline with the mock provider* (`bamcp.eval.compare`, `make eval-matrix`):
+   runs each model with and without the tools, aggregates accuracy by config and
+   category, and emits a Markdown/JSON table. No real-model results are
+   committed; a real run needs an API key and no code changes. See
    [EVAL_RESULTS.md](EVAL_RESULTS.md). Follow-up: add judge-graded reasoning
    cases so the ablation measures answer-quality lift, not just tool presence.

@@ -7,15 +7,17 @@ consortium's high-confidence small-variant calls for the NA12878 / HG001
 reference sample (v4.2.1, GRCh38).
 
 Real GIAB data is large and network-gated, so it is **not** fetched in CI. The
-synthetic gate runs on every PR; a GIAB run is a manual / nightly job.
+synthetic gate runs on every PR; a GIAB run is manual (`make giab-benchmark`) and
+no CI workflow runs it.
 
 **Results and honest limitations: [GIAB_RESULTS.md](GIAB_RESULTS.md).**
 
 ## Quick start
 
 ```bash
-# 1. Build the slice (streams the truth VCF, downloads ~15 MB reference + BED,
-#    simulates reads honoring the real genotypes). Writes data/ + manifest.yaml.
+# 1. Build the slice (streams the truth VCF, downloads the chr20 reference and the
+#    high-confidence BED, simulates reads honoring the real genotypes).
+#    Writes data/ + manifest.yaml.
 python tests/eval/datasets/giab/fetch_giab.py --region chr20:1000000-1060000
 
 # 2. Score at a realistic calling operating point (see GIAB_RESULTS.md for why).
@@ -32,15 +34,17 @@ script; the committed `manifest.yaml` is the real truth catalog for the slice.
 `fetch_giab.py`:
 
 1. Streams the GIAB truth VCF for the region (via its tabix index — no
-   whole-file download) and keeps PASS biallelic **SNVs** inside the
+   whole-file download) and keeps biallelic **SNVs** inside the
    high-confidence BED, recording real position, alleles, and zygosity.
 2. Downloads the matching per-chromosome GRCh38 reference (UCSC).
 3. Simulates reads over the real reference honoring each site's genotype
    (het ≈ 50 % alt, hom ≈ 100 % alt) with a uniform base-error rate.
 4. Emits a `manifest.yaml` in the **same schema** as
    `../synthetic_v1/manifest.yaml`, so `bamcp.eval.truthset` scores it
-   unchanged. `variant_sites` are the real truth SNVs; `negative_regions` are
-   high-confidence stretches with no truth variant (false-positive control).
+   unchanged. `variant_sites` are the real truth SNVs (1-based); `negative_regions`
+   are high-confidence stretches with no truth variant (false-positive control).
+   Region strings are written 1-based inclusive, as BAMCP's `parse_region` reads
+   them; the script's own `--region` argument is a 0-based half-open window.
 
 ## Scope
 

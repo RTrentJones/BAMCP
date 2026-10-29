@@ -43,15 +43,15 @@ These are implemented in-tree; the module is named for each.
 
 | Control | Where | Notes |
 | ------- | ----- | ----- |
-| SSRF prevention | `core/validation.py::validate_remote_url` | Resolves hostnames and blocks RFC1918, loopback, link-local, and `169.254.0.0/16` (cloud metadata); IPv6 equivalents included. Optional host allowlist via `BAMCP_ALLOWED_REMOTE_HOSTS`. |
-| Path validation | `core/validation.py::validate_path` | Restricts to `BAMCP_ALLOWED_DIRECTORIES`; only `.bam`/`.cram` extensions; length caps. |
+| SSRF prevention | `core/validation.py::validate_remote_url` | http/https on ports 80/443 only. Rejects `#` (htslib `##idx##` smuggling), userinfo, and backslash/control characters. Resolves the host and blocks every non-global address (loopback, RFC1918, link-local/metadata, CGNAT, multicast, reserved; IPv4-mapped IPv6 judged by the embedded IPv4). Redirects inside htslib can't be checked per-URL, so the exact-host allow-list `BAMCP_ALLOWED_REMOTE_HOSTS` is the real SSRF control; startup warns when remote files are enabled and it is unset. |
+| Path validation | `core/validation.py::validate_path` | When `BAMCP_ALLOWED_DIRECTORIES` is set, resolved paths must fall inside it (unset means no directory restriction). Only `.bam`/`.cram` extensions; paths ≤2048 chars (regions ≤100 chars, via `validate_region`). |
 | Input validation | `core/validation.py` | Region/variant strings checked against strict patterns before reaching pysam. |
 | DNS-rebinding protection | `__main__.py` (`TrustedHostMiddleware`) | Configured via `BAMCP_TRUSTED_HOSTS`. |
 | Security headers | `middleware/security.py` | X-Content-Type-Options, X-Frame-Options, CSP, etc. |
-| Rate limiting | `middleware/ratelimit.py` | Sliding-window per-IP, default 60 req/min (`BAMCP_RATE_LIMIT`). |
-| AuthN/Z (opt-in) | `middleware/auth.py` | OAuth 2.0 authorization server; enable with `BAMCP_AUTH_ENABLED`. |
+| Rate limiting | `middleware/ratelimit.py` | Sliding-window per-IP, default 120 req/min (`BAMCP_RATE_LIMIT`; every MCP JSON-RPC message counts). Client IP comes from `CF-Connecting-IP` / `X-Forwarded-For` only when the peer is in `BAMCP_RATE_LIMIT_TRUSTED_PROXIES` (default loopback); the tracking table is a bounded LRU. |
+| AuthN/Z (opt-in) | `middleware/auth.py` | OAuth 2.0 authorization server; enable with `BAMCP_AUTH_ENABLED`. Accepts a stateless service token (`BAMCP_VERIFY_TOKEN`); dynamic client registration is off unless `BAMCP_ALLOW_DYNAMIC_REGISTRATION=true` (the hosted demo turns it on, with size-bounded in-memory stores). Scopes are required when auth is on (default `bamcp:read`). |
 | Container hardening | `docker-compose.yml` (prod) | `cap_drop: [ALL]`, `no-new-privileges`, `read_only`, memory cap, non-root user. |
-| Error sanitization | tool handlers | Error messages avoid leaking config/path internals. |
+| Error sanitization | `server.py::_run` → `core/errors.py::sanitize_tool_exception` | Every tool exception becomes an `isError` result with a client-safe message; config/path internals are never echoed. |
 
 ### Remote files are opt-in
 
@@ -67,7 +67,7 @@ to an allowlist in any networked deployment.
 | `ruff` security lints (`S` ruleset) | `ci.yml::lint` | Insecure code patterns (subprocess, eval, hardcoded creds, etc.). |
 | `pip-audit --strict` | `security.yml::pip-audit` | Known CVEs in resolved dependencies, on PRs and weekly. |
 | CodeQL (`security-extended`) | `security.yml::codeql` | Data-flow vulnerabilities (injection, SSRF, path traversal). |
-| Dependabot | `dependabot.yml` | Outdated/vulnerable pip + GitHub Actions versions. |
+| Dependabot | `dependabot.yml` | Outdated/vulnerable pip, GitHub Actions, and Docker base-image (digest-pinned) versions. |
 
 To accept a specific advisory that has no available fix, add
 `--ignore-vuln <GHSA-id>` to the `pip-audit` step with a short justification and

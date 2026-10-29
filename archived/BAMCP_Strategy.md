@@ -1,3 +1,5 @@
+> **Archived — superseded planning doc, kept for history only. Not current design; see [docs/ROADMAP.md](../docs/ROADMAP.md).**
+
 # BAMCP as an MCP App: Strategic Architecture Plan
 
 ## The Reframe

@@ -4,7 +4,7 @@ A living strengths/weaknesses assessment + prioritized focus, refreshed after th
 remediation ([`engineering-review-response.md`](engineering-review-response.md)) and 17 rounds of
 adversarial review. Update the checkboxes and the "state" line as work lands.
 
-**State (`main`, refreshed 2026-10-16):** ~1,470 Python tests (94% coverage) + 68 vitest + 154 e2e. Previously (2026-07-25): ~820 Python tests + viewer vitest / ~90% coverage ·
+**State (`main`, refreshed 2026-10-29):** ~1,820 Python tests (94% coverage) + 88 vitest + 163 e2e. Previously (2026-07-25): ~820 Python tests + viewer vitest / ~90% coverage ·
 ~9.6k lines Python · 3.6k lines viewer TS · deployed to prod, verify-gated, healthy. The external
 review scored it **7.5/10** (security + LLM-evals both **4.5**, the two weakest axes). A later
 hands-on **peer review** then caught a class the 17 review rounds missed — a silent genome-build
@@ -62,8 +62,8 @@ six parallel implementation packages → QA acceptance against real public BAMs 
 - [ ] **Homozygous repeat indels are still called `het`** (24 of 42 correct calls in round 5):
   consider a hom hint when the called length dominates the spanning reads.
 - [ ] **Open:** viewer: mark the position of interest / mismatch columns so a hom-alt column
-  cannot be read as reference (round-3 failure mode); GRCh37 demo cold latency (~27 s);
-  dependabot python 3.14 / mcp<3 (lockfile + API work); real-data (GIAB) eval tier.
+  cannot be read as reference (round-3 failure mode); GRCh37 demo cold latency (not measured in a
+  committed doc); dependabot python 3.14 / mcp<3 (lockfile + API work).
 
 ## Biological correctness (peer-review round) — closed
 
@@ -99,22 +99,28 @@ on it); optional `BAMCP_GENOME_BUILD` in prod infra.
 | LLM/vision evals | 4.5 | ~6.5 | Grader scores tool-selection vs answer-correctness; ablation reporting; nightly parity |
 | Frontend quality | 6.5 | ~7.5 | tsc + ESLint + vitest + CI job |
 | Test rigor | 7.5 | ~8.5 | Hermetic suite, lockfile-pinned CI gate |
-| Architecture | 7 | ~6.5 ▼ | Regressed: `tools.py` grew to ~1,380 lines; god modules unsplit |
+| Architecture | 7 | ~6.5 ▼ | Regressed: `tools.py` grew to ~2,980 lines; god modules unsplit |
+
+The "Then" scores are from the external review, which is not committed; only the overall 7.5 and
+the evals 4.5 are recorded in [`engineering-review-response.md`](engineering-review-response.md).
+The "Now" scores are this document's own estimates.
 
 ## Strengths (now)
 - **The security boundary is real, not claimed** — the headline weakness is now the headline strength.
-- **The verify-and-correct loop is evidenced** — 17 documented review rounds + `ENGINEERING_RETROSPECTIVE.md`.
+- **The verify-and-correct loop is evidenced** — 17 review rounds (not individually documented) + `ENGINEERING_RETROSPECTIVE.md`.
 - **Evals measure task success, not tool invocation** — the review's lead critique, closed at the root.
 - **Deterministic-eval + safety-invariant discipline**, now behind a hermetic lockfile-pinned CI gate.
 
 ## Weaknesses (now)
-- **`tools.py` is a ~1,380-line god module** (it *grew* during hardening); `parsers.py`, `mcp-app.ts`,
+- **`tools.py` is a ~2,980-line god module** (it *grew* during hardening); `parsers.py`, `mcp-app.ts`,
   `renderer.ts` unsplit.
 - **Contracts still dynamically typed** — `dict[str, Any]` payload → hand-maintained TS interfaces
   (only a `schema_version` stamp + compat test so far).
 - **Evals still run in-process, not through the real MCP transport** (`MCPStdioRouter` a stub); no
   human-labeled benchmark / judge-swap concordance.
-- **Scientific breadth is narrow** — one 60 kb GIAB SNV slice; no indel/SV/real-read breadth.
+- **Scientific breadth is narrow** — the deterministic GIAB gate is one 60 kb simulated-read SNV
+  slice plus a synthetic indel set; real HG002 reads appear only in the visual-eval tier; no SV
+  breadth.
 - **Packaging/release incomplete** — no PyPI publish (`uvx bamcp` can't work), no clean-room wheel CI.
 - **Coordinate semantics** convention-based (no dedicated type) — latent bug source.
 
@@ -126,8 +132,8 @@ on it); optional `BAMCP_GENOME_BUILD` in prod infra.
   classification. Directly answers "scientific breadth is too narrow" with a differentiated clinical
   feature.
 - [ ] **2. Finish eval credibility** (Deferred 3b/3c): implement `MCPStdioRouter` (real MCP transport)
-  + a small human-labeled benchmark + judge-swap agreement. Port `tool_specs.py` (real tool schemas)
-  alongside ACMG — it's a shared prerequisite.
+  + a small human-labeled benchmark + judge-swap agreement. (`tool_specs.py`, the real tool
+  schemas, landed with ACMG in #49.)
 
 ### Tier 2 — pay down the debt that's growing
 - [ ] **3. Split `tools.py`** (and the two big `.ts` files) by use case, before it grows further.

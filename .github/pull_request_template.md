@@ -8,10 +8,9 @@ Brief description of changes.
 
 ## Testing
 
-- [ ] All existing tests pass (`make test`)
+- [ ] `make verify` passes (ci.yml gates except docker: lockfile, viewer, lint, typecheck, tests at 85% coverage, eval-smoke, eval-visual-dry)
 - [ ] New tests added (if applicable)
-- [ ] `make lint` passes
-- [ ] `make typecheck` passes
+- [ ] `uv lock` re-run if `pyproject.toml` changed
 
 ## Related Issues
 

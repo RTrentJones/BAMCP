@@ -16,6 +16,10 @@ src/bamcp/
   constants.py     — shared defaults, thresholds, bins
   tool_specs.py    — JSON-schema specs per tool (get_tool_spec)
   resources.py     — get_viewer_html(): serves the bundled static/dist/viewer.html
+  demos.py         — demo datasets + `demo:<NAME>` file_path alias (resolve_demo_alias)
+  glossary.py      — plain-language glossary (bamcp://glossary)
+  prompts.py       — SERVER_INSTRUCTIONS, bamcp://demos|glossary|guide resources, prompts
+  viewer_build.py  — viewer source-hash build stamp (run by make build-viewer)
   core/
     tools.py         — tool handlers + cache helpers
     parsers.py       — fetch_region(): pysam parsing, reads, coverage, variant detection
@@ -23,6 +27,8 @@ src/bamcp/
     serialization.py — serialize_region_data(): RegionData → JSON + evidence
     cache.py         — BAMIndexCache: file cache for remote BAM index files (TTL)
     reference.py     — genome build registry, detect_genome_build()
+    errors.py        — one error envelope: ToolInputError, sanitize_tool_exception
+    prewarm.py       — HTTP-only startup prewarm of demo datasets (BAMCP_PREWARM)
   analysis/
     evidence.py      — variant evidence, artifact risk scoring, confidence
     curation.py      — curation summaries + recommendations
@@ -30,6 +36,7 @@ src/bamcp/
     fusion.py        — multi-source evidence fusion
   clients/
     clinvar.py, gnomad.py, genes.py — async NCBI / gnomAD GraphQL / NCBI gene clients
+    ncbi.py          — shared NCBI E-utilities rate limiting + error detection
     ttl_cache.py     — BoundedTTLCache (shared LRU + TTL)
   middleware/
     auth.py          — BAMCPAuthProvider (in-memory OAuth 2.0)
@@ -37,7 +44,9 @@ src/bamcp/
     security.py      — security response headers
     telemetry.py     — configure_telemetry() (optional OTel)
   eval/              — evaluation harness: truthset (deterministic gate), runner, router,
-                       grader, metrics, report, compare, providers, renderer, schema, cli
+                       grader, metrics, report, compare, providers, renderer, schema, cli,
+                       acmg, models (model-ID registry), tracer (Tracer publisher),
+                       render_cli, visual/ (pre-registered visual-vs-text eval)
   static/            — viewer TS/Vite app (see "Viewer UI")
 ```
 
@@ -46,7 +55,7 @@ src/bamcp/
 ```bash
 make verify           # every ci.yml gate in one command (VERIFY_E2E=1 adds playwright) — run before pushing
 make install          # build-viewer + pip install -e ".[dev]"
-make build-viewer     # cd src/bamcp/static && npm install && npm run build
+make build-viewer     # npm install && npm run build in static/, then python -m bamcp.viewer_build (source-hash stamp)
 make test             # pytest (unit + integration, ignores e2e)
 make test-network     # live-network tier only (excluded from the default suite)
 make test-e2e         # playwright install chromium && pytest tests/e2e/
@@ -56,6 +65,7 @@ make typecheck        # mypy src
 make coverage         # HTML coverage report
 make coverage-strict  # coverage with --cov-fail-under=85 (the CI bar)
 make eval-smoke       # deterministic ground-truth gate (required ship-gate)
+make eval-visual-dry  # visual-vs-text eval hermetic dry run (fixtures, stimuli, leak-lint, grader self-tests) — in ci.yml eval-smoke job
 make giab-benchmark   # real GIAB benchmark — network-gated, not in CI
 make render-viewer    # render the viewer to a PNG (.render-dev/last.png)
 make docker-build / docker-test / clean
@@ -114,6 +124,12 @@ Thirteen tools, all registered in `server.py`:
 | `search_gene` | Gene symbol → coordinates. Build-aware: auto-detects from the BAM. |
 | `cleanup_cache` | Clear downloaded index files + region cache. stdio only (no-op on shared HTTP servers); never closes the shared HTTP clients. |
 
+Also registered: the `ui://bamcp/viewer` resource; `bamcp://demos`, `bamcp://glossary`,
+`bamcp://guide` resources; prompts `explore_demo`, `check_variant`, `explain_terms`; and
+`GET /__version` (+ `/mcp/__version`), which serves the image's `GREENLIGHT_SHA` for Greenlight's
+verify gate. Every `file_path` accepts a `demo:<NAME>` alias (`demo:HG002`, `demo:HG00096`),
+resolved in `_run`.
+
 **Every variant response echoes its `applied_filters`** — absence of a variant must stay
 distinguishable from "filtered out". Preserve that when touching variant output. That includes
 what *couldn't* be detected (`snv_detection` without a reference, `indel_detection` above the
@@ -134,8 +150,10 @@ Transport is `BAMCP_TRANSPORT`: `stdio` (default), `sse`, or `streamable-http`. 
 use `BAMCP_HOST` (default `0.0.0.0`) / `BAMCP_PORT` (default `8000`).
 
 Auth is opt-in via `BAMCP_AUTH_ENABLED=true` — an in-memory OAuth 2.0 authorization server
-implementing `OAuthAuthorizationServerProvider` (dynamic client registration, auth code flow,
-refresh, revocation).
+implementing `OAuthAuthorizationServerProvider` (auth code flow, refresh with rotation,
+revocation). It also accepts a stateless service token (`BAMCP_VERIFY_TOKEN`). Dynamic client
+registration is a separate opt-in (`BAMCP_ALLOW_DYNAMIC_REGISTRATION=true`, default off); auth
+with neither a token nor registration fails at startup.
 
 ## Genome build
 
@@ -164,7 +182,8 @@ the Cloudflare tunnel the client IP comes from `CF-Connecting-IP`, then right-to
 `X-Forwarded-For`, trusted only from `BAMCP_RATE_LIMIT_TRUSTED_PROXIES` (loopback).
 
 The prod server is an **open public demo**: dynamic client registration with auto-approve is
-intentional. Every in-memory store (OAuth clients/codes/tokens, index cache by bytes, region cache
+intentional. It is off by default in code; prod turns it on in the wrapper's infra
+(`RTrentJones.dev/infra/bamcp.tf`, `BAMCP_ALLOW_DYNAMIC_REGISTRATION = "true"`). Every in-memory store (OAuth clients/codes/tokens, index cache by bytes, region cache
 by bytes) is therefore bounded — keep any new store bounded too.
 
 `validate_remote_url()` in `core/validation.py` (http/https only, ports 80/443 only) rejects any
@@ -204,13 +223,14 @@ on it) and don't grow the text back into a read dump.
 ## Viewer UI
 
 TypeScript/Vite app in `src/bamcp/static/`. Sources: `viewer.html`, `client.ts` (MCP Apps SDK
-wrapper), `mcp-app.ts` (app logic), `renderer.ts` (canvas), `state.ts`, `data-store.ts`,
-`types.ts`, `constants.ts` (+ `constants.test.ts` for vitest).
+wrapper), `mcp-app.ts` (app logic), `renderer.ts` (canvas), `layout.ts`, `palette.ts`,
+`ui-sync.ts`, `state.ts`, `data-store.ts`, `types.ts`, `constants.ts` (vitest: `*.test.ts` for
+constants/layout/palette/state/ui-sync).
 
 ```bash
 cd src/bamcp/static
 npm install && npm run build   # → dist/viewer.html
-npm run dev                    # Vite dev server
+npm run watch                  # vite build --watch (rebuilds dist/ on change)
 npm run typecheck && npm run lint && npm test   # what CI runs
 ```
 
@@ -291,8 +311,8 @@ The container runs on a private OCI subnet with no public IP. External access is
 
 ## Docker
 
-`Dockerfile` (prod, slim, ARM64) · `Dockerfile.dev` (adds pytest/playwright/ruff/mypy) ·
-`docker-compose.yml` profiles: `dev` (test + lint services), `beta`, `preview`, `prod` ·
+`Dockerfile` (prod, multi-stage slim, multi-arch; CI builds arm64) · `Dockerfile.dev` (adds pytest/playwright/ruff/mypy) ·
+`docker-compose.yml` profiles: `dev` (test + e2e + lint services), `beta`, `preview`, `prod` ·
 `docker/healthcheck.py` (imports bamcp, verifies server creation).
 
 ## Further reading

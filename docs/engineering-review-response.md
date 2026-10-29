@@ -6,7 +6,7 @@ This is a **living checklist** — check items as they ship. Ship each item thro
 Greenlight loop (see [Greenlight framing](#greenlight-framing)), not as one giant PR.
 
 **Status:** Phases 0–1 complete (production-ready tier); Phases 2–5 advanced to bounded, tested
-depth with large refactors scoped as follow-ups (see [Deferred](#deferred-follow-ups)).
+depth with large refactors scoped as follow-ups (see [Deferred](#deferred-follow-ups-scoped-not-rushed)).
 **Owner:** @RTrentJones · **Created:** 2026-07-21 · Branch: `feat/eng-review-remediation`
 (+ wrapper `feat/bamcp-remote-allowlist`)
 
@@ -76,6 +76,10 @@ The plan must respect that. Grounded in the wrapper's `infra/bamcp.tf` and
 | `required_scopes` | unset → `None` | no scopes enforced |
 | `BAMCP_VERIFY_TOKEN` | `var.bamcp_verify_token` | the M2M service token = the Greenlight verify mechanism |
 
+[Since changed: this table records prod at the time of the review. The host allow-list is now
+set in `infra/bamcp.tf` (RTrentJones.dev c76397d), and dynamic registration was re-enabled for
+interactive clients (RTrentJones.dev 6c50cb8).]
+
 **Deploy loop (BAMCP is direct-to-prod, no beta/promote — free A1 cap, `envs=["prod"]`):**
 ```
 greenlight preview bamcp (local container, mcp verify, auth OFF)
@@ -118,7 +122,7 @@ Remote streaming is a core differentiator. Four real use cases, all HTTP(S) only
 |---|---|---|
 | 1 | **Public datasets** (GIAB, 1000 Genomes) | Multi-GB/TB BAMs — pysam does **region-scoped random access** over HTTP range requests; fetch only the reads in the window |
 | 2 | **Cloud-hosted user data** (S3/GCS/Azure HTTPS URLs) | User's aligned BAM in a bucket; same range-scoped streaming, no local copy of a 100 GB file |
-| 3 | **Remote reference FASTA** (CRAM decode) | CRAM is reference-compressed; `list_contigs` deliberately suggests remote UCSC FASTA URLs |
+| 3 | **Remote reference FASTA** (CRAM decode) | CRAM is reference-compressed; `list_contigs` deliberately suggests remote UCSC FASTA URLs [Since changed: suggestions are now bgzip/indexed Ensembl / 1000 Genomes FASTAs, per contig style (8f5419c, #59).] |
 | 4 | **`.bai`/`.crai` index download** | **Mandatory for 1–3.** Random access over HTTP needs the index; htslib fetches `<url>.bai`, `BAMIndexCache` caches it (24 h TTL) |
 
 Disabling `BAMCP_ALLOW_REMOTE_FILES` kills use cases 1–3. **The fix is a curated allowlist**, not a kill switch.
@@ -243,7 +247,10 @@ Phase 0 (credibility)  ──►  Phase 1 (security P0s)  ──►  Phase 2 (co
   pervasive coordinate newtype (2c).*
 - **Phase 3** — [x] 3a grader scores tool-selection vs answer-correctness separately
   (`expected_claims`); [x] 3d nightly runs both truth sets + both providers. *Deferred: 3b real-MCP
-  router, 3c human-labeled benchmark + judge-swap, 3e real-read GIAB.*
+  router, 3c human-labeled benchmark + judge-swap, 3e real-read GIAB.* [Since changed: the nightly
+  now gates the OpenAI provider off until the runner translates its message format; a real-read
+  HG002 tier landed for the visual eval (4ed4cab, #69), while the deterministic GIAB gate still
+  uses simulated reads.]
 - **Phase 4** — [x] 4a `tsc --noEmit` + ESLint + vitest + CI job (caught + fixed dead code).
   *Deferred: 4b god-module splits.*
 - **Phase 5** — [x] new env vars documented; [x] transport docs lead Streamable HTTP; [x] CHANGELOG;

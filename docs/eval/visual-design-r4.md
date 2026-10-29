@@ -358,3 +358,11 @@ Background CPU (no model runs): about 10-16 h of remote BAM work (Illumina scans
 - **C1-#19 (wrong section reference): fixed.** Deferred cases are now referenced as "end of section 13".
 
 All other critique points (C1 #4, 6, 8, 10-18; C2 #1, 3-5, 7-9, 11-14, 16-22) are adopted as described in the sections above.
+
+## Corrections (2026-10-29)
+
+- Sections 7 and 13: round 3's real tier has 36 items (`data/r3_real_sites.jsonl`), not 18; the
+  design never specified which 18 the caption check would use. No caption-check run set was
+  produced: the two baseline-only pilots in [`visual-pilot-r4.md`](visual-pilot-r4.md) were run
+  instead.
+

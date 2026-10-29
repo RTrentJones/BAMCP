@@ -48,14 +48,14 @@ No install, no data of your own. The hosted demo server is **`https://bamcp.rtre
 
 **What you'll see:** an interactive pileup of real reads from the public
 [Genome in a Bottle](https://www.nist.gov/programs-projects/genome-bottle) sample HG002
-(about 60 reads deep), a clean heterozygous SNV where roughly half the reads carry the
-alternative base on both strands, an artifact a few kb away (chr17:43096151 T>G: 11 of ~50
+(about 60 reads deep), a clean heterozygous SNV where roughly half of ~57 reads carry the
+alternative base, an artifact a few kb away (chr17:43096151 T>G: 11 of ~50
 reads, all on the forward strand, mean base quality ~Q8 — the default filters hide it from
 `get_variants`, and `get_variant_curation_summary` still scores it HIGH artifact risk and says
 which filters it fails), and ClinVar/gnomAD context showing both curated SNVs are common,
 benign polymorphisms.
 
-**Demo aliases** (usable as `file_path` in every tool): `demo:HG002` (GIAB HG002, GRCh38,
+**Demo aliases** (usable as `file_path` in every tool that takes one): `demo:HG002` (GIAB HG002, GRCh38,
 `chr17`-style) and `demo:HG00096` (1000 Genomes, GRCh37, `17`-style). The curated loci live in
 the `bamcp://demos` resource; the server also ships `explore_demo`, `check_variant`, and
 `explain_terms` prompts.
@@ -64,11 +64,14 @@ the `bamcp://demos` resource; the server also ships `explore_demo`, `check_varia
 allow-list of genomics hosts — `ftp-trace.ncbi.nlm.nih.gov`, `ftp.ncbi.nlm.nih.gov`,
 `ftp.1000genomes.ebi.ac.uk`, `1000genomes.s3.amazonaws.com`, `ftp.ensembl.org`,
 `hgdownload.soe.ucsc.edu`. For anything else (or private data), run BAMCP locally
-([Installation](#installation)).
+([Installation](#installation)). Running it yourself, remote files are off by default: set
+`BAMCP_ALLOW_REMOTE_FILES=true` (ideally with a `BAMCP_ALLOWED_REMOTE_HOSTS` allow-list) to use
+the `demo:` aliases or any URL.
 
 **Default filters** for candidate variants:
-`min_mapq 20`, `min_baseq 13`, `min_vaf 0.10`, `min_alt_count 3` — every response echoes them
-in `applied_filters`, so a missing variant may simply have been filtered out.
+`min_mapq 20`, `min_baseq 13`, `min_vaf 0.10`, `min_depth 2`, `min_alt_count 3` — every variant
+response echoes the thresholds it applied in `applied_filters`, so a missing variant may simply
+have been filtered out.
 
 **Interpreting results:** read the `bamcp://glossary` resource (VAF, depth, MAPQ, strand bias,
 artifact risk, ClinVar stars, gnomAD reliability…), each with what you *can* and *cannot*
@@ -88,16 +91,20 @@ conclude. BAMCP is a research and education tool, **not** a diagnostic test — 
 - [Tools Reference](#tools-reference)
 - [Configuration](#configuration)
 - [Implementation Details](#implementation-details)
+- [Evaluation](#evaluation)
 - [Development](#development)
 - [Roadmap](#roadmap)
+- [Related Projects](#related-projects)
 - [Contributing](#contributing)
+- [Security & Safety](#security--safety)
 - [License](#license)
+- [Acknowledgments](#acknowledgments)
 
 ---
 
 ## Why BAMCP?
 
-Existing genomics MCP servers (bio-mcp-samtools, AWS HealthOmics MCP) provide command-line operations but return text/JSON. **BAMCP is the first genomics MCP server to leverage the [MCP Apps Extension](https://github.com/modelcontextprotocol/ext-apps) to render interactive visualizations inline** — verifiable against the known genomics-MCP landscape above.
+Existing genomics MCP servers (bio-mcp-samtools, AWS HealthOmics MCP) provide command-line operations but return text/JSON. **BAMCP uses the [MCP Apps Extension](https://github.com/modelcontextprotocol/ext-apps) to render interactive visualizations inline.**
 
 | Feature | CLI-based MCPs | BAMCP |
 |---------|---------------|-------|
@@ -117,7 +124,7 @@ Existing genomics MCP servers (bio-mcp-samtools, AWS HealthOmics MCP) provide co
 - **Variant Highlighting** — Automatic detection and highlighting of positions with non-reference alleles
 - **VCF/BCF Overlay** — Use caller-produced variants as a primary/overlay source, including sample genotypes and structural-variant metadata
 - **Region Navigation** — Jump to coordinates, genes, or specific variants
-- **Format Support** — BAM, CRAM (with reference), and indexed remote files (HTTP/S3)
+- **Format Support** — BAM, CRAM (with reference), and indexed remote files over HTTP/HTTPS (including public S3 buckets via their HTTPS URLs)
 - **Canvas Rendering** — High-performance visualization of thousands of reads via HTML5 Canvas
 - **Multiple Transports** — stdio, Streamable HTTP (preferred for network), and legacy SSE
 - **OAuth 2.0 Authentication** — Optional token-based auth for network deployments
@@ -135,25 +142,25 @@ Existing genomics MCP servers (bio-mcp-samtools, AWS HealthOmics MCP) provide co
                                   │ MCP Protocol (JSON-RPC over stdio/SSE/HTTP)
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                       BAMCP MCP Server (Python + FastMCP)                    │
+│                       BAMCP MCP Server (Python + FastMCP)                   │
 │                                                                             │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
 │  │                 │  │                 │  │                             │  │
 │  │  pysam Layer    │  │  Tool Handlers  │  │  UI Resource Provider       │  │
 │  │                 │  │                 │  │                             │  │
-│  │  • AlignmentFile│  │  • visualize    │  │  • ui://bamcp/viewer        │  │
-│  │  • fetch()      │  │  • get_variants │  │  • text/html+mcp            │  │
-│  │  • pileup()     │  │  • lookup_*     │  │  • Sandboxed iframe content │  │
-│  │  • CRAM support │  │  • search_gene  │  │                             │  │
-│  │                 │  │  • +6 more      │  │                             │  │
+│  │  • AlignmentFile│  │  • 13 tools:    │  │  • ui://bamcp/viewer        │  │
+│  │  • fetch()      │  │  • get_variants │  │  • text/html;profile=mcp-app│  │
+│  │  • pileup()     │  │  • visualize_*  │  │  • Sandboxed iframe content │  │
+│  │  • CRAM support │  │  • lookup_*     │  │                             │  │
+│  │                 │  │  • +9 more      │  │                             │  │
 │  └─────────────────┘  └─────────────────┘  └─────────────────────────────┘  │
 │                                                                             │
-│  ┌─────────────────┐  ┌─────────────────────────────────────────────────┐  │
-│  │  Auth (opt-in)  │  │  Config (env vars)                              │  │
-│  │  • OAuth 2.0 AS │  │  • Transport, host, port                        │  │
-│  │  • Token mgmt   │  │  • Reference path, read limits                  │  │
-│  │  • Client reg   │  │  • Auth settings                                │  │
-│  └─────────────────┘  └─────────────────────────────────────────────────┘  │
+│  ┌─────────────────┐  ┌──────────────────────────────────────────────────┐  │
+│  │  Auth (opt-in)  │  │  Config (env vars)                               │  │
+│  │  • OAuth 2.0 AS │  │  • Transport, host, port                         │  │
+│  │  • Token mgmt   │  │  • Reference path, read limits                   │  │
+│  │  • Client reg   │  │  • Auth settings                                 │  │
+│  └─────────────────┘  └──────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -202,6 +209,7 @@ User: "Show me reads at chr17:7577000-7577500 in tumor.bam"
 
 - Python 3.10+
 - [pysam](https://pysam.readthedocs.io/) (requires htslib)
+- Node.js + npm (to build the viewer bundle)
 
 ### From PyPI (coming soon)
 
@@ -216,7 +224,7 @@ git clone https://github.com/RTrentJones/BAMCP.git
 cd BAMCP
 python -m venv venv
 source venv/bin/activate  # or `venv\Scripts\activate` on Windows
-pip install -e ".[dev]"
+make install              # builds the viewer (npm), then pip install -e ".[dev]"
 ```
 
 ### Docker
@@ -229,8 +237,9 @@ docker compose --profile prod build
 # needs a service token — the server refuses to start without one:
 BAMCP_VERIFY_TOKEN="$(openssl rand -hex 32)" docker compose --profile prod up
 
-# Prefer to run without auth? Use the beta profile (auth disabled) instead:
-docker compose --profile beta up
+# Prefer to run without auth? Use the preview profile (Streamable HTTP at /mcp, auth disabled):
+docker compose --profile preview up
+# (the beta profile is also auth-free, but serves legacy SSE at /sse)
 
 # Run tests in Docker
 docker compose --profile dev run --rm test
@@ -240,7 +249,7 @@ docker compose --profile dev run --rm test
 
 #### Claude Desktop (stdio)
 
-Add to `~/.config/claude/claude_desktop_config.json`:
+Add to your Claude Desktop config file (`claude_desktop_config.json`):
 
 ```json
 {
@@ -256,19 +265,10 @@ Add to `~/.config/claude/claude_desktop_config.json`:
 }
 ```
 
-#### Claude Desktop (Streamable HTTP — network, preferred)
+#### Streamable HTTP (network, preferred)
 
-Run the server with `BAMCP_TRANSPORT=streamable-http` and point the client at `/mcp`:
-
-```json
-{
-  "mcpServers": {
-    "bamcp": {
-      "url": "http://localhost:8000/mcp"
-    }
-  }
-}
-```
+Run the server with `BAMCP_TRANSPORT=streamable-http` and point an MCP client that supports
+Streamable HTTP at `http://localhost:8000/mcp`.
 
 > Legacy SSE (`BAMCP_TRANSPORT=sse`, URL `http://localhost:8000/sse`) is still supported for
 > compatibility, but the MCP spec deprecates the HTTP+SSE transport in favor of Streamable HTTP.
@@ -327,21 +327,24 @@ Returns coverage statistics without visualization.
 
 ## Tools Reference
 
+All 13 tools are registered in [`src/bamcp/server.py`](src/bamcp/server.py); descriptions
+below are condensed from each tool's registered description.
+
 | Tool | Description | Required Args | Optional Args |
 |------|-------------|---------------|---------------|
-| `visualize_region` | View aligned reads with interactive UI (keep windows ≤200 bp) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source` |
-| `get_variants` | Detect and return candidate variants in a region, sorted by position | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_vaf`, `min_depth`, `min_alt_count` |
-| `get_coverage` | Calculate depth statistics (fast; fine for a whole gene) | `file_path`, `region` | `reference` |
-| `list_contigs` | List chromosomes and detect genome build | `file_path` | `reference`, `include_all` |
-| `jump_to` | Jump to a specific genomic position | `file_path`, `contig`, `position` | `window`, `reference`, `vcf_path`, `variant_source` |
-| `get_region_summary` | Text summary for LLM reasoning (no UI) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_alt_count` |
-| `scan_variants` | Time-bounded SNV scan of a contig or region; a truncated scan returns `next_region` to resume | `file_path` | `contig`, `region`, `reference`, `min_vaf`, `min_depth`, `min_alt_count` |
-| `lookup_clinvar` | Look up variant in ClinVar | `chrom`, `pos`, `ref`, `alt` | `build` |
-| `lookup_gnomad` | Look up variant in gnomAD | `chrom`, `pos`, `ref`, `alt` | `build` |
-| `get_variant_curation_summary` | Detailed curation with artifact risk; evaluates the named site even when it fails the calling filters (`filter_check`) | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference`, `format` (`text`/`rubric`; `json` = `rubric`), `include_clinical` |
-| `classify_variant` | ACMG reasoning scaffold over BAM + ClinVar + gnomAD evidence | `file_path`, `chrom`, `pos`, `ref`, `alt` | `gene`, `window`, `reference` |
-| `search_gene` | Search gene by symbol (NCBI); returns build-consistent coordinates | `symbol` | `file_path`, `build` |
-| `cleanup_cache` | Clean up session's index cache | — | — |
+| `visualize_region` | Visualize aligned reads in a genomic region with the interactive MCP Apps viewer | `file_path`, `region` | `reference`, `vcf_path`, `variant_source` |
+| `get_variants` | Detect and return candidate variants in a region; each carries `artifact_risk`, confidence, concerns and a plain-language interpretation (with a zygosity hint) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_vaf`, `min_depth`, `min_alt_count` |
+| `get_coverage` | Calculate depth of coverage statistics for a region | `file_path`, `region` | `reference` |
+| `list_contigs` | Detect the genome build (GRCh37 vs GRCh38) and contig naming style and list primary chromosomes; use this first on new BAM files | `file_path` | `reference`, `include_all` |
+| `jump_to` | Jump to a specific genomic position (1-based) and view surrounding reads | `file_path`, `contig`, `position` | `window`, `reference`, `vcf_path`, `variant_source` |
+| `get_region_summary` | Text summary of a region (read count, coverage, candidate variants with interpretations) for LLM reasoning | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_alt_count` |
+| `scan_variants` | Scan a contig or region for candidate SNVs (fast, coverage-based; needs a reference); returns up to 500 candidates sorted by position, and `next_region` when the time budget truncates the scan | `file_path` | `contig`, `region`, `reference`, `min_vaf`, `min_depth`, `min_alt_count` |
+| `lookup_clinvar` | Look up a variant in ClinVar for clinical significance, review status and associated conditions (1-based, in `build`) | `chrom`, `pos`, `ref`, `alt` | `build` |
+| `lookup_gnomad` | Look up a variant in gnomAD for population allele frequency (GRCh37 queries gnomAD v2.1, GRCh38 queries v4) | `chrom`, `pos`, `ref`, `alt` | `build` |
+| `get_variant_curation_summary` | Detailed curation summary with artifact risk, quality metrics and recommendations; evaluates the named site even when it fails the calling filters (`filter_check`) | `file_path`, `chrom`, `pos`, `ref`, `alt` | `window`, `reference`, `format` (`text`/`rubric`; `json` = `rubric`), `include_clinical` |
+| `classify_variant` | Assemble BAM + ClinVar + gnomAD evidence and return an ACMG reasoning scaffold (research-grade, not a clinical determination) | `file_path`, `chrom`, `pos`, `ref`, `alt` | `gene`, `window`, `reference` |
+| `search_gene` | Search for a gene by symbol and return 1-based coordinates; pass `file_path` so the build is auto-detected | `symbol` | `file_path`, `build` |
+| `cleanup_cache` | Clear the server's downloaded BAM index files and region cache (single-client stdio servers only; shared HTTP servers expire their cache by TTL) | — | — |
 
 > **Genome build & `search_gene`.** Gene coordinates are build-specific — a GRCh38 locus in a
 > GRCh37 BAM is silently ~0.5–2 Mb off the real gene. Pass the BAM's **`file_path`** to
@@ -363,25 +366,31 @@ relationship:
   de-duplicated.
 - **`variant_source="bamcp"`** — BAMCP's read-level candidates only; any `vcf_path` is ignored.
 
+The VCF must be bgzip-compressed and indexed (`.tbi`/`.csi`), or an indexed BCF.
+
 Enrich further with `lookup_clinvar` / `lookup_gnomad` on the returned 1-based positions.
 
 #### Error vs. absence in database lookups
 
 `lookup_clinvar` / `lookup_gnomad` responses carry an explicit `status`:
 `found` · `not_found` (the variant is genuinely absent from that database) ·
-`unavailable` (the lookup **errored or timed out** — absence is *unknown*) · `disabled` ·
-`invalid_input`. This matters because a failed lookup must not read as "not in the database" —
+`unavailable` (the lookup **errored or timed out** — absence is *unknown*) · `disabled`
+(switched off on this server via `BAMCP_CLINVAR_ENABLED` / `BAMCP_GNOMAD_ENABLED`). Invalid
+input (a bad allele, position or build) is a tool error (`isError`), not a status. This matters because a failed lookup must not read as "not in the database" —
 in the ACMG scaffold (`classify_variant`) that would let a network blip masquerade as rarity
-(PM2) or "no pathogenic assertion" evidence. When a source is `unavailable`, the fused evidence
-block is `{"status": "unavailable"}` (not `null`) and the scaffold flags the line for retry
-rather than treating it as absence.
+(PM2) or "no pathogenic assertion" evidence. When a source is `unavailable` (or `disabled`), the
+fused evidence block is `{"status": "unavailable"}` / `{"status": "disabled"}` (not `null`) and
+the scaffold marks that evidence line as not established rather than treating it as absence.
 
 #### Self-describing filters
 
 Every variant-producing response (`get_variants`, `visualize_region`, `jump_to`,
-`get_region_summary`, `scan_variants`) echoes the thresholds it **actually applied** —
-`applied_filters` (`min_vaf`, `min_depth`, `min_mapq`, `min_baseq`, and `max_reads` where reads
-are shown) plus a `filter_note`. This makes a variant's **absence** interpretable: an empty result
+`scan_variants`, `get_variant_curation_summary`, `classify_variant`; `get_region_summary` as a
+"Filters applied" line) echoes what it **actually applied** — `applied_filters` (`min_vaf`,
+`min_depth`, `min_mapq`, `min_baseq`, `min_alt_count`, `excluded_reads`, `overlapping_mates`,
+`reference_source`, `max_reads` / `reads_truncated` where reads are shown, and whether SNV and
+indel detection ran); `get_variants`, `scan_variants` and the viewer tools also add a
+`filter_note`. This makes a variant's **absence** interpretable: an empty result
 at a site may reflect an aggressive `min_vaf`/`min_depth` rather than a true reference call. Loosen
 the thresholds (per-call `min_vaf`/`min_depth`, or the server defaults) to widen the net.
 
@@ -389,11 +398,13 @@ the thresholds (per-call `min_vaf`/`min_depth`, or the server defaults) to widen
 
 Any `file_path` argument also accepts a demo alias — `demo:HG002` (GIAB HG002, GRCh38, chr-style)
 or `demo:HG00096` (1000 Genomes, GRCh37, no `chr`). The alias is swapped for the dataset's public
-URL before validation, so the normal remote-URL checks still apply; an unknown `demo:` name is an
-error that lists the available demos. No tools are added for this — discovery is via MCP:
+URL before validation, so the normal remote-URL checks still apply (`BAMCP_ALLOW_REMOTE_FILES=true`,
+and the dataset's host on any allow-list); an unknown `demo:` name is an error that lists the
+available demos. No tools are added for this — discovery is via MCP:
 
 | Kind | Name | What it is |
 |------|------|-----------|
+| Resource | `ui://bamcp/viewer` | The MCP Apps alignment viewer (HTML) used by `visualize_region` / `jump_to` |
 | Resource | `bamcp://demos` | Demo datasets (JSON): alias, URL, build, contig style, matching reference URL, curated 1-based loci |
 | Resource | `bamcp://glossary` | Plain-language glossary with "can / cannot conclude" for each term |
 | Resource | `bamcp://guide` | Four-step newcomer guide |
@@ -403,10 +414,14 @@ error that lists the available demos. No tools are added for this — discovery 
 
 ### Region Format
 
-Regions can be specified as:
-- `chr1:1000-2000` — Standard format
+Regions are **1-based, inclusive** (samtools-style):
+- `chr1:1000-2000` — Standard format (1,001 bases)
 - `chr1:1,000-2,000` — Commas allowed
-- `1:1000-2000` — Without "chr" prefix (depends on BAM header)
+- `chr1:1000` — A single base (same as `chr1:1000-1000`)
+- `1:1000-2000` — Without "chr" prefix (must match the BAM header; `list_contigs` shows the style)
+
+A region string is at most 100 characters and spans at most 1 Mbp (`scan_variants` accepts up to
+250 Mbp and resumes via `next_region`).
 
 ---
 
@@ -416,9 +431,9 @@ Regions can be specified as:
 
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
-| `BAMCP_REFERENCE` | Path to reference FASTA (required for CRAM) | None |
-| `BAMCP_MAX_READS` | Maximum reads to fetch per region | `10000` |
-| `BAMCP_DEFAULT_WINDOW` | Default viewing window size (bp) | `500` |
+| `BAMCP_REFERENCE` | Default reference FASTA (needed to decode CRAM and for SNV/indel detection) | None |
+| `BAMCP_MAX_READS` | Maximum reads returned for display per region (coverage and variant counts are not capped) | `10000` |
+| `BAMCP_DEFAULT_WINDOW` | Default `jump_to` window size (bp) | `500` |
 | `BAMCP_MIN_VAF` | Minimum allele fraction for candidate variants | `0.10` |
 | `BAMCP_MIN_DEPTH` | Minimum depth for candidate variants | `2` |
 | `BAMCP_MIN_ALT_COUNT` | Minimum reads supporting the alternative allele | `3` |
@@ -426,6 +441,14 @@ Regions can be specified as:
 | `BAMCP_MIN_BASEQ` | Minimum base quality for coverage and candidate variant counts | `13` |
 | `BAMCP_NCBI_API_KEY` | Optional NCBI E-utilities API key (10 req/s instead of 3); ClinVar/gene lookups retry NCBI 429s with bounded backoff either way | None |
 | `BAMCP_MAX_REMOTE_INDEX_BYTES` | Maximum remote BAM/CRAM index download size | `67108864` |
+| `BAMCP_GENOME_BUILD` | Default build for lookups and `search_gene` without a BAM (`GRCh37`/`hg19`/`b37` or `GRCh38`/`hg38`) | `GRCh38` |
+| `BAMCP_CLINVAR_ENABLED` | Enable ClinVar lookups (off → `status: disabled`) | `true` |
+| `BAMCP_GNOMAD_ENABLED` | Enable gnomAD lookups (off → `status: disabled`) | `true` |
+| `BAMCP_GNOMAD_DATASET` | gnomAD dataset; `auto` picks by build, an explicit dataset must match the lookup's build | `auto` |
+| `BAMCP_CACHE_DIR` | Directory for downloaded index files (falls back to a temp dir if the default is not writable) | `~/.cache/bamcp` |
+| `BAMCP_CACHE_TTL` | Index and region cache lifetime (seconds) | `86400` |
+| `BAMCP_MAX_INDEX_CACHE_BYTES` | Total size cap for the on-disk index cache | `536870912` |
+| `BAMCP_PREWARM` | Warm the demo datasets in the background at startup (HTTP transports only) | `true` |
 
 ### Transport Settings
 
@@ -451,9 +474,21 @@ Regions can be specified as:
 is a **service token** (`BAMCP_VERIFY_TOKEN`) — a stateless bearer that survives restarts.
 Dynamic client registration is **off by default**: an open `/register` endpoint would let any
 client self-register and mint a token, which is not access control. Enable it
-(`BAMCP_ALLOW_DYNAMIC_REGISTRATION=true`) only for interactive OAuth clients in a trusted/dev
-context. With auth enabled, an unauthenticated request is rejected (401) and only the service
-token (or an out-of-band-registered client) is authorized.
+(`BAMCP_ALLOW_DYNAMIC_REGISTRATION=true`) only where open sign-up is intended: interactive OAuth
+clients in a dev context, or a public demo (the hosted demo enables it so claude.ai connectors
+can sign in, and every in-memory OAuth store is size-bounded). With auth enabled, an
+unauthenticated request is rejected (401) and only the service token (or, with dynamic
+registration on, a registered client's token) is authorized; the server refuses to start with
+auth on but neither `BAMCP_VERIFY_TOKEN` nor dynamic registration set. The `/__version`
+deploy-identity route is unauthenticated.
+
+### Telemetry Settings
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `BAMCP_TELEMETRY_ENABLED` | Enable tool-call telemetry | `false` |
+| `BAMCP_TELEMETRY_PATH` | JSONL output file (empty disables file output) | None |
+| `BAMCP_TELEMETRY_OTEL` | Export via OpenTelemetry (needs the `[telemetry]` extra) | `false` |
 
 ### Security Settings
 
@@ -462,58 +497,138 @@ token (or an out-of-band-registered client) is authorized.
 | `BAMCP_ALLOW_REMOTE_FILES` | Allow HTTP(S) BAM/CRAM/VCF/reference URLs | `false` |
 | `BAMCP_ALLOWED_REMOTE_HOSTS` | Comma-separated host allow-list for remote fetch (the real SSRF control) | None |
 | `BAMCP_ALLOWED_DIRECTORIES` | Comma-separated local dirs that file paths must be under | None |
-| `BAMCP_RATE_LIMIT` | Requests per minute per client IP | `60` |
-| `BAMCP_RATE_LIMIT_TRUSTED_PROXIES` | IPs/CIDRs whose `X-Forwarded-For` is trusted | loopback |
-| `BAMCP_TRUSTED_HOSTS` | Allowed `Host` headers (DNS-rebinding protection) | None |
+| `BAMCP_RATE_LIMIT` | Requests per minute per client IP (every MCP JSON-RPC message counts) | `120` |
+| `BAMCP_RATE_LIMIT_TRUSTED_PROXIES` | IPs/CIDRs whose `CF-Connecting-IP` / `X-Forwarded-For` headers are trusted | loopback (`127.0.0.1`, `::1`) |
+| `BAMCP_TRUSTED_HOSTS` | Comma-separated allowed `Host` headers (DNS-rebinding protection) | None (no Host check) |
 
 Remote fetch is SSRF-guarded: private/internal/metadata IPs are always blocked, and — because the
 actual fetch is performed by pysam/htslib (which follows redirects outside BAMCP) — the
 **host allow-list is the primary control**. Set `BAMCP_ALLOWED_REMOTE_HOSTS` in any
-internet-reachable deployment. `X-Forwarded-For` is honored only from a trusted proxy so a client
-cannot spoof its IP to bypass rate limits.
+internet-reachable deployment. Client-IP headers are honored only from a trusted proxy
+(`CF-Connecting-IP` first, then `X-Forwarded-For` walked right-to-left), so a client cannot spoof
+its IP to bypass rate limits.
 
 ---
 
 ## Implementation Details
 
-### Why Canvas over React?
+### Canvas Rendering
 
-React's virtual DOM reconciliation struggles with thousands of elements. Genomic regions typically contain 1,000-10,000+ reads:
-
-| Approach | Max Reads | DOM Nodes | Frame Rate |
-|----------|-----------|-----------|------------|
-| React/SVG | ~500 | O(n) | Degrades |
-| Canvas 2D | ~10,000 | O(1) | 60fps |
-| WebGL | ~100,000+ | O(1) | 60fps |
-
-BAMCP uses Canvas 2D for the rendering layer with vanilla JS for controls.
+Genomic regions often contain thousands of reads, which is costly to render as individual DOM or
+SVG elements. BAMCP draws reads, coverage and the reference on a Canvas 2D surface; the viewer is
+a TypeScript app bundled by Vite (`src/bamcp/static/`).
 
 ### Read Packing Algorithm
 
 Reads are packed into rows using a greedy algorithm:
 
 ```
-For each read (sorted by start position):
-    Find first row where read.start > row.end
-    If found: add to that row
+For each read (in the chosen sort order — position, MAPQ, insert size or strand — with mates kept together):
+    If the row that ends earliest ends before read.start: add the read to that row
     Else: create new row
 ```
 
-This minimizes vertical space while preventing overlaps.
+A min-heap of row end positions keeps this O(n log rows) while preventing overlaps.
 
 ### Variant Detection
 
-BAMCP performs simple pileup-based variant detection:
+BAMCP performs simple pileup-based candidate detection (it needs a reference):
 
-1. Count bases at each position from aligned reads
-2. Calculate variant allele frequency (VAF) = alt_count / total_depth
-3. Report positions where VAF >= threshold and depth >= minimum
+1. Count A/C/G/T at each position from reads passing `min_mapq` (unmapped, secondary,
+   supplementary, duplicate and QC-fail reads excluded), counting only bases at or above `min_baseq`
+2. Calculate VAF = alt_count / depth, where depth includes reads carrying a deletion at the
+   position (in regions up to 100 kb, where the indel pass runs)
+3. Report SNVs where VAF ≥ `min_vaf`, depth ≥ `min_depth` and alt reads ≥ `min_alt_count`
+4. Detect indels with a separate pileup pass for regions up to 100 kb (`scan_variants` is SNV-only)
 
 This is intentionally basic—for production variant calling, use dedicated tools (GATK, DeepVariant, etc.).
 
 ### CRAM Support
 
-CRAM files require a reference FASTA for decoding. Set `BAMCP_REFERENCE` or pass `reference` to each tool call.
+CRAM files require a reference FASTA for decoding. Set `BAMCP_REFERENCE` or pass `reference` to each tool call. With `BAMCP_ALLOW_REMOTE_FILES=true` and neither set, BAMCP auto-selects a public reference matching the file's detected build and contig naming (`applied_filters.reference_source: auto`).
+
+---
+
+## Evaluation
+
+BAMCP is evaluated three ways; each result below links to the document it comes from.
+Methodology for the harnesses is in [EVALS.md](EVALS.md).
+
+### CI gate: deterministic ground truth
+
+The `eval-smoke` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) generates the
+test fixtures and runs `make eval-smoke`, which scores BAMCP's own tools with
+`bamcp.eval.truthset` against two planted truth sets. It needs no LLM, API key or network, and a
+missed floor exits non-zero, which fails the job; the same `make eval-smoke` is the ship-gate in
+`greenlight-build.yml`.
+
+- [`synthetic_v1`](tests/eval/datasets/synthetic_v1/manifest.yaml): 9 planted variant alleles
+  across 8 sites, 3 reference-only negative regions and 5 artifact sites (strand bias,
+  read-position bias, low MAPQ, homopolymer, low depth), scored at the manifest's pinned
+  operating point (`min_vaf 0.02`, `min_depth 2`, `min_mapq 0`, `min_baseq 0`,
+  `min_alt_count 1`).
+- [`indel_v1`](tests/eval/datasets/indel_v1/manifest.yaml): a planted 3 bp deletion and 2 bp
+  insertion, scored with `--min-precision 1.0`.
+
+The floors are defined in `TruthsetReport.meets_floors`
+([`src/bamcp/eval/truthset.py`](src/bamcp/eval/truthset.py)): variant recall ≥ 1.0, precision ≥
+0.95 (1.0 for `indel_v1`), artifact-type recall ≥ 1.0, 0 calls in negative regions, 0 tool
+failures, 0 artifact-likelihood mismatches, 0 VAF mismatches (tolerance 0.02 in the manifest),
+0 confidence mismatches, the clean control scored below the artifact sites, and 0 sites
+reported as both high artifact likelihood and high confidence (the overconfidence guard in
+[SAFETY.md](SAFETY.md)). The same job also runs `make eval-visual-dry`, the hermetic self-test
+of the visual-study harness.
+
+### GIAB benchmark
+
+[`tests/eval/datasets/giab/GIAB_RESULTS.md`](tests/eval/datasets/giab/GIAB_RESULTS.md) scores
+BAMCP's variant detection against NIST Genome-in-a-Bottle truth for HG001 / NA12878 (v4.2.1,
+GRCh38) on chr20:1,000,000–1,060,000 (60 kb): 66 truth SNVs (59 hom, 7 het). The reads are
+simulated (30×, 100 bp, base-error rate 0.001, seed 1), so this is real variant catalog and
+sequence with simulated reads. Point B reproduces with `make giab-benchmark` (network-gated, not
+in CI); GIAB_RESULTS.md gives the point-A command.
+
+| Operating point (as named in GIAB_RESULTS.md) | min VAF | min depth | min MAPQ | Recall | Precision | F1 | FP (neg. regions) |
+|---|---|---|---|---|---|---|---|
+| A — curation sensitivity (pre-2026-10 defaults) | 0.02 | 2 | 0 | 1.000 | 0.034 | 0.066 | 171 |
+| B — variant calling | 0.20 | 8 | 20 | 1.000 | 1.000 | 1.000 | 0 |
+
+Per that document: SNVs only (the 7 indel truth records in the slice are skipped), clean
+simulated reads make precision at point B an upper bound, and real-read failure modes are not
+measured. Its two coordinate corrections (2026-07-26 for variant positions, 2026-10-29 for region
+strings) record how the manifest fell out of step when BAMCP moved to 1-based coordinates; the
+manifest is now 1-based throughout, and both rows were re-measured on 2026-10-29 and reproduce.
+The current server defaults (`min_vaf 0.10`, `min_mapq 20`, `min_baseq 13`, `min_alt_count 3`)
+are neither point.
+
+### Visual-vs-text study
+
+The [visual-vs-text study](docs/eval/visual-results.md) asks whether a model reviewing a
+candidate variant does better with BAMCP's viewer image, BAMCP's text output, or the reads as
+text. Rounds 1, 3, 4 and 5 were pre-registered before their scored runs (round 4 after its
+text-only pilots)
+([round 1](docs/eval/visual-preregistration.md), [round 3](docs/eval/visual-preregistration-r3.md),
+[round 4](docs/eval/visual-preregistration-r4.md), [round 5](docs/eval/visual-preregistration-r5.md)),
+and every run was a fresh, blind model from one of three Claude tiers (small/mid/large)
+comparing raw read text (later raw `samtools mpileup`), BAMCP's structured JSON (later its text
+tools), the viewer image, and image plus text. Both pre-registered primary contrasts in
+the pilot were null (adding the picture to raw text: +0.038, CI −0.026 to +0.103, p = 0.375;
+the picture alone against the structured JSON: −0.038, CI −0.167 to +0.077, p = 0.61), and none
+of round 3's three contrasts was supported. In round 4, on
+long-repeat indels, neither BAMCP's text tools nor the viewer raised accuracy, and both cost the
+small model true-indel accuracy (0.60 → 0.40 with the text tools, 0.37 with the viewer); after
+the resulting spanning-read change, round 5 on 90 fresh sites found BAMCP's text tools raised
+balanced accuracy from 0.826 to 0.885 (Holm p = 0.027) and correct genotypes on true indels from
+30 to 54 of 135 (Holm p < 0.001). The document's stated limits apply: rounds 1–2 used 26
+synthetic items with one run per cell, and the iteration-2 viewer gain (0.821 → 0.910) was
+measured on the items that motivated the fix, so it is an upper estimate.
+
+### Model comparison harness
+
+[EVAL_RESULTS.md](EVAL_RESULTS.md) describes the model-comparison and tool-ablation harness; no
+real-model results from it are committed.
+
+The eval harnesses and the visual-vs-text study were built by directing Claude Code.
 
 ---
 
@@ -526,33 +641,38 @@ BAMCP/
 ├── src/
 │   └── bamcp/
 │       ├── __init__.py
-│       ├── __main__.py       # Entry point (transport selection)
-│       ├── server.py         # FastMCP server setup
-│       ├── tools.py          # Tool handlers
-│       ├── parsers.py        # pysam wrappers
-│       ├── resources.py      # UI resource provider
+│       ├── __main__.py       # Entry point (transport selection, HTTP middleware)
+│       ├── server.py         # FastMCP server setup, tool/resource registration
 │       ├── config.py         # Environment-based configuration
-│       ├── auth.py           # OAuth 2.0 authorization server
-│       └── static/
-│           └── viewer.html   # Bundled alignment viewer UI
+│       ├── constants.py      # Shared defaults and thresholds
+│       ├── tool_specs.py     # JSON-schema spec per tool
+│       ├── resources.py      # UI resource provider
+│       ├── demos.py          # demo: dataset aliases
+│       ├── prompts.py        # MCP prompts + bamcp://demos / guide resources
+│       ├── glossary.py       # bamcp://glossary
+│       ├── viewer_build.py   # Viewer source-hash build stamp
+│       ├── core/             # tools (handlers), parsers (pysam), validation, serialization,
+│       │                     # cache, reference, errors, prewarm
+│       ├── analysis/         # evidence, curation, acmg, fusion
+│       ├── clients/          # clinvar, gnomad, genes, ncbi, ttl_cache
+│       ├── middleware/       # auth (OAuth 2.0), ratelimit, security, telemetry
+│       ├── eval/             # evaluation harness (truthset gate, runner, grader, visual/)
+│       └── static/           # Viewer TS/Vite app (viewer.html, mcp-app.ts, renderer.ts, …)
+│           └── dist/         # Built viewer.html bundle (generated by `make build-viewer`)
 ├── tests/
 │   ├── conftest.py
 │   ├── create_fixtures.py    # Generate test BAM/FASTA files
-│   ├── test_parsers.py
-│   ├── test_tools.py
-│   ├── test_server.py
-│   ├── test_config.py
-│   ├── test_auth.py
-│   ├── test_resources.py
-│   ├── test_integration.py
-│   ├── test_docker.py
+│   ├── create_visual_eval_fixtures.py
+│   ├── unit/                 # analysis/, clients/, core/, eval/, middleware/, test_*.py
+│   ├── integration/
+│   ├── eval/                 # truth-set tests + datasets/ (synthetic_v1, indel_v1, acmg_v1, giab)
 │   ├── fixtures/
-│   └── e2e/
-│       ├── conftest.py
-│       └── test_viewer_e2e.py
+│   └── e2e/                  # Playwright viewer tests
 ├── docker/
 │   ├── entrypoint.sh
 │   └── healthcheck.py
+├── scripts/                  # verify-local.sh, render_viewer.py, run_eval.py, setup-cloudflared.sh, …
+├── docs/                     # ROADMAP.md, eval/ (visual-vs-text study)
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml
@@ -561,11 +681,17 @@ BAMCP/
 │       └── security.yml
 ├── Dockerfile              # Production (multi-stage)
 ├── Dockerfile.dev          # Development (with test tooling)
-├── docker-compose.yml      # dev/beta/prod profiles
+├── docker-compose.yml      # dev/beta/preview/prod profiles
+├── dev_server.py           # Launch under the MCP Inspector
 ├── pyproject.toml
+├── uv.lock
 ├── Makefile
 ├── README.md
+├── CHANGELOG.md
 ├── CONTRIBUTING.md
+├── EVALS.md
+├── EVAL_RESULTS.md
+├── SAFETY.md
 ├── SECURITY.md
 └── LICENSE
 ```
@@ -573,27 +699,42 @@ BAMCP/
 ### Running Locally
 
 ```bash
-# stdio mode (default)
+# stdio mode (default); `bamcp` is the installed console script for the same entry point
 python -m bamcp
 
-# SSE mode (network)
-BAMCP_TRANSPORT=sse python -m bamcp
-
-# Streamable HTTP mode
+# Streamable HTTP mode (network, preferred)
 BAMCP_TRANSPORT=streamable-http python -m bamcp
+
+# SSE mode (deprecated by the MCP spec)
+BAMCP_TRANSPORT=sse python -m bamcp
 
 # With MCP inspector
 npx @modelcontextprotocol/inspector python -m bamcp
+
+# MCP Inspector at http://localhost:6274 with the test fixtures
+./dev_server.py
 ```
 
 ### Running Tests
 
 ```bash
+# Every ci.yml gate except the docker build, in one command (run before pushing; VERIFY_E2E=1 adds Playwright)
+make verify
+
 # Unit + integration tests
 make test
 
 # With HTML coverage report
 make coverage
+
+# CI coverage bar (85%)
+make coverage-strict
+
+# Deterministic ground-truth eval gate
+make eval-smoke
+
+# Live-network tests (excluded by default)
+make test-network
 
 # E2E tests (requires Playwright)
 make test-e2e
@@ -616,11 +757,13 @@ make typecheck
 ```
 
 Tools: [ruff](https://github.com/astral-sh/ruff) (linting + formatting), [mypy](https://mypy.readthedocs.io/) (type checking).
+Frontend (`src/bamcp/static/`): `npm run typecheck && npm run lint && npm test` (tsc, ESLint,
+vitest). Pre-commit hooks: `pip install pre-commit && pre-commit install`.
 
 ### Docker Development
 
 ```bash
-# Build all images
+# Build prod and dev images
 make docker-build
 
 # Run tests in container
@@ -629,16 +772,22 @@ docker compose --profile dev run --rm test
 # Run linting in container
 docker compose --profile dev run --rm lint
 
-# Start beta server
+# Start beta server (legacy SSE, no auth)
 docker compose --profile beta up
 
-# Start production server (with auth)
-docker compose --profile prod up
+# Start preview server (Streamable HTTP, no auth — matches prod's transport)
+docker compose --profile preview up
+
+# Start production server (auth on; needs a service token)
+BAMCP_VERIFY_TOKEN=<token> docker compose --profile prod up
 ```
 
 ---
 
 ## Roadmap
+
+Milestones are development phases, not releases — the package is still `0.1.0` and nothing is
+tagged yet (see [CHANGELOG.md](CHANGELOG.md)).
 
 - [x] **v0.1** — Core viewer with BAM support, Canvas renderer, variant detection
 - [x] **v0.2** — CRAM support, coverage track, MCP Apps UI resource
@@ -646,9 +795,10 @@ docker compose --profile prod up
 - [x] **v0.4** — Docker infrastructure (prod/dev/beta), CI/CD
 - [x] **v0.5** — MCP Apps SDK integration (`updateModelContext`, display modes, auto-fetch)
 - [x] **v0.6** — ClinVar + gnomAD API clients, gene search, variant curation tools
-- [x] **v0.7** — Evaluation harness: deterministic ground-truth gate (variant P/R/F1, artifact-type recall) wired into CI, plus LLM + vision harness ([EVALS.md](EVALS.md)). GIAB real-data set scaffolded.
+- [x] **v0.7** — Evaluation harness: deterministic ground-truth gate (variant P/R/F1, artifact-type recall) wired into CI, plus LLM + vision harness ([EVALS.md](EVALS.md)). GIAB benchmark run on a chr20 slice with simulated reads ([results](tests/eval/datasets/giab/GIAB_RESULTS.md)); visual-vs-text study, five rounds ([results](docs/eval/visual-results.md)).
 - [ ] **v0.8** — Gene annotation track (RefSeq)
-- [ ] **v0.9** — VCF overlay, multi-sample comparison
+- [x] **v0.9 (part)** — VCF/BCF overlay (`vcf_path` + `variant_source`, including multi-sample VCF genotypes in the viewer)
+- [ ] **v0.9** — Multi-sample comparison
 - [ ] **v1.0** — Stable release
 
 ---
@@ -667,10 +817,11 @@ docker compose --profile prod up
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+2. Create a branch off `main` (`git checkout -b feat/amazing-feature`, or `fix/...`)
+3. Write tests for your changes and run `make verify` (every ci.yml gate except the docker build)
+4. Commit in conventional style (`git commit -m 'feat(viewer): amazing feature'`)
+5. Push to the branch (`git push origin feat/amazing-feature`)
+6. Open a Pull Request against `main`
 
 ---
 

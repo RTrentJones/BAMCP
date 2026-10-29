@@ -5,7 +5,7 @@
 dataset: giab_hg001_grch38_v4.2.1
 version: 1
 description: >-
-  66 real NIST truth SNVs on chr20:1000000-1060000 inside the
+  66 real NIST truth SNVs on chr20:1000001-1060000 inside the
   high-confidence BED, simulated at 30x with base-error rate 0.001.
 
 provenance:
@@ -18,7 +18,7 @@ provenance:
     Semi-synthetic. Measures recovery of real variant structures and
     noise rejection; NOT robustness to real alignment/mapping artifacts.
 
-detection_region: chr20:1000000-1060000
+detection_region: chr20:1000001-1060000
 
 variant_sites:
   - {chrom: chr20, pos: 1002295, ref: G, alt: A, category: het}
@@ -89,6 +89,6 @@ variant_sites:
   - {chrom: chr20, pos: 1058693, ref: A, alt: C, category: hom}
 
 negative_regions:
-  - {region: 'chr20:1000000-1002000', note: 'high-confidence, no truth SNV'}
-  - {region: 'chr20:1008797-1010797', note: 'high-confidence, no truth SNV'}
-  - {region: 'chr20:1011613-1013613', note: 'high-confidence, no truth SNV'}
+  - {region: 'chr20:1000001-1002000', note: 'high-confidence, no truth SNV'}
+  - {region: 'chr20:1008798-1010797', note: 'high-confidence, no truth SNV'}
+  - {region: 'chr20:1011614-1013613', note: 'high-confidence, no truth SNV'}

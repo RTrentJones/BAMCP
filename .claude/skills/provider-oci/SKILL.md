@@ -20,8 +20,10 @@ tool container + a **cloudflared sidecar** (shared netns → localhost), exposed
 
 ## Provider-agnostic tool → GHCR
 
-The tool repo (BAMCP) has ONE job: a GitHub Actions workflow that **builds + pushes the container
-to GHCR**. No OCI, no SSH, no deploy logic — portable to any provider's infra.
+The tool repo (BAMCP) has ONE CI job: a GitHub Actions workflow (`greenlight-build.yml`) that
+**builds + pushes the container to GHCR** and dispatches the wrapper. CI holds no OCI creds and no
+deploy logic — portable to any provider's infra. The repo still ships operator scripts that drive
+OCI by hand (`scripts/setup-cloudflared.sh`, `setup-oci-secrets.sh`, `debug-container.sh`).
 
 ## Greenlight OCI infra (Terraform, in the wrapper)
 
@@ -53,7 +55,8 @@ another — the only time you touch it.)
 "Configuration file preview" (the `[DEFAULT]` block) and you download the `.pem`. Pass both:
 `greenlight secrets gather <tool> --repo <o/r> --oci-config ~/path/config [--oci-key ~/path/key.pem]`
 — it auto-fills the 5 auth secrets (incl. the multi-line PEM, read from the file so it's never
-pasted) and only prompts for the 3 placement values + the option-B deploy PATs.
+pasted) and only prompts for the optional compartment, the optional container-instance OCID (the deploy
+workflow can also resolve it by name), and the option-B deploy PATs.
 
 ## Deploy = restart (re-pull)
 
@@ -66,7 +69,7 @@ builds; an event trigger (the chosen deploy option) fires the restart. The adapt
 OCI Always-Free can reclaim idle compute. We **stay on the free tier** and accept that: the
 instance runs restart-policy ALWAYS, keepalive health-checks it, and if it's ever stopped/reclaimed
 the alert fires and a **re-apply / redeploy** restores it. **PAYG is NOT used** — it's an optional
-last resort (see `docs/oci-payg-runbook.md`) only if reclaim ever becomes a recurring problem.
+last resort (see Greenlight's `docs/oci-payg-runbook.md`, not vendored in this repo) only if reclaim ever becomes a recurring problem.
 
 ## Verify
 The tool is typically an **MCP server**: verify with `mode: mcp`, connect at `<name>.<domain>/mcp`

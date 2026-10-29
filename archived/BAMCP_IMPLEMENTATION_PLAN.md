@@ -1,3 +1,5 @@
+> **Archived — superseded planning doc, kept for history only. Not current design; see [docs/ROADMAP.md](../docs/ROADMAP.md).**
+
 # BAMCP Implementation Plan
 
 Full implementation schedule for MCP Apps viewer, ClinVar/gnomAD integration, and the Evaluation Harness.

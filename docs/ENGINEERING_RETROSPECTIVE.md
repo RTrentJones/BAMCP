@@ -89,6 +89,9 @@ silent offset — and the LLM reasoning over that output can catch the contradic
   Cloudflare Tunnel, integrating a real IdP would be more code defending a threat model that
   doesn't exist. I removed the dynamic-registration theater and adopted a stateless service token
   instead. Interactive OAuth remains available behind a flag for dev.
+  [Since changed: prod re-enabled dynamic registration so claude.ai connectors can onboard
+  (RTrentJones.dev 6c50cb8); the flag still defaults off in code, and the service token remains
+  the CI verify path.]
 
 - **Allow-list over redirect-revalidation for SSRF.** Because pysam/htslib performs the actual
   fetch (and follows redirects invisibly to the application), "validate every redirect hop" isn't
@@ -105,7 +108,9 @@ silent offset — and the LLM reasoning over that output can catch the contradic
 
 - The biological benchmark is one 60 kb slice of simulated reads over real GIAB genotypes. It shows
   the detector recovers planted SNVs on that slice — **not** general caller correctness across
-  genomes, indels, SVs, or real sequencer error.
+  genomes, indels, SVs, or real sequencer error. [Since changed: a real-read GIAB HG002 tier
+  exists for the visual-vs-text eval (4ed4cab, #69), and a synthetic indel truth set gates CI
+  (6e91960, #44); the deterministic GIAB slice is unchanged.]
 - The LLM eval now grades answer correctness, but a broad, human-labeled benchmark with judge-swap
   concordance is still ahead. Running model evals through the real MCP transport (rather than the
   in-process router) is scoped but not done.

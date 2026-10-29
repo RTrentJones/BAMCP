@@ -8,7 +8,9 @@ description: How GitHub works in a Greenlight setup — secrets sync target (Act
 GitHub is the **always-on** control plane: it holds the Actions **secrets** (provider tokens),
 the **environments** (beta/prod), branch protection, and runs the deploy/promote/infra
 workflows. The `develop → main` flow is standardized (PR → preview, `develop` → beta, `main`
-→ prod; promote is a gated fast-forward).
+→ prod; promote is a gated fast-forward). Exception: oci tools like BAMCP are `main`-only and
+direct-to-prod (no `develop`, no beta, no promote); `greenlight-build.yml`'s ship-gate is the
+pre-prod safety.
 
 ## Token — `GITHUB_TOKEN` (usually you don't set one)
 
@@ -21,7 +23,7 @@ workflows. The `develop → main` flow is standardized (PR → preview, `develop
 ### Poly-repo deploy loop — the two option-B PATs
 
 An adopted tool (submodule) and its wrapper hand off via two fine-grained PATs (`secrets gather`
-pushes each to the right repo; see docs/provider-tokens.md):
+pushes each to the right repo; see Greenlight's `docs/provider-tokens.md`, not vendored in this repo):
 
 - **`GREENLIGHT_DISPATCH_TOKEN`** — on the **tool** repo, scoped **Contents: write** on the
   **wrapper** → the tool's build fires `repository_dispatch` so the wrapper deploys.

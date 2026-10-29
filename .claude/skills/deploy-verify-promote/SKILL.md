@@ -67,6 +67,6 @@ Two axes cause all the variation:
 - `greenlight doctor` flags any tool drifting from this model (no verify spec, no local preview gate).
 
 ## Cross-repo note
-In adopted/standalone repos (BAMCP, ejected tools) this skill is delivered by the **Greenlight
-Claude Code plugin** and the mechanics by the `@rtrentjones/greenlight*` npm deps; the per-repo
-parameters come from that repo's (or the wrapper's) `greenlight.config.ts`.
+In adopted repos (BAMCP) this skill is committed under `.claude/skills/`; the mechanics come from
+the `@rtrentjones/greenlight*` packages and the per-tool parameters from the wrapper's
+`greenlight.config.ts` (BAMCP has none of its own).

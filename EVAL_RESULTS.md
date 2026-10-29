@@ -1,4 +1,10 @@
-# BAMCP model comparison & tool-use ablation
+# BAMCP model comparison & tool-use ablation harness
+
+> **No real-model results are committed here.** This file documents the comparison harness and
+> its mock-provider validation. BAMCP's committed evaluation results are elsewhere:
+> the CI ground-truth gate ([EVALS.md](EVALS.md), truth sets in `tests/eval/datasets/`), the
+> [GIAB benchmark](tests/eval/datasets/giab/GIAB_RESULTS.md), and the
+> [visual-vs-text study](docs/eval/visual-results.md).
 
 Two questions a deployment actually asks, answered by re-running the eval
 harness across configurations (`bamcp.eval.compare`):
@@ -14,59 +20,61 @@ withheld, same cases) and reports the lift.
 
 ## Status
 
-- **Pipeline: done and validated.** The comparison runner, aggregation, and the
-  Markdown/JSON tables are implemented and proven end-to-end with the `mock`
-  provider (see the validation table below and `tests/unit/eval/test_compare.py`).
-- **Real numbers: pending an API key.** A real run is a drop-in swap of the
-  provider/model — no code changes:
+- **Pipeline: implemented and runs end-to-end offline.** The comparison runner,
+  aggregation, and the Markdown/JSON tables run with the `mock` provider (see the
+  validation run below and `tests/unit/eval/test_compare.py`).
+- **Real-model results: not run.** No real-model comparison results are committed to this
+  repository. A real run needs an API key and no code changes:
 
   ```bash
-  export ANTHROPIC_API_KEY=...        # or OPENAI_API_KEY for --provider openai
-  make eval-matrix                     # defaults to claude-opus-4-8 + claude-sonnet-4-5
-  # or, explicitly:
-  python scripts/run_comparison.py --provider anthropic \
-    --models claude-opus-4-8 claude-sonnet-4-5 \
-    --test-cases tests/eval/test_cases.yaml \
-    --results-md EVAL_RESULTS.md
+  export ANTHROPIC_API_KEY=...
+  make eval-matrix   # models: COMPARISON_MODELS in src/bamcp/eval/models.py
   ```
 
-  Paste the generated table into the [Results](#results) section below.
+  `make eval-matrix` runs `scripts/run_comparison.py --provider anthropic --results-md
+  EVAL_RESULTS.md`; pass `--models` to choose others. The OpenAI provider is gated off in the
+  nightly workflow until the runner translates its message format.
 
 ---
 
 ## Results
 
-> _Placeholder — populated by the first real run. The tables below are the
-> **mock-provider validation**, which proves the pipeline produces a
-> well-formed, differentiated report without a key._
+> _No real-model results. The tables below are the **mock-provider validation**,
+> which proves the pipeline produces a well-formed, differentiated report without a
+> key; they say nothing about any real model._
 
 ### Pipeline validation (`--provider mock`)
 
-The `mock` model is scripted to behave like a capable agent: with tools
-advertised it parses the prompt and calls the right BAMCP tools; with tools
-withheld it can only answer from text. On the 4 synthetic cases:
+The `mock` model is scripted: with tools advertised it calls a fixed set of
+BAMCP tools and returns a fixed answer; with tools withheld it can only answer from text. Measured on 2026-10-29 with
+`make eval-matrix-mock` on the 4 cases in `tests/eval/test_cases.yaml`:
 
 | Configuration | Tools | Passed | Cases | Accuracy |
 |---|---|---:|---:|---:|
-| mock-model (tools) | on | 4 | 4 | **100%** |
+| mock-model (tools) | on | 1 | 4 | **25%** |
 | mock-model (no tools) | off | 0 | 4 | **0%** |
 
 | Model | With tools | Without tools | Lift from tools |
 |---|---:|---:|---:|
-| `mock-model` | 100% | 0% | **+100 pts** |
+| `mock-model` | 25% | 0% | **+25 pts** |
 
-This confirms the wiring: accuracy aggregates per config and per category, the
-ablation pairs tools-on/tools-off by model, and the tables render. Swap in a
-real provider and the same tables fill with real accuracy.
+Two cases carry a deterministic answer check. Variant Curation (rubric score
+thresholds) passes; List contigs (`expected_claims: ["chr1"]`) fails because the
+mock's fixed answer does not name the contig. The other two need the LLM judge,
+which the mock run does not configure, and calling tools never passes a case on
+its own (`grader.py`), so they score as not passed. This confirms the wiring: accuracy
+aggregates per config and per category, the ablation pairs tools-on/tools-off by
+model, and the tables render. It is not a measurement of any model.
 
 ---
 
 ## Reading the ablation honestly
 
 The current `tests/eval/test_cases.yaml` cases are **tool-targeted** — they ask
-the model to call a specific tool and are graded on whether it did. So the
-"without tools" arm scores ~0 almost by construction: no tools, no
-tool-verified answer. That validates the *plumbing* but is not yet a fair
+the model to call a specific tool, and their answer checks (rubric thresholds,
+`expected_claims`, or the judge) depend on that tool's output. The ablation
+grades answers only (`grade_tools=False`), but the "without tools" arm still
+scores ~0 almost by construction: no tools, no tool-derived answer. That validates the *plumbing* but is not yet a fair
 measurement of reasoning lift.
 
 A meaningful ablation needs **judge-graded reasoning cases** — questions with a
@@ -83,5 +91,7 @@ already supports them with no changes.
 - The "no tools" arm uses a router that advertises zero tools, so the model
   genuinely cannot call BAMCP — the honest counterfactual.
 - Output: `comparison.json` (machine-readable) and a Markdown table
-  (`--results-md`). Nightly CI runs this when `ANTHROPIC_API_KEY` is present and
-  uploads both as artifacts.
+  (`--results-md`). The nightly workflow (`.github/workflows/eval-nightly.yml`) runs the
+  comparison only when the `ANTHROPIC_API_KEY` secret is configured (otherwise it reports the
+  skip), uploads `.eval-results/` as an artifact, and publishes to Tracer when
+  `TRACER_INGEST_TOKEN` is set.

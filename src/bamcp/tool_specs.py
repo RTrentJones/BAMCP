@@ -1,14 +1,16 @@
 """Canonical tool descriptions and JSON schemas.
 
 Single source of truth for the LLM-facing description and parameter schema of
-each BAMCP tool. The FastMCP server (``server.py``) derives its schemas from
-function signatures; this registry mirrors those so the eval harness exposes the
-*same* descriptions and parameter schemas a real MCP client would see — instead
-of the placeholder ``{additionalProperties: true}`` it used before. Because each
-schema sets ``additionalProperties: False``, a parameter missing here is one the
-eval model can never pass — so ``tests/unit/test_tool_specs.py`` asserts, for every
-tool, that the property and required sets match the schema FastMCP derives from
-``server.py``. Add or rename a parameter in both places.
+each BAMCP tool. ``server.py`` registers every tool with
+``description=TOOL_SPECS[name]["description"]``, so descriptions live only here;
+numeric facts in them (detection defaults, result caps) are generated from
+``constants`` so they cannot drift from behavior. The FastMCP server derives its
+parameter schemas from function signatures; this registry mirrors those so the eval
+harness exposes the *same* schemas a real MCP client would see. Because each schema
+sets ``additionalProperties: False``, a parameter missing here is one the eval model
+can never pass — so ``tests/unit/test_tool_specs.py`` asserts, for every tool, that
+the property and required sets (and the description) match what FastMCP registers.
+Add or rename a parameter in both places.
 
 Each entry is ``{"description": str, "input_schema": <JSON Schema object>}``.
 """
@@ -16,6 +18,15 @@ Each entry is ``{"description": str, "input_schema": <JSON Schema object>}``.
 from __future__ import annotations
 
 from typing import Any
+
+from .constants import (
+    DEFAULT_MIN_ALT_COUNT,
+    DEFAULT_MIN_BASEQ,
+    DEFAULT_MIN_DEPTH,
+    DEFAULT_MIN_MAPQ,
+    DEFAULT_MIN_VAF,
+    SCAN_VARIANTS_MAX_RESULTS,
+)
 
 _STR = {"type": "string"}
 _INT = {"type": "integer"}
@@ -44,13 +55,20 @@ AUTO_REFERENCE_NOTE = (
 )
 # The detection operating point (constants.DEFAULT_MIN_*), loosenable per call.
 DETECTION_DEFAULTS_NOTE = (
-    "Defaults: min_vaf 0.10, min_alt_count 3 alt reads, MAPQ>=20, base quality>=13; all "
-    "echoed in applied_filters. Lower min_vaf/min_alt_count to see weaker candidates."
+    f"Defaults: min_vaf {DEFAULT_MIN_VAF:.2f}, min_alt_count {DEFAULT_MIN_ALT_COUNT} alt reads, "
+    f"min_depth {DEFAULT_MIN_DEPTH}, MAPQ>={DEFAULT_MIN_MAPQ}, base quality>={DEFAULT_MIN_BASEQ}; "
+    "all echoed in applied_filters. Lower min_vaf/min_alt_count to see weaker candidates."
 )
 _MIN_ALT_COUNT = {
     **_INT,
-    "description": "Minimum alt-supporting reads for a BAMCP candidate (default 3)",
+    "description": "Minimum alt-supporting reads for a BAMCP candidate "
+    f"(default {DEFAULT_MIN_ALT_COUNT})",
 }
+# The answer vocabulary shared by the external-database lookups (core/tools._LOOKUP_*).
+_LOOKUP_STATUS_NOTE = (
+    "The response's status is found, not_found, unavailable (the lookup failed — absence is "
+    "NOT established) or disabled."
+)
 
 
 def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -64,12 +82,17 @@ def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
 
 TOOL_SPECS: dict[str, dict[str, Any]] = {
     "get_variants": {
-        "description": "Detect and return variants in a genomic region. Positions are "
-        "1-based (VCF/dbSNP convention); "
+        "description": "Detect and return candidate variants in a genomic region. Positions "
+        "are 1-based (VCF/dbSNP convention); "
         + REGION_FORMAT_NOTE
-        + " Each variant carries strand counts, mean base "
-        "quality, artifact-risk assessment, a confidence level, concerns, and a plain-language "
-        "interpretation with a zygosity hint. " + DETECTION_DEFAULTS_NOTE,
+        + " Each variant carries strand counts, mean base quality, artifact_risk, a confidence "
+        "level, concerns, and a plain-language interpretation with a zygosity hint. "
+        + DETECTION_DEFAULTS_NOTE
+        + " "
+        + AUTO_REFERENCE_NOTE
+        + " variant_source: 'auto' (BAMCP candidates, VCF overlaid if given), 'vcf' (the VCF is "
+        "authoritative — BAMCP attaches read-level evidence at each site; requires vcf_path), "
+        "or 'bamcp' (BAMCP candidates only).",
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -112,7 +135,8 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     "jump_to": {
         "description": "Jump to a specific genomic position and view the surrounding reads in "
         "the interactive viewer. contig and position are both required; position is 1-based "
-        "(VCF/samtools convention). Contig names follow the BAM (list_contigs: 'chr17' vs '17').",
+        "(VCF/samtools convention). Contig names follow the BAM (call list_contigs: 'chr17' vs "
+        "'17').",
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -141,9 +165,9 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         ),
     },
     "get_region_summary": {
-        "description": "Get a text summary of a genomic region (read count, coverage, and each "
-        "variant with a plain-language interpretation: zygosity hint, artifact risk, confidence) "
-        "for LLM reasoning. No UI. " + REGION_FORMAT_NOTE + " " + AUTO_REFERENCE_NOTE,
+        "description": "Get a text summary of a genomic region (read count, coverage, and "
+        "candidate variants each with a plain-language interpretation) for LLM reasoning. No "
+        "UI. " + REGION_FORMAT_NOTE + " " + AUTO_REFERENCE_NOTE,
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -161,7 +185,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         "(star rating), and associated conditions. Research-grade, not for clinical use. "
         "Positions are 1-based, in 'build' (GRCh37/hg19 or GRCh38/hg38; default: server "
         "build) — pass the BAM's build from list_contigs, or a GRCh37 variant is searched "
-        "at the wrong locus.",
+        "at the wrong locus. " + _LOOKUP_STATUS_NOTE,
         "input_schema": _obj(
             {"chrom": _STR, "pos": _INT, "ref": _STR, "alt": _STR, "build": _STR},
             ["chrom", "pos", "ref", "alt"],
@@ -171,7 +195,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": "Look up a variant in gnomAD for population allele-frequency data "
         "(global and per-population AF). Research-grade, not for clinical use. Positions are "
         "1-based, in 'build' (GRCh37/hg19 → gnomAD v2.1, GRCh38/hg38 → gnomAD v4; default: "
-        "server build) — pass the BAM's build from list_contigs.",
+        "server build) — pass the BAM's build from list_contigs. " + _LOOKUP_STATUS_NOTE,
         "input_schema": _obj(
             {"chrom": _STR, "pos": _INT, "ref": _STR, "alt": _STR, "build": _STR},
             ["chrom", "pos", "ref", "alt"],
@@ -179,9 +203,11 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "get_variant_curation_summary": {
         "description": "Get a detailed curation summary for a specific variant with artifact-risk "
-        "assessment, quality metrics, and curator recommendations. The named site is evaluated "
-        "even when it fails the calling filters (filter_check says which). Set format='rubric' "
-        "(or 'json') for a machine-scorable JSON with 0-1 quality scores. Positions are 1-based.",
+        "assessment, quality metrics, and curator recommendations — for in-depth variant review "
+        "by genetic curators. The named site is evaluated even when it fails the calling "
+        "filters (filter_check says which), so a filtered-out artifact is scored, not 'not "
+        "found'. Set format='rubric' (or 'json') for a machine-scorable JSON with 0-1 quality "
+        "scores; include_clinical=true adds ClinVar/gnomAD context. Positions are 1-based.",
         "input_schema": _obj(
             {
                 "file_path": _STR,
@@ -201,7 +227,8 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": "Scan a contig (or a 1-based region 'contig:start-end') for candidate "
         "SNVs using fast coverage-based detection. Requires a reference genome ("
         + AUTO_REFERENCE_NOTE
-        + ") Returns up to 500 candidates (the highest-VAF ones when capped) sorted by "
+        + f") Returns up to {SCAN_VARIANTS_MAX_RESULTS} candidates (the highest-VAF ones when "
+        "capped) sorted by "
         "position. A scan that hits its time budget returns partial results with "
         "truncated=true and next_region: pass that as region to continue. If contig and region "
         "are omitted, the BAM's first contig is scanned. " + DETECTION_DEFAULTS_NOTE,
@@ -224,10 +251,11 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "search_gene": {
         "description": "Search for a gene by symbol (e.g. BRCA1, TP53) and return its genomic "
-        "coordinates (1-based). Use this to navigate to a gene's location by name. Pass "
-        "file_path to return coordinates in that BAM's build (auto-detected), or build "
-        "(GRCh37/hg19 or GRCh38/hg38) to choose it explicitly. The returned region is "
-        "1-based inclusive, ready to pass to visualize_region.",
+        "coordinates. Coordinates are build-specific: pass the BAM's file_path so the build is "
+        "auto-detected and the coordinates line up in that BAM (a GRCh38 locus in a GRCh37 BAM "
+        "is ~0.5-2 Mb off, silently), or set build (GRCh37/hg19 or GRCh38/hg38) to override. "
+        "The response states the coordinates' genome_build and warns on any mismatch. The "
+        "returned region is 1-based inclusive, ready to pass to visualize_region.",
         "input_schema": _obj(
             {
                 "symbol": _STR,

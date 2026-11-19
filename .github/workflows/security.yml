@@ -44,6 +44,12 @@ jobs:
 
   codeql:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # python: the server. javascript-typescript: the viewer (src/bamcp/static/*.ts).
+        # Both are interpreted, so build-mode none — no build step / autobuild needed.
+        language: [python, javascript-typescript]
     permissions:
       contents: read
       security-events: write
@@ -51,8 +57,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
-          languages: python
+          languages: ${{ matrix.language }}
+          build-mode: none
           queries: security-extended
       - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
-          category: "/language:python"
+          category: "/language:${{ matrix.language }}"

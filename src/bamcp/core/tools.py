@@ -1616,6 +1616,58 @@ def _resolve_variant_source(variant_source: str, vcf_path: str | None) -> tuple[
     return vcf_path, variant_source == "vcf"
 
 
+@dataclass(frozen=True)
+class RegionRequest:
+    """The validated, resolved inputs of a region tool call (see :func:`_region_request`).
+
+    ``vcf_path``/``vcf_primary`` are the effective values from ``variant_source``; the
+    thresholds are the per-call overrides falling back to the operator config.
+    """
+
+    file_path: str
+    region: str
+    resolved: ResolvedReference
+    variant_source: str
+    vcf_path: str | None
+    vcf_primary: bool
+    min_vaf: float
+    min_depth: int
+    min_alt_count: int
+
+    @property
+    def reference(self) -> str | None:
+        """The reference the parsers get (explicit > config > auto)."""
+        return self.resolved.effective
+
+
+async def _region_request(
+    args: dict[str, Any], config: BAMCPConfig, *, region: str | None = None
+) -> RegionRequest:
+    """The shared preamble of the region tools, in their order: validate the file (off the
+    loop) and the region, resolve the reference, then the variant source and thresholds.
+
+    ``region`` overrides ``args["region"]`` for tools that build it (jump_to).
+    """
+    file_path = args["file_path"]
+    await asyncio.to_thread(validate_path, file_path, config)
+    region = args["region"] if region is None else region
+    validate_region(region)
+    resolved = await _resolve_reference_info(args, config)
+    variant_source = args.get("variant_source", "auto")
+    vcf_path, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
+    return RegionRequest(
+        file_path=file_path,
+        region=region,
+        resolved=resolved,
+        variant_source=variant_source,
+        vcf_path=vcf_path,
+        vcf_primary=vcf_primary,
+        min_vaf=args.get("min_vaf", config.min_vaf),
+        min_depth=args.get("min_depth", config.min_depth),
+        min_alt_count=args.get("min_alt_count", config.min_alt_count),
+    )
+
+
 # Bounded per-site evidence for get_variants: each BAMCP SNV candidate gets a pileup-backed
 # strand/quality/position record (artifact_risk + confidence) — up to this many sites per call,
 # so a noisy wide region can't turn one request into thousands of pileups. Past the cap the
@@ -2012,17 +2064,9 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     are kept); applied_filters then says ``truncated`` with ``total_candidates`` and the cap.
     The filter/score/encode work runs off the event loop.
     """
-    file_path = args["file_path"]
-    await asyncio.to_thread(validate_path, file_path, config)
-    region = args["region"]
-    validate_region(region)
-    resolved = await _resolve_reference_info(args, config)
-    reference = resolved.effective
-    variant_source = args.get("variant_source", "auto")
-    effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
-    min_vaf = args.get("min_vaf", config.min_vaf)
-    min_depth = args.get("min_depth", config.min_depth)
-    min_alt_count = args.get("min_alt_count", config.min_alt_count)
+    req = await _region_request(args, config)
+    file_path, region, reference, resolved = req.file_path, req.region, req.reference, req.resolved
+    min_vaf, min_depth, min_alt_count = req.min_vaf, req.min_depth, req.min_alt_count
 
     # Readless: BAMCP candidates come from count_coverage, and VCF sites get their
     # read-level support attached by the fetch (annotate_vcf_snv_support), which
@@ -2035,8 +2079,8 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         min_vaf=min_vaf,
         min_depth=min_depth,
         mode="variants",
-        vcf_path=effective_vcf,
-        vcf_primary=vcf_primary,
+        vcf_path=req.vcf_path,
+        vcf_primary=req.vcf_primary,
     )
 
     # VCF SNVs get the viewer's confidence/artifact contract from their annotated support;
@@ -2053,7 +2097,7 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         config,
         args,
         include_max_reads=False,
-        detection=_detection_status(region, reference, vcf_primary),
+        detection=_detection_status(region, reference, req.vcf_primary),
         min_alt_count=min_alt_count,
         reference_source=resolved.source,
     )
@@ -2067,7 +2111,7 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     if resolved.note:
         filters["reference_note"] = resolved.note
     payload: dict[str, Any] = {
-        "variant_source": variant_source,
+        "variant_source": req.variant_source,
         "coordinate_system": _LLM_COORDINATE_SYSTEM,
         "variant_type": "candidate",
         "applied_filters": filters,
@@ -2477,19 +2521,17 @@ def _viewer_summary(
 async def _viewer_response(
     args: dict[str, Any],
     config: BAMCPConfig,
-    file_path: str,
-    region: str,
-    resolved: ResolvedReference,
+    req: RegionRequest,
     summary_prefix: Callable[[RegionData], str],
 ) -> dict:
     """Fetch a region and build the MCP Apps viewer response (shared by visualize/jump_to).
 
     The text content (what the LLM reads) is a compact summary that echoes the applied
-    filters; the full payload goes only in ``_meta.ui/init``.
+    filters; the full payload goes only in ``_meta.ui/init``. The viewer tools take no
+    per-call alt-read floor: the operator's ``min_alt_count`` applies.
     """
-    reference = resolved.effective
-    variant_source = args.get("variant_source", "auto")
-    effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
+    file_path, region, reference, resolved = req.file_path, req.region, req.reference, req.resolved
+    vcf_primary, effective_vcf = req.vcf_primary, req.vcf_path
 
     data = await _fetch_region_with_timeout(
         file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
@@ -2522,7 +2564,7 @@ async def _viewer_response(
     # refetch's caller-input validation accepts it). Never a config default: it is re-applied
     # server-side on refetch, and echoing it would make refetches re-validate the operator
     # default as caller input and fail when it's outside the caller allow-list.
-    payload["variant_source"] = variant_source
+    payload["variant_source"] = req.variant_source
     if resolved.echo is not None:
         payload["reference"] = resolved.echo
     if effective_vcf is not None:
@@ -2548,31 +2590,24 @@ async def handle_jump_to(args: dict[str, Any], config: BAMCPConfig) -> dict:
     through the same ``validate_region`` as visualize_region, so both tools accept exactly
     the same contigs.
     """
-    file_path = args["file_path"]
     contig = args.get("contig")
     if not contig:
         raise ToolInputError(
             "jump_to needs a contig as well as a position (e.g. contig='chr17' or '17' — "
             "call list_contigs for this file's naming)."
         )
-    await asyncio.to_thread(validate_path, file_path, config)
     position = args["position"]
     window = args.get("window", config.default_window)
-    resolved = await _resolve_reference_info(args, config)
-
     # ``position`` is 1-based; build a 1-based inclusive window of ``window`` bases
     # centred on it (start clamped at base 1).
     start = max(1, position - window // 2)
     end = start + max(window, 1) - 1
-    region = f"{contig}:{start}-{end}"
-    validate_region(region)
+    req = await _region_request(args, config, region=f"{contig}:{start}-{end}")
 
     return await _viewer_response(
         args,
         config,
-        file_path,
-        region,
-        resolved,
+        req,
         lambda data: f"Jumped to {data.contig}:{position}",
     )
 
@@ -2583,18 +2618,10 @@ async def handle_visualize_region(args: dict[str, Any], config: BAMCPConfig) -> 
 
     Primary MCP Apps tool — returns serialized region data with UI metadata.
     """
-    file_path = args["file_path"]
-    await asyncio.to_thread(validate_path, file_path, config)
-    region = args["region"]
-    validate_region(region)
-    resolved = await _resolve_reference_info(args, config)
-
     return await _viewer_response(
         args,
         config,
-        file_path,
-        region,
-        resolved,
+        await _region_request(args, config),
         lambda data: f"Region {format_region(data.contig, data.start, data.end)}",
     )
 
@@ -2608,18 +2635,21 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     GET_VARIANTS_MAX_RESULTS variants are listed (chosen as in get_variants, see
     :func:`_cap_variants`); a truncated listing says so in its filters line.
     """
-    file_path = args["file_path"]
-    await asyncio.to_thread(validate_path, file_path, config)
-    region = args["region"]
-    validate_region(region)
-    resolved = await _resolve_reference_info(args, config)
-    reference = resolved.effective
-    variant_source = args.get("variant_source", "auto")
-    effective_vcf, vcf_primary = _resolve_variant_source(variant_source, args.get("vcf_path"))
-    min_alt_count = args.get("min_alt_count", config.min_alt_count)
+    req = await _region_request(args, config)
+    region, reference, resolved, min_alt_count = (
+        req.region,
+        req.reference,
+        req.resolved,
+        req.min_alt_count,
+    )
 
     data = await _fetch_region_with_timeout(
-        file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
+        req.file_path,
+        region,
+        reference,
+        config,
+        vcf_path=req.vcf_path,
+        vcf_primary=req.vcf_primary,
     )
     data = _apply_alt_count(data, min_alt_count)
 
@@ -2631,7 +2661,7 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
         config,
         args,
         include_max_reads=True,
-        detection=_detection_status(region, reference, vcf_primary),
+        detection=_detection_status(region, reference, req.vcf_primary),
         reads_truncated=data.reads_truncated,
         min_alt_count=min_alt_count,
         reference_source=resolved.source,

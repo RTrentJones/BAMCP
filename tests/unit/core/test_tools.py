@@ -3,6 +3,7 @@
 import asyncio
 import json
 
+import httpx
 import pytest
 
 from bamcp.config import BAMCPConfig
@@ -1938,18 +1939,17 @@ class TestHandleGetVariantCurationSummary:
     async def test_invalid_chromosome_rejected(self, small_bam_path, config):
         from bamcp.analysis.curation import handle_get_variant_curation_summary
 
-        result = await handle_get_variant_curation_summary(
-            {
-                "file_path": small_bam_path,
-                "chrom": "invalid_chr",
-                "pos": 100,
-                "ref": "A",
-                "alt": "T",
-            },
-            config,
-        )
-        text = result["content"][0]["text"]
-        assert "Invalid" in text
+        with pytest.raises(ToolInputError, match="Invalid"):
+            await handle_get_variant_curation_summary(
+                {
+                    "file_path": small_bam_path,
+                    "chrom": "invalid_chr",
+                    "pos": 100,
+                    "ref": "A",
+                    "alt": "T",
+                },
+                config,
+            )
 
 
 class TestHandleScanVariants:
@@ -2959,6 +2959,79 @@ class TestFetchRegionTimeoutMessage:
         assert "retrying" not in str(exc_info.value)
 
 
+class TestLookupOutcomeEnvelope:
+    """Every lookup outcome carries build_info, timeouts reach their own branch, and upstream
+    error text is never echoed to the caller."""
+
+    _ARGS = {"chrom": "17", "pos": 1, "ref": "G", "alt": "C"}
+
+    @staticmethod
+    def _patch(monkeypatch, exc):
+        from bamcp.clients import clinvar, gnomad
+
+        async def lookup(self, *_a, **_kw):
+            raise exc
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", lookup)
+        monkeypatch.setattr(gnomad.GnomadClient, "lookup", lookup)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc", [asyncio.TimeoutError(), TimeoutError("slow"), httpx.ReadTimeout("slow")]
+    )
+    async def test_timeout_is_reported_as_timeout(self, config, monkeypatch, exc):
+        self._patch(monkeypatch, exc)
+        for handler, source in (
+            (handle_lookup_clinvar, "ClinVar"),
+            (handle_lookup_gnomad, "gnomAD"),
+        ):
+            p = json.loads((await handler(dict(self._ARGS), config))["content"][0]["text"])
+            assert p["status"] == "unavailable"
+            assert p["reason_code"] == "timeout"
+            assert p["error"] == f"{source} lookup timed out"
+            assert p["genome_build"] and p["build_source"] == "server-default"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_network_failure_carries_build_info(self, config, monkeypatch):
+        self._patch(monkeypatch, ConnectionError("boom"))
+        for handler in (handle_lookup_clinvar, handle_lookup_gnomad):
+            p = json.loads((await handler(dict(self._ARGS), config))["content"][0]["text"])
+            assert p["reason_code"] == "network_error"
+            assert "boom" not in json.dumps(p)
+            assert p["genome_build"] and p["build_source"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_disabled_carries_build_info(self):
+        config = BAMCPConfig(clinvar_enabled=False, gnomad_enabled=False)
+        for handler in (handle_lookup_clinvar, handle_lookup_gnomad):
+            args = {**self._ARGS, "build": "hg19"}
+            p = json.loads((await handler(args, config))["content"][0]["text"])
+            assert p["status"] == "disabled"
+            assert p["genome_build"] == "GRCh37"
+            assert p["build_source"] == "explicit"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_upstream_error_text_not_echoed(self, config, monkeypatch):
+        from bamcp.clients.clinvar import ClinVarUnavailableError
+        from bamcp.clients.gnomad import GnomadQueryError
+
+        secret = "<html>" + "x" * 5000 + "upstream-internal-detail"
+        self._patch(monkeypatch, ClinVarUnavailableError(secret))
+        p = json.loads(
+            (await handle_lookup_clinvar(dict(self._ARGS), config))["content"][0]["text"]
+        )
+        assert "upstream-internal-detail" not in json.dumps(p)
+        assert p["reason_code"] == "upstream_error"
+        self._patch(monkeypatch, GnomadQueryError(secret))
+        p = json.loads((await handle_lookup_gnomad(dict(self._ARGS), config))["content"][0]["text"])
+        assert "upstream-internal-detail" not in json.dumps(p)
+        assert len(p["reason"]) < 200
+
+
 class TestLookupBuildRouting:
     """lookup_clinvar / lookup_gnomad route by genome build and keep unavailable != not_found."""
 
@@ -3030,7 +3103,9 @@ class TestLookupBuildRouting:
         r = await handle_lookup_clinvar({"chrom": "17", "pos": 1, "ref": "G", "alt": "C"}, config)
         p = json.loads(r["content"][0]["text"])
         assert p["status"] == "unavailable"
-        assert "truncated" in p["reason"]
+        assert p["reason_code"] == "upstream_error"
+        # Upstream error text stays in the server log, never in the payload.
+        assert "truncated" not in p["reason"]
         assert p.get("found") is not False
 
     @pytest.mark.unit
@@ -3062,7 +3137,9 @@ class TestLookupBuildRouting:
         )
         p = json.loads(r["content"][0]["text"])
         assert p["status"] == "unavailable"
-        assert "GRCh38" in p["reason"]
+        assert p["reason_code"] == "unsupported_build"
+        assert "gnomad_r4" not in p["reason"]
+        assert p["genome_build"] == "GRCh37"
 
     @pytest.mark.unit
     @pytest.mark.asyncio

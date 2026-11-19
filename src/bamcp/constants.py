@@ -102,6 +102,9 @@ DEFAULT_MAX_REMOTE_INDEX_BYTES = 64 * 1024 * 1024
 # open server's cache could be grown without bound; oldest files are evicted past this.
 DEFAULT_MAX_INDEX_CACHE_BYTES = 512 * 1024 * 1024
 
+# Per-request HTTP timeout (seconds) for downloading a remote .bai/.crai/.fai/.gzi index.
+INDEX_DOWNLOAD_TIMEOUT_SECONDS = 60.0
+
 # Timeout for BAM/CRAM parsing operations (seconds)
 BAM_PARSE_TIMEOUT_SECONDS = 30.0
 # First use of a not-yet-seen remote BAM/CRAM or reference FASTA: opening it fetches the remote

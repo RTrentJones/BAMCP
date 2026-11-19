@@ -34,7 +34,7 @@ from .core.tools import (
 from .demos import resolve_demo_alias
 from .prompts import SERVER_INSTRUCTIONS, register_demo_surface
 from .resources import get_viewer_html
-from .tool_specs import AUTO_REFERENCE_NOTE, DETECTION_DEFAULTS_NOTE, REGION_FORMAT_NOTE
+from .tool_specs import TOOL_SPECS
 
 _VIEWER_URI = "ui://bamcp/viewer"
 _VIEWER_META: dict = {"ui": {"resourceUri": _VIEWER_URI}}
@@ -135,22 +135,10 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
     # -- Tools ---------------------------------------------------------------
     # Thin wrappers delegate to the handlers in core/tools.py (and analysis/*) through _run.
     # FastMCP derives each JSON-Schema from the function signature; tool_specs.py mirrors those
-    # for the eval harness, and a parity test keeps the two in lockstep.
+    # for the eval harness, and a parity test keeps the two in lockstep. Descriptions have one
+    # source: TOOL_SPECS (the parity test asserts the registered text equals it).
 
-    @mcp.tool(
-        description=(
-            "Detect and return candidate variants in a genomic region. "
-            + REGION_FORMAT_NOTE
-            + " Each variant carries artifact_risk, confidence, concerns and a plain-language "
-            "interpretation (with a zygosity hint). "
-            + DETECTION_DEFAULTS_NOTE
-            + " "
-            + AUTO_REFERENCE_NOTE
-            + " variant_source: 'auto' (BAMCP candidates, VCF overlaid if given), "
-            "'vcf' (the VCF is authoritative — BAMCP attaches read-level evidence at "
-            "each site; requires vcf_path), or 'bamcp' (BAMCP candidates only)."
-        )
-    )
+    @mcp.tool(description=TOOL_SPECS["get_variants"]["description"])
     async def get_variants(
         file_path: str,
         region: str,
@@ -173,9 +161,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         )
         return _text(await _run("get_variants", handle_get_variants, args))
 
-    @mcp.tool(
-        description="Calculate depth of coverage statistics for a region. " + REGION_FORMAT_NOTE
-    )
+    @mcp.tool(description=TOOL_SPECS["get_coverage"]["description"])
     async def get_coverage(
         file_path: str,
         region: str,
@@ -184,14 +170,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         args = _args(file_path=file_path, region=region, reference=reference)
         return _text(await _run("get_coverage", handle_get_coverage, args))
 
-    @mcp.tool(
-        description=(
-            "Detect a BAM/CRAM's genome build (GRCh37 vs GRCh38) and contig naming style, and "
-            "list its primary chromosomes. Use this first on new BAM files. The summary (build, "
-            "style, suggested public reference URL, contig counts) comes first; alt/decoy/HLA/"
-            "unplaced contigs are counted, not listed, unless include_all=true."
-        ),
-    )
+    @mcp.tool(description=TOOL_SPECS["list_contigs"]["description"])
     async def list_contigs(
         file_path: str,
         reference: str | None = None,
@@ -200,14 +179,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         args = _args(file_path=file_path, reference=reference, include_all=include_all)
         return _text(await _run("list_contigs", handle_list_contigs, args))
 
-    @mcp.tool(
-        description=(
-            "Jump to a specific genomic position and view surrounding reads. "
-            "contig and position are both required; position is 1-based (VCF/samtools "
-            "convention). Contig names follow the BAM (call list_contigs: 'chr17' vs '17')."
-        ),
-        meta=_VIEWER_META,
-    )
+    @mcp.tool(description=TOOL_SPECS["jump_to"]["description"], meta=_VIEWER_META)
     async def jump_to(
         file_path: str,
         contig: str,
@@ -230,13 +202,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     # -- Phase 1: MCP Apps Tools --------------------------------------------
 
-    @mcp.tool(
-        description=(
-            "Visualize aligned reads in a genomic region with interactive MCP Apps viewer. "
-            + REGION_FORMAT_NOTE
-        ),
-        meta=_VIEWER_META,
-    )
+    @mcp.tool(description=TOOL_SPECS["visualize_region"]["description"], meta=_VIEWER_META)
     async def visualize_region(
         file_path: str,
         region: str,
@@ -253,13 +219,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         )
         return _viewer_result(await _run("visualize_region", handle_visualize_region, args))
 
-    @mcp.tool(
-        description=(
-            "Get a text summary of a genomic region "
-            "(read count, coverage, candidate variants each with a plain-language "
-            "interpretation) for LLM reasoning. " + REGION_FORMAT_NOTE + " " + AUTO_REFERENCE_NOTE
-        ),
-    )
+    @mcp.tool(description=TOOL_SPECS["get_region_summary"]["description"])
     async def get_region_summary(
         file_path: str,
         region: str,
@@ -280,14 +240,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     # -- Phase 2: External Database Tools ------------------------------------
 
-    @mcp.tool(
-        description=(
-            "Look up a variant in ClinVar for clinical significance, review status, "
-            "and associated conditions. Positions are 1-based in `build` (GRCh37/hg19 or "
-            "GRCh38/hg38; default: server build) — pass the BAM's build from list_contigs. "
-            "Research-grade information, not for clinical use."
-        ),
-    )
+    @mcp.tool(description=TOOL_SPECS["lookup_clinvar"]["description"])
     async def lookup_clinvar(
         chrom: str,
         pos: int,
@@ -298,14 +251,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         args = _args(chrom=chrom, pos=pos, ref=ref, alt=alt, build=build)
         return _text(await _run("lookup_clinvar", handle_lookup_clinvar, args))
 
-    @mcp.tool(
-        description=(
-            "Look up a variant in gnomAD for population allele frequency data. Positions are "
-            "1-based in `build` (GRCh37 queries gnomAD v2.1, GRCh38 queries v4; default: server "
-            "build) — pass the BAM's build from list_contigs. "
-            "Research-grade information, not for clinical use."
-        ),
-    )
+    @mcp.tool(description=TOOL_SPECS["lookup_gnomad"]["description"])
     async def lookup_gnomad(
         chrom: str,
         pos: int,
@@ -318,16 +264,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     # -- Phase 3: Curation Tools ---------------------------------------------
 
-    @mcp.tool(
-        description=(
-            "Get a detailed curation summary for a specific variant with artifact risk "
-            "assessment, quality metrics, and recommendations for clinical interpretation. "
-            "Use this for in-depth variant review by genetic curators. The named site is "
-            "evaluated even when it fails the calling filters (filter_check says which), so a "
-            "filtered-out artifact is scored, not 'not found'. Set format='rubric' (or 'json') "
-            "for machine-scorable JSON; include_clinical=true adds ClinVar/gnomAD context."
-        ),
-    )
+    @mcp.tool(description=TOOL_SPECS["get_variant_curation_summary"]["description"])
     async def get_variant_curation_summary(
         file_path: str,
         chrom: str,
@@ -354,15 +291,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             await _run("get_variant_curation_summary", handle_get_variant_curation_summary, args)
         )
 
-    @mcp.tool(
-        description=(
-            "Assemble a multi-source evidence package (BAM observation + ClinVar + gnomAD) for "
-            "a variant and return an ACMG reasoning scaffold. Apply each applicable criterion, "
-            "then give a classification (Pathogenic / Likely Pathogenic / VUS / Likely Benign / "
-            "Benign) with confidence. Research-grade, not a clinical determination. Positions "
-            "are 1-based."
-        ),
-    )
+    @mcp.tool(description=TOOL_SPECS["classify_variant"]["description"])
     async def classify_variant(
         file_path: str,
         chrom: str,
@@ -389,16 +318,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
             structuredContent=result.get("structuredContent"),
         )
 
-    @mcp.tool(
-        description=(
-            "Search for a gene by symbol and return its genomic coordinates (e.g. BRCA1, TP53). "
-            "Coordinates are build-specific: pass the BAM's file_path so the build is "
-            "auto-detected and the coordinates line up in that BAM (a GRCh38 locus in a GRCh37 "
-            "BAM is ~0.5-2 Mb off, silently). Optionally set build (GRCh37/GRCh38) to override. "
-            "The response states the coordinates' genome_build and warns on any mismatch. "
-            "The returned region is 1-based inclusive, ready to pass to visualize_region."
-        ),
-    )
+    @mcp.tool(description=TOOL_SPECS["search_gene"]["description"])
     async def search_gene(
         symbol: str,
         file_path: str | None = None,
@@ -409,17 +329,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     # -- Scanning Tools -------------------------------------------------------
 
-    @mcp.tool(
-        description=(
-            "Scan a contig (or a 1-based region 'contig:start-end') for candidate SNVs using "
-            "fast coverage-based detection. Requires a reference genome ("
-            + AUTO_REFERENCE_NOTE
-            + ") Returns up to 500 candidates (the highest-VAF ones when capped) sorted by "
-            "position. A scan that hits its time budget returns partial results with "
-            "truncated=true and next_region: pass that as region to continue. If contig and "
-            "region are omitted, the BAM's first contig is scanned. " + DETECTION_DEFAULTS_NOTE
-        ),
-    )
+    @mcp.tool(description=TOOL_SPECS["scan_variants"]["description"])
     async def scan_variants(
         file_path: str,
         contig: str | None = None,
@@ -442,12 +352,7 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
 
     # -- Cache Management Tool -----------------------------------------------
 
-    @mcp.tool(
-        description=(
-            "Clear the server's downloaded BAM index files and region cache (single-client "
-            "stdio servers only; shared HTTP servers expire their cache by TTL)"
-        )
-    )
+    @mcp.tool(description=TOOL_SPECS["cleanup_cache"]["description"])
     async def cleanup_cache() -> str:
         return _text(await _run("cleanup_cache", handle_cleanup_cache, {}))
 

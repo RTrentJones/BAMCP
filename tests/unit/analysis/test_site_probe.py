@@ -17,6 +17,7 @@ import pytest
 from bamcp.analysis.curation import handle_get_variant_curation_summary
 from bamcp.analysis.fusion import assemble_evidence
 from bamcp.config import BAMCPConfig
+from bamcp.core.errors import ReferenceUnavailableError
 from bamcp.core.tools import handle_get_variants
 
 SEQ = "ACGT" * 250  # 1000 bp, no homopolymers
@@ -148,10 +149,8 @@ def _cfg_no_ref() -> BAMCPConfig:
 async def test_curation_refuses_probe_without_reference(tmp_path):
     """No reference → REF can't be verified, so the site probe is refused, never run blind."""
     bam, _ = _write(tmp_path, alt_reads=8, alt_qual=6)
-    out = await handle_get_variant_curation_summary(_args(bam, format="rubric"), _cfg_no_ref())
-    doc = json.loads(out["content"][0]["text"])
-    assert "without a reference sequence" in doc["error"]
-    assert "artifact_assessment" not in doc
+    with pytest.raises(ReferenceUnavailableError, match="without a reference sequence"):
+        await handle_get_variant_curation_summary(_args(bam, format="rubric"), _cfg_no_ref())
 
 
 @pytest.mark.unit

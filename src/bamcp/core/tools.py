@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import json
 import logging
@@ -13,12 +14,12 @@ import threading
 import time
 import weakref
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 import pysam
@@ -33,7 +34,7 @@ from ..analysis.evidence import (
 )
 from ..clients.clinvar import ClinVarClient
 from ..clients.genes import GeneClient, GeneLookupError
-from ..clients.gnomad import GnomadClient, GnomadQueryError
+from ..clients.gnomad import GnomadBuildError, GnomadClient, GnomadQueryError
 from ..clients.ncbi import NCBIUnavailableError, TokenBucketRateLimiter, ncbi_rate_limiter
 from ..config import BAMCPConfig
 from ..constants import (
@@ -41,6 +42,7 @@ from ..constants import (
     COLD_START_TIMEOUT_SECONDS,
     DEFAULT_CACHE_TTL_SECONDS,
     INDEL_DETECTION_MAX_REGION,
+    INDEX_DOWNLOAD_TIMEOUT_SECONDS,
     PARSE_MAX_CONCURRENCY,
     REGION_CACHE_MAX_BYTES,
     REGION_CACHE_MAX_ENTRIES,
@@ -353,12 +355,75 @@ _LOOKUP_UNAVAILABLE = "unavailable"
 _LOOKUP_DISABLED = "disabled"
 
 
-def _lookup_result(payload: dict[str, Any], *, status: str, disclaimer: str) -> dict:
+def _lookup_result(
+    payload: dict[str, Any], *, status: str, disclaimer: str, build_info: dict[str, Any]
+) -> dict:
     """Wrap an external-database lookup payload with an explicit ``status`` field so a
-    caller can tell a genuine not-found from a failed lookup (see the vocabulary above)."""
-    payload["status"] = status
+    caller can tell a genuine not-found from a failed lookup (see the vocabulary above).
+
+    Every outcome — found, not_found, unavailable, disabled — carries ``build_info`` (the
+    assembly the lookup would be / was made in), so a caller never has to guess it.
+    """
+    payload = {**payload, **build_info, "status": status}
     payload.setdefault("disclaimer", disclaimer)
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+
+
+# Fixed, caller-safe reasons for an unavailable lookup. Upstream (NCBI / gnomAD) error text is
+# logged server-side only — it is unbounded third-party content and never echoed to callers.
+_LOOKUP_REASONS: dict[str, str] = {
+    "timeout": "the upstream service did not answer in time; absence is not established",
+    "network_error": "the upstream service could not be reached or returned an HTTP error; "
+    "absence is not established",
+    "upstream_error": "the upstream service returned an error or an incomplete/unparseable "
+    "result; absence is not established",
+    "unsupported_build": "the upstream service has no dataset for this genome build",
+}
+
+
+def _lookup_failure(
+    source: str,
+    reason_code: str,
+    *,
+    error: str,
+    disclaimer: str,
+    build_info: dict[str, Any],
+) -> dict:
+    """An ``unavailable`` lookup outcome with a fixed reason code + short message."""
+    return _lookup_result(
+        {
+            "error": error,
+            "reason_code": reason_code,
+            "reason": f"{source}: {_LOOKUP_REASONS[reason_code]}",
+        },
+        status=_LOOKUP_UNAVAILABLE,
+        disclaimer=disclaimer,
+        build_info=build_info,
+    )
+
+
+def _lookup_disabled(source: str, *, disclaimer: str, build_info: dict[str, Any]) -> dict:
+    return _lookup_result(
+        {"error": f"{source} lookup is disabled"},
+        status=_LOOKUP_DISABLED,
+        disclaimer=disclaimer,
+        build_info=build_info,
+    )
+
+
+def _lookup_not_found(
+    source: str, args: dict[str, Any], *, disclaimer: str, build_info: dict[str, Any]
+) -> dict:
+    variant = f"{args['chrom']}:{args['pos']} {args['ref']}>{args['alt']}"
+    return _lookup_result(
+        {
+            "found": False,
+            "message": f"No {source} entry found for {variant} ({build_info['genome_build']})",
+        },
+        status=_LOOKUP_NOT_FOUND,
+        disclaimer=disclaimer,
+        build_info=build_info,
+    )
 
 
 def _lookup_build(args: dict[str, Any], config: BAMCPConfig) -> tuple[str | None, str]:
@@ -696,6 +761,62 @@ async def _stream_index_to_file(resp: httpx.Response, index_path: str, config: B
     return index_path
 
 
+def _sibling_url(url: str, suffix: str, *, replace_ext: bool = False) -> str:
+    """The URL of a file next to ``url`` (its index): edit only the URL *path*.
+
+    ``suffix`` is appended to the path (``x.bam`` → ``x.bam.bai``); with ``replace_ext`` the
+    final path segment's extension is replaced instead (``x.bam`` → ``x.bai``). The query
+    string is kept, so a signed URL (``x.bam?X-Amz-Signature=…``) yields ``x.bam.bai?…``
+    rather than a suffix appended inside the query. Fragments are dropped (``validate_remote_url``
+    rejects ``#`` anyway).
+    """
+    parts = urlsplit(url)
+    path = parts.path
+    if replace_ext:
+        head, _, segment = path.rpartition("/")
+        if "." in segment:
+            segment = segment.rsplit(".", 1)[0]
+        path = f"{head}/{segment}" if head or path.startswith("/") else segment
+    return urlunsplit((parts.scheme, parts.netloc, path + suffix, parts.query, ""))
+
+
+@contextlib.asynccontextmanager
+async def _index_download_lock(services: BAMCPServices, key: str) -> AsyncIterator[None]:
+    """Serialize downloads of one cached index across concurrent callers.
+
+    The per-key lock is dropped once nobody holds it so the dict can't grow one entry per
+    URL forever. A waiter already woken keeps its reference; at worst a racing new caller
+    creates a fresh lock and repeats an (atomic, idempotent) download.
+    """
+    locks = services.index_download_locks
+    lock = locks.setdefault(key, asyncio.Lock())
+    try:
+        async with lock:
+            yield
+    finally:
+        if not lock.locked() and locks.get(key) is lock:
+            del locks[key]
+
+
+def _index_http_client() -> httpx.AsyncClient:
+    # Redirects are followed by hand in _download_index_streaming (each hop re-validated).
+    return httpx.AsyncClient(timeout=INDEX_DOWNLOAD_TIMEOUT_SECONDS, follow_redirects=False)
+
+
+async def _try_download_index(
+    client: httpx.AsyncClient, url: str, path: str, config: BAMCPConfig, what: str
+) -> str | None:
+    """Download one index into the cache; None (logged) on a miss or a failure."""
+    try:
+        got = await _download_index_streaming(client, url, path, config)
+    except (httpx.RequestError, OSError, ValueError) as e:
+        logger.warning("%s download error for %s: %s", what, url, e)
+        return None
+    if got:
+        get_services(config).cache.enforce_budget(keep=got)
+    return got
+
+
 async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | None:
     """Download and cache the BAM/CRAM index file if not already cached.
 
@@ -725,41 +846,30 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
         logger.debug("Using cached index: %s", index_path)
         return index_path
 
-    # Determine index URL - try common extensions
+    # Determine index URL - try common extensions (on the URL path, never inside a query).
     if is_cram(file_path):
-        index_urls = [file_path + ".crai"]
+        index_urls = [_sibling_url(file_path, ".crai")]
     else:
         # BAM files: try .bam.bai first, then .bai
-        index_urls = [file_path + ".bai", file_path.rsplit(".", 1)[0] + ".bai"]
+        index_urls = [
+            _sibling_url(file_path, ".bai"),
+            _sibling_url(file_path, ".bai", replace_ext=True),
+        ]
 
-    locks = services.index_download_locks
-    lock = locks.setdefault(index_path, asyncio.Lock())
-    try:
-        async with lock:
-            if cache.is_valid(index_path):
-                logger.debug("Using cached index after waiting for download lock: %s", index_path)
-                return index_path
+    async with _index_download_lock(services, index_path):
+        if cache.is_valid(index_path):
+            logger.debug("Using cached index after waiting for download lock: %s", index_path)
+            return index_path
 
-            logger.info("Downloading index for remote BAM: %s", file_path)
-            async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
-                for index_url in index_urls:
-                    try:
-                        downloaded = await _download_index_streaming(
-                            client, index_url, index_path, config
-                        )
-                        if downloaded:
-                            cache.enforce_budget(keep=downloaded)
-                            return downloaded
-                        logger.debug("Index not found at %s, trying next", index_url)
-                    except (httpx.RequestError, OSError, ValueError) as e:
-                        logger.warning("Index download error for %s: %s", index_url, e)
-                        continue
-    finally:
-        # Drop the per-URL lock once nobody holds it so the dict can't grow one entry per
-        # URL forever. A waiter already woken keeps its reference; at worst a racing new
-        # caller creates a fresh lock and repeats an (atomic, idempotent) download.
-        if not lock.locked() and locks.get(index_path) is lock:
-            del locks[index_path]
+        logger.info("Downloading index for remote BAM: %s", file_path)
+        async with _index_http_client() as client:
+            for index_url in index_urls:
+                downloaded = await _try_download_index(
+                    client, index_url, index_path, config, "Index"
+                )
+                if downloaded:
+                    return downloaded
+                logger.debug("Index not found at %s, trying next", index_url)
 
     # All attempts failed - let pysam try its own resolution
     logger.warning("Could not download index for %s, falling back to pysam", file_path)
@@ -815,27 +925,17 @@ async def _ensure_reference_indexes(reference: str | None, config: BAMCPConfig) 
     if paths is None:
         return
     fai, gzi = paths
-    wanted = [(fai, reference + ".fai")] + ([(gzi, reference + ".gzi")] if gzi else [])
-    locks = services.index_download_locks
-    lock = locks.setdefault(fai, asyncio.Lock())
-    try:
-        async with lock:
-            missing = [(p, u) for p, u in wanted if not services.cache.is_valid(p)]
-            if missing:
-                async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
-                    for path, url in missing:
-                        try:
-                            got = await _download_index_streaming(client, url, path, config)
-                        except (httpx.RequestError, OSError, ValueError) as e:
-                            logger.warning("Reference index download error for %s: %s", url, e)
-                            return
-                        if not got:
-                            return
-                        services.cache.enforce_budget(keep=got)
-            register_reference_index(reference, fai, gzi)
-    finally:
-        if not lock.locked() and locks.get(fai) is lock:
-            del locks[fai]
+    wanted = [(fai, _sibling_url(reference, ".fai"))]
+    if gzi:
+        wanted.append((gzi, _sibling_url(reference, ".gzi")))
+    async with _index_download_lock(services, fai):
+        missing = [(p, u) for p, u in wanted if not services.cache.is_valid(p)]
+        if missing:
+            async with _index_http_client() as client:
+                for path, url in missing:
+                    if not await _try_download_index(client, url, path, config, "Reference index"):
+                        return
+        register_reference_index(reference, fai, gzi)
 
 
 async def _warm_remote_inputs(
@@ -2497,66 +2597,44 @@ async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> di
 
     Returns clinical significance, review status, and associated conditions.
     """
-    chrom = args["chrom"]
-    pos = args["pos"]
-    ref = args["ref"]
-    alt = args["alt"]
+    chrom, pos, ref, alt = args["chrom"], args["pos"], args["ref"], args["alt"]
 
     # Invalid input is a tool ERROR (isError), not an answer; not_found/unavailable/disabled
     # stay answers. Validate before the enabled check so bad input fails the same either way.
     build, build_source = _validate_lookup_input(args, config)
+    build_info = {"genome_build": build, "build_source": build_source}
+    common: dict[str, Any] = {"disclaimer": _CLINVAR_DISCLAIMER, "build_info": build_info}
 
     if not config.clinvar_enabled:
-        return _lookup_result(
-            {"error": "ClinVar lookup is disabled"},
-            status=_LOOKUP_DISABLED,
-            disclaimer=_CLINVAR_DISCLAIMER,
-        )
-    build_info = {"genome_build": build, "build_source": build_source}
+        return _lookup_disabled("ClinVar", **common)
 
     client = get_clinvar_client(config)
-
+    variant = f"{chrom}:{pos} {ref}>{alt}"
     try:
         result = await client.lookup(chrom, pos, ref, alt, build=build)
+    # TimeoutError first: on 3.11+ asyncio.TimeoutError IS the builtin TimeoutError, an
+    # OSError subclass, so the network clause below would otherwise swallow it.
+    except (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException):
+        logger.warning("ClinVar lookup timed out for %s", variant)
+        return _lookup_failure("ClinVar", "timeout", error="ClinVar lookup timed out", **common)
     except NCBIUnavailableError as e:
         # In-band NCBI error, truncated search, unsupported build: absence NOT established.
-        logger.warning("ClinVar lookup unavailable for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
-        return _lookup_result(
-            {"error": "ClinVar lookup unavailable", "reason": str(e), **build_info},
-            status=_LOOKUP_UNAVAILABLE,
-            disclaimer=_CLINVAR_DISCLAIMER,
+        logger.warning("ClinVar lookup unavailable for %s: %s", variant, e)
+        return _lookup_failure(
+            "ClinVar", "upstream_error", error="ClinVar lookup unavailable", **common
         )
-    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError, ValueError) as e:
-        # Network/HTTP failure (or an unparseable body) — the lookup is UNAVAILABLE, not an
-        # authoritative not-found.
-        logger.warning("ClinVar lookup failed for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
-        return _lookup_result(
-            {"error": "ClinVar lookup failed", **build_info},
-            status=_LOOKUP_UNAVAILABLE,
-            disclaimer=_CLINVAR_DISCLAIMER,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("ClinVar lookup timed out for %s:%d %s>%s", chrom, pos, ref, alt)
-        return _lookup_result(
-            {"error": "ClinVar lookup timed out"},
-            status=_LOOKUP_UNAVAILABLE,
-            disclaimer=_CLINVAR_DISCLAIMER,
-        )
+    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
+        # Network/HTTP failure — the lookup is UNAVAILABLE, not an authoritative not-found.
+        logger.warning("ClinVar lookup failed for %s: %s", variant, e)
+        return _lookup_failure("ClinVar", "network_error", error="ClinVar lookup failed", **common)
+    except ValueError as e:
+        # An unparseable body.
+        logger.warning("ClinVar lookup failed for %s: %s", variant, e)
+        return _lookup_failure("ClinVar", "upstream_error", error="ClinVar lookup failed", **common)
 
     if result is None:
-        return _lookup_result(
-            {
-                "found": False,
-                "message": f"No ClinVar entry found for {chrom}:{pos} {ref}>{alt} ({build})",
-                **build_info,
-            },
-            status=_LOOKUP_NOT_FOUND,
-            disclaimer=_CLINVAR_DISCLAIMER,
-        )
-
-    return _lookup_result(
-        {**asdict(result), **build_info}, status=_LOOKUP_FOUND, disclaimer=_CLINVAR_DISCLAIMER
-    )
+        return _lookup_not_found("ClinVar", args, **common)
+    return _lookup_result(asdict(result), status=_LOOKUP_FOUND, **common)
 
 
 @telemetry_wrapper("lookup_gnomad")
@@ -2565,67 +2643,48 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
 
     Returns global and per-population allele frequencies.
     """
-    chrom = args["chrom"]
-    pos = args["pos"]
-    ref = args["ref"]
-    alt = args["alt"]
+    chrom, pos, ref, alt = args["chrom"], args["pos"], args["ref"], args["alt"]
 
     # Invalid input is a tool ERROR (isError), not an answer; not_found/unavailable/disabled
     # stay answers. Validate before the enabled check so bad input fails the same either way.
     build, build_source = _validate_lookup_input(args, config)
+    build_info = {"genome_build": build, "build_source": build_source}
+    common: dict[str, Any] = {"disclaimer": _GNOMAD_DISCLAIMER, "build_info": build_info}
 
     if not config.gnomad_enabled:
-        return _lookup_result(
-            {"error": "gnomAD lookup is disabled"},
-            status=_LOOKUP_DISABLED,
-            disclaimer=_GNOMAD_DISCLAIMER,
-        )
-    build_info = {"genome_build": build, "build_source": build_source}
+        return _lookup_disabled("gnomAD", **common)
 
     client = get_gnomad_client(config)
-
+    variant = f"{chrom}:{pos} {ref}>{alt}"
     try:
         result = await client.lookup(chrom, pos, ref, alt, build=build)
-    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError, ValueError) as e:
-        # Network/HTTP failure — the lookup is UNAVAILABLE, not an authoritative not-found.
-        logger.warning("gnomAD lookup failed for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
-        return _lookup_result(
-            {"error": "gnomAD lookup failed"},
-            status=_LOOKUP_UNAVAILABLE,
-            disclaimer=_GNOMAD_DISCLAIMER,
+    # TimeoutError first: on 3.11+ asyncio.TimeoutError IS the builtin TimeoutError, an
+    # OSError subclass, so the network clause below would otherwise swallow it.
+    except (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException):
+        logger.warning("gnomAD lookup timed out for %s", variant)
+        return _lookup_failure("gnomAD", "timeout", error="gnomAD lookup timed out", **common)
+    except GnomadBuildError as e:
+        # No gnomAD dataset for this build: unavailable, never a not-found.
+        logger.warning("gnomAD build refused for %s: %s", variant, e)
+        return _lookup_failure(
+            "gnomAD", "unsupported_build", error="gnomAD lookup failed", **common
         )
     except GnomadQueryError as e:
         # Transient GraphQL error — the client propagates it (rather than returning None) so we
         # report "unavailable" here instead of a misleading "not found in gnomAD".
-        # GnomadBuildError (no dataset for this build) is a subclass: also unavailable.
-        logger.warning("gnomAD query error for %s:%d %s>%s: %s", chrom, pos, ref, alt, e)
-        return _lookup_result(
-            {"error": "gnomAD lookup failed", "reason": str(e), **build_info},
-            status=_LOOKUP_UNAVAILABLE,
-            disclaimer=_GNOMAD_DISCLAIMER,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("gnomAD lookup timed out for %s:%d %s>%s", chrom, pos, ref, alt)
-        return _lookup_result(
-            {"error": "gnomAD lookup timed out"},
-            status=_LOOKUP_UNAVAILABLE,
-            disclaimer=_GNOMAD_DISCLAIMER,
-        )
+        logger.warning("gnomAD query error for %s: %s", variant, e)
+        return _lookup_failure("gnomAD", "upstream_error", error="gnomAD lookup failed", **common)
+    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
+        # Network/HTTP failure — the lookup is UNAVAILABLE, not an authoritative not-found.
+        logger.warning("gnomAD lookup failed for %s: %s", variant, e)
+        return _lookup_failure("gnomAD", "network_error", error="gnomAD lookup failed", **common)
+    except ValueError as e:
+        logger.warning("gnomAD lookup failed for %s: %s", variant, e)
+        return _lookup_failure("gnomAD", "upstream_error", error="gnomAD lookup failed", **common)
 
     if result is None:
-        return _lookup_result(
-            {
-                "found": False,
-                "message": f"No gnomAD entry found for {chrom}:{pos} {ref}>{alt} ({build})",
-                **build_info,
-            },
-            status=_LOOKUP_NOT_FOUND,
-            disclaimer=_GNOMAD_DISCLAIMER,
-        )
-
-    return _lookup_result(
-        {**asdict(result), **build_info}, status=_LOOKUP_FOUND, disclaimer=_GNOMAD_DISCLAIMER
-    )
+        return _lookup_not_found("gnomAD", args, **common)
+    return _lookup_result(asdict(result), status=_LOOKUP_FOUND, **common)
 
 
 @dataclass
@@ -2721,14 +2780,19 @@ def _scan_contig_progressive(
     chunks done so far rather than holding a worker until the whole contig is read.
 
     Raises:
-        ValueError: If ``contig`` is not in the alignment header.
+        ToolInputError: If ``contig`` is not in the alignment header (the message suggests the
+            file's own spelling, e.g. ``13`` for ``chr13``).
+        ValueError: If the region starts past the contig end (sanitized by the server's
+            ``_run``, like any other non-caller-facing failure).
     """
-    from .parsers import _header_lengths, _open_alignment
+    from .parsers import _header_lengths, _open_alignment, contig_not_found_message
 
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        contig_length = _header_lengths(samfile).get(contig)
+        lengths = _header_lengths(samfile)
+        contig_length = lengths.get(contig)
         if contig_length is None:
-            raise ValueError(f"Contig '{contig}' not found in the alignment header")
+            # Unknown contig: an error, never a silent empty "no variants" result.
+            raise ToolInputError(contig_not_found_message(contig, lengths))
         stop = contig_length if scan_stop is None else min(scan_stop, contig_length)
         if scan_start >= stop:
             # A start past the contig end would scan nothing and read as "no variants".
@@ -2851,9 +2915,8 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
         # check and answer with what is already complete.
         progress.stop.set()
         hard_timeout = True
-    except ValueError as e:
-        # Unknown contig: an error, never a silent empty "no variants" result.
-        raise ToolInputError(str(e)) from e
+    # Any other failure (pysam/OS text, a ValueError) propagates to the server's _run, which
+    # sanitizes it; the unknown-contig case already raised a caller-safe ToolInputError.
 
     with progress.lock:
         all_variants = list(progress.variants)

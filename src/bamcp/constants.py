@@ -87,7 +87,9 @@ DEFAULT_GNOMAD_DATASET = "auto"
 GNOMAD_DATASET_BY_BUILD = {"GRCh37": "gnomad_r2_1", "GRCh38": "gnomad_r4"}
 GNOMAD_DATASET_BUILD = {"gnomad_r2_1": "GRCh37", "gnomad_r3": "GRCh38", "gnomad_r4": "GRCh38"}
 DEFAULT_GENOME_BUILD = "GRCh38"
-# Accepted spellings of the two supported human builds (case-insensitive).
+# The one table of accepted spellings of the two supported human builds
+# (case-insensitive, surrounding whitespace ignored). core.reference.GENOME_BUILDS
+# derives its "aliases" from it.
 GENOME_BUILD_ALIASES = {
     "grch37": "GRCh37",
     "hg19": "GRCh37",

@@ -43,11 +43,6 @@ GIAB_BASE = (
     "HG002_NA24385_son/NISTv4.2.1/GRCh38/"
 )
 TRUTH_VCF = GIAB_BASE + "HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
-CONFIDENT_BED = GIAB_BASE + "HG002_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed"
-REPEAT_BED = (
-    "https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/genome-stratifications/"
-    "v3.3/GRCh38@all/LowComplexity/GRCh38_AllTandemRepeatsandHomopolymers_slop5.bed.gz"
-)
 HG002_BAM = (
     "https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/data/AshkenazimTrio/"
     "HG002_NA24385_son/NIST_HiSeq_HG002_Homogeneity-10953946/"
@@ -776,7 +771,6 @@ ADJ_MAX_GAP = 12
 ADJ_CLEAR_BP = 3
 MIN_TR_INDEL_BP = 3  # indel-adjacent strata: truth indel >= 3 bp
 TR_MAX_INDEL = 4
-CMRG_MAX_INDEL = 10
 ANCHOR_CLEAR_BP = 10
 REMOTE_RETRIES = 4
 FETCH_BLOCK = 16_384

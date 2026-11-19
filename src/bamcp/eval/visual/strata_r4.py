@@ -22,7 +22,6 @@ anchor     ``anchor_het_snv``, ``anchor_hom_snv``  ``anchor_clean_neg``
 
 from __future__ import annotations
 
-import hashlib
 import math
 import random
 from collections import Counter
@@ -552,7 +551,3 @@ def ks_two_sample(a: list[float], b: list[float]) -> tuple[float, float]:
     from .leaklint import ks_two_sample as tie_aware
 
     return tie_aware(a, b)
-
-
-def manifest_digest(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()

@@ -163,7 +163,7 @@ class TestDecoratorEnabled:
         assert evt["tool_name"] == "get_variants"
         assert evt["ok"] is True
         assert evt["error"] is None
-        assert evt["session_id"] == telemetry.get_session_id()
+        assert evt["session_id"] == telemetry._session_id
         assert evt["args"]["region"] == "chr1:1-100"
         assert evt["args"]["file_path"].endswith(":x.bam")
         assert evt["result_summary"]["count"] == 3
@@ -300,14 +300,14 @@ class TestOtelIntegration:
 class TestConfigure:
     @pytest.mark.unit
     def test_disabled_is_default(self):
-        assert telemetry.is_enabled() is False
-        assert telemetry.get_session_id() == ""
+        assert telemetry._enabled is False
+        assert telemetry._session_id == ""
 
     @pytest.mark.unit
     def test_enable_sets_session(self):
         telemetry.configure_telemetry(enabled=True, session_id="abc")
-        assert telemetry.is_enabled() is True
-        assert telemetry.get_session_id() == "abc"
+        assert telemetry._enabled is True
+        assert telemetry._session_id == "abc"
 
     @pytest.mark.unit
     def test_creates_parent_dir(self, tmp_path):

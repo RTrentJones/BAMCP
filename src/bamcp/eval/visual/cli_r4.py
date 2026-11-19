@@ -20,8 +20,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-R4_ANALYSIS_COMMANDS = ("grade-r4", "calibrate", "sufficiency", "selftest-r4")
-
 
 def add_r4_analysis_commands(sub: Any) -> None:
     """Register the round-4 analysis subcommands on an ``add_subparsers()`` object."""

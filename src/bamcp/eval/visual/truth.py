@@ -78,7 +78,6 @@ MOSAIC_CALLER_VCFS = {
     + "deepsomatic_google/HG002.illumina.300x.deepsomatic.mosaic.Q0.vcf.gz",
     "strelka2_ill300x": _MOSAIC_SUPP + "HG002_GRCh38_Strelka2-Ill300X.vcf.gz",
 }
-MOSAIC_DATABASE_TSV = _MOSAIC_SUPP + "HG002_GRCh38_mosaic_database.tsv"
 # DRAGEN germline calls on the 300x data: inside the CMRG BED, minus CMRG truth, these are
 # the short-read false positives a user would actually review (stratum 6's primary source).
 DRAGEN_300X_VCF = _VALIDATORS + "dragen/HG002_300x.hard-filtered.vcf.gz"

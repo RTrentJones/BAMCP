@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -202,15 +203,22 @@ class TestEnsureCachedIndex:
         config = BAMCPConfig(cache_dir=str(tmp_path), allow_remote_files=True)
         services = get_services(config)
         budget_calls: list[str | None] = []
-        monkeypatch.setattr(
-            services.cache, "enforce_budget", lambda keep=None: budget_calls.append(keep) or 0
-        )
+        sweep_threads: list[threading.Thread] = []
+
+        def enforce_budget(keep=None):
+            sweep_threads.append(threading.current_thread())
+            budget_calls.append(keep)
+            return 0
+
+        monkeypatch.setattr(services.cache, "enforce_budget", enforce_budget)
 
         result = await _ensure_cached_index("https://data.example.com/S1.CRAM?sig=1", config)
 
         assert result is not None and result.endswith(".crai")
         assert Path(result).read_bytes() == b"BAI\x01"
         assert budget_calls == [result]
+        # The sweep scans the cache dir: it must run off the event loop's thread.
+        assert sweep_threads and threading.main_thread() not in sweep_threads
         assert services.index_download_locks == {}
 
     async def test_failed_download_prunes_lock(self, tmp_path, monkeypatch):

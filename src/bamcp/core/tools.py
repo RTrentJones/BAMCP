@@ -841,7 +841,8 @@ async def _try_download_index(
         logger.warning("%s download error for %s: %s", what, url, e)
         return None
     if got:
-        get_services(config).cache.enforce_budget(keep=got)
+        # The budget sweep lists and stats the whole cache dir: keep it off the event loop.
+        await asyncio.to_thread(get_services(config).cache.enforce_budget, keep=got)
     return got
 
 
@@ -870,7 +871,7 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
         return None
 
     # Already cached and valid
-    if cache.is_valid(index_path):
+    if await asyncio.to_thread(cache.is_valid, index_path):
         logger.debug("Using cached index: %s", index_path)
         return index_path
 
@@ -885,7 +886,7 @@ async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | Non
         ]
 
     async with _index_download_lock(services, index_path):
-        if cache.is_valid(index_path):
+        if await asyncio.to_thread(cache.is_valid, index_path):
             logger.debug("Using cached index after waiting for download lock: %s", index_path)
             return index_path
 
@@ -957,7 +958,9 @@ async def _ensure_reference_indexes(reference: str | None, config: BAMCPConfig) 
     if gzi:
         wanted.append((gzi, _sibling_url(reference, ".gzi")))
     async with _index_download_lock(services, fai):
-        missing = [(p, u) for p, u in wanted if not services.cache.is_valid(p)]
+        missing = [
+            (p, u) for p, u in wanted if not await asyncio.to_thread(services.cache.is_valid, p)
+        ]
         if missing:
             async with _index_http_client() as client:
                 for path, url in missing:

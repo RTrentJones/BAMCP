@@ -430,8 +430,7 @@ async def handle_classify_variant(args: dict[str, Any], config: BAMCPConfig) -> 
     the raw evidence and scaffold so an eval harness can grade the reasoning.
     Positions are 1-based. Research-grade; not a clinical determination.
     """
-    from ..core.errors import ToolInputError
-    from ..core.validation import validate_path, validate_variant_input
+    from ..core.validation import check_variant_input, validate_path
 
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
@@ -441,16 +440,14 @@ async def handle_classify_variant(args: dict[str, Any], config: BAMCPConfig) -> 
     alt = args["alt"]
     gene = args.get("gene")
     window = args.get("window", 50)
+    # Invalid input is a tool error (ValueError -> isError via the server envelope), not an
+    # answer — and is checked before reference resolution, which can read a remote BAM header.
+    check_variant_input(chrom, pos, ref, alt)
     # Same resolution as every read tool: a caller-supplied reference is SSRF-validated (it is
     # handed to htslib), else the operator default, else the auto-selected public FASTA.
     from ..core.tools import _resolve_reference
 
     _, reference = await _resolve_reference(args, config)
-
-    validation_error = validate_variant_input(chrom, pos, ref, alt)
-    if validation_error:
-        # Invalid input is a tool error (isError via the server envelope), not an answer.
-        raise ToolInputError(validation_error)
 
     evidence = await assemble_evidence(
         chrom, pos, ref, alt, file_path, config, gene=gene, window=window, reference=reference

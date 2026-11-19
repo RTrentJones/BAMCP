@@ -24,6 +24,9 @@ jobs:
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
+          # Pin like the other jobs: unpinned, uv takes the runner's system Python, and
+          # pysam has no wheel for a new one (3.14 forced a failing htslib source build).
+          python-version: "3.12"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"

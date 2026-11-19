@@ -147,7 +147,7 @@ All settings come from `BAMCP_*` env vars. The authoritative list is the datacla
 `@src/bamcp/config.py` — read it rather than relying on a copy here.
 
 Transport is `BAMCP_TRANSPORT`: `stdio` (default), `sse`, or `streamable-http`. HTTP transports
-use `BAMCP_HOST` (default `0.0.0.0`) / `BAMCP_PORT` (default `8000`).
+use `BAMCP_HOST` (default `127.0.0.1`; the Docker image sets `0.0.0.0`) / `BAMCP_PORT` (default `8000`).
 
 Auth is opt-in via `BAMCP_AUTH_ENABLED=true` — an in-memory OAuth 2.0 authorization server
 implementing `OAuthAuthorizationServerProvider` (auth code flow, refresh with rotation,
@@ -177,7 +177,7 @@ silent and shifts coordinates by ~0.5–2 Mb, which reads as false "benign" evid
 
 HTTP middleware (SSE / streamable-http only), added in `__main__.py`:
 `TrustedHostMiddleware` (DNS rebinding, `BAMCP_TRUSTED_HOSTS`) → `SecurityHeadersMiddleware` →
-`RateLimitMiddleware` (default 120 req/min/IP — every MCP JSON-RPC message is a request). Behind
+`BodySizeLimitMiddleware` (413; `BAMCP_MAX_REQUEST_BYTES`, 64 KiB on OAuth paths) → `RateLimitMiddleware` (default 120 req/min/IP — every MCP JSON-RPC message is a request). Behind
 the Cloudflare tunnel the client IP comes from `CF-Connecting-IP`, then right-to-left
 `X-Forwarded-For`, trusted only from `BAMCP_RATE_LIMIT_TRUSTED_PROXIES` (loopback).
 

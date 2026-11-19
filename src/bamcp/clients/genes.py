@@ -214,6 +214,12 @@ class GeneClient:
             GeneLookupError: NCBI could not be queried (HTTP error, in-band error,
                 unparseable body) — the gene's existence is unknown, not disproven.
         """
+        # Defense in depth: the symbol is interpolated into an Entrez query term, so refuse
+        # anything outside the gene-symbol alphabet even if a caller skipped tool validation.
+        # (Imported lazily: bamcp.core imports this module.)
+        from ..core.validation import validate_gene_symbol
+
+        validate_gene_symbol(symbol)
         target_build = normalize_genome_build(build or self.genome_build) or "unknown"
 
         try:

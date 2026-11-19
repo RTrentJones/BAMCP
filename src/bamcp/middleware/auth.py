@@ -18,6 +18,7 @@ from mcp.server.auth.provider import (
     AuthorizationParams,
     OAuthAuthorizationServerProvider,
     RefreshToken,
+    RegistrationError,
 )
 from mcp.server.auth.settings import (
     AuthSettings,
@@ -65,6 +66,42 @@ DEFAULT_MAX_CLIENTS = 10_000
 DEFAULT_MAX_TOKENS = 50_000  # per store: auth codes, access tokens, refresh tokens
 DEFAULT_SWEEP_INTERVAL = 60.0  # seconds between full expiry sweeps
 AUTH_CODE_LIFETIME = 300  # 5-minute code lifetime
+
+# Per-client metadata caps. Registration is open on the demo and every client is kept in
+# memory, so a client record must be small: the 10k-client cap bounds the count, these
+# bound the size of each entry.
+MAX_REDIRECT_URIS = 10
+MAX_REDIRECT_URI_LENGTH = 2048
+MAX_CLIENT_NAME_LENGTH = 256
+MAX_CLIENT_METADATA_BYTES = 16 * 1024
+
+
+def check_client_metadata_size(client_info: OAuthClientInformationFull) -> None:
+    """Reject oversized client metadata with a RegistrationError (the SDK answers 400)."""
+    uris = client_info.redirect_uris or []
+    if len(uris) > MAX_REDIRECT_URIS:
+        raise RegistrationError(
+            error="invalid_redirect_uri",
+            error_description=f"At most {MAX_REDIRECT_URIS} redirect_uris are allowed",
+        )
+    if any(len(str(u)) > MAX_REDIRECT_URI_LENGTH for u in uris):
+        raise RegistrationError(
+            error="invalid_redirect_uri",
+            error_description=f"redirect_uris must be at most {MAX_REDIRECT_URI_LENGTH} chars",
+        )
+    if (
+        client_info.client_name is not None
+        and len(client_info.client_name) > MAX_CLIENT_NAME_LENGTH
+    ):
+        raise RegistrationError(
+            error="invalid_client_metadata",
+            error_description=f"client_name must be at most {MAX_CLIENT_NAME_LENGTH} chars",
+        )
+    if len(client_info.model_dump_json().encode()) > MAX_CLIENT_METADATA_BYTES:
+        raise RegistrationError(
+            error="invalid_client_metadata",
+            error_description=f"Client metadata must be at most {MAX_CLIENT_METADATA_BYTES} bytes",
+        )
 
 
 def _to_bytes(value: str) -> bytes:
@@ -172,6 +209,7 @@ class BAMCPAuthProvider(
         # admitted through this provider regardless of how it is reached.
         if not self._allow_dynamic_registration:
             raise ValueError("Dynamic client registration is disabled")
+        check_client_metadata_size(client_info)
         self._maybe_sweep()
         if client_info.client_id is not None:
             # Re-registering moves the client to the newest slot.

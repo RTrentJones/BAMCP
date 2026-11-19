@@ -1,7 +1,10 @@
 """Entry point for running BAMCP as a module: python -m bamcp."""
 
 import atexit
+import logging
+import os
 import sys
+from pathlib import Path
 from typing import Literal
 
 from .config import BAMCPConfig
@@ -11,22 +14,64 @@ from .server import create_server
 
 Transport = Literal["stdio", "sse", "streamable-http"]
 
+logger = logging.getLogger(__name__)
+
+
+def _configure_htslib_reference_lookup(config: BAMCPConfig) -> dict[str, str]:
+    """Keep htslib's CRAM reference lookup (REF_PATH / REF_CACHE) local to this server.
+
+    A CRAM decoded without an explicit reference makes htslib look the reference up by the
+    header's M5 checksum along ``REF_PATH`` — older htslib builds default that to the EBI MD5
+    service, and any ``http(s)://`` entry is fetched with libcurl, bypassing BAMCP's SSRF
+    checks and host allow-list. When the operator has not set them, point both variables at a
+    local directory under the BAMCP cache dir: a search path with no URL entry never goes to
+    the network, so a reference-less CRAM fails fast instead. An operator-set value is left
+    alone (logged with a warning when it names a URL). Returns the values in effect.
+    """
+    local = str(Path(config.cache_dir) / "hts-ref" / "%2s" / "%2s" / "%s")
+    applied: dict[str, str] = {}
+    for name in ("REF_PATH", "REF_CACHE"):
+        current = os.environ.get(name)
+        if current:
+            if "://" in current or "URL=" in current:
+                logger.warning(
+                    "%s=%s lets htslib fetch CRAM references from the network outside "
+                    "BAMCP's remote-host allow-list",
+                    name,
+                    current,
+                )
+            applied[name] = current
+            continue
+        os.environ[name] = local
+        applied[name] = local
+    logger.info(
+        "htslib CRAM reference lookup: REF_PATH=%s REF_CACHE=%s",
+        applied["REF_PATH"],
+        applied["REF_CACHE"],
+    )
+    return applied
+
 
 def _add_http_middleware(app, config: BAMCPConfig):  # noqa: ANN001, ANN201
     """Add security middleware to a Starlette app for HTTP transports."""
     from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+    from .middleware.bodylimit import BodySizeLimitMiddleware
     from .middleware.ratelimit import RateLimitMiddleware
     from .middleware.security import SecurityHeadersMiddleware
 
     # Order matters. Starlette's add_middleware() PREPENDS, so the LAST one added is the
     # OUTERMOST layer and sees the request first. The resulting request path is:
     #
-    #   TrustedHost (if configured) -> SecurityHeaders -> RateLimit -> app
+    #   TrustedHost (if configured) -> SecurityHeaders -> BodySizeLimit -> RateLimit -> app
     #
     # * TrustedHost is outermost: a bad Host header (DNS rebinding) is rejected before any
     #   other work, and never consumes a rate-limit slot.
-    # * SecurityHeaders wraps RateLimit, so 429 responses carry the security headers too.
+    # * SecurityHeaders only decorates responses (it reads no body), so BodySizeLimit is
+    #   effectively the first gate after the Host check, and its 413s carry the security
+    #   headers too. An oversized Content-Length is refused before any body is read and
+    #   without consuming a rate-limit slot; a streamed body is cut off at the limit.
+    # * SecurityHeaders also wraps RateLimit, so 429 responses carry the headers.
     # * RateLimit is innermost, directly in front of the MCP app.
     #
     # Added innermost-first below.
@@ -36,6 +81,8 @@ def _add_http_middleware(app, config: BAMCPConfig):  # noqa: ANN001, ANN201
         trusted_proxies=config.rate_limit_trusted_proxies,
         max_tracked_ips=config.rate_limit_max_tracked_ips,
     )
+
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=config.max_request_bytes)
 
     app.add_middleware(SecurityHeadersMiddleware)
 
@@ -62,6 +109,7 @@ def main() -> None:
     )
 
     warn_if_remote_unrestricted(config)
+    _configure_htslib_reference_lookup(config)
 
     # Register cleanup on exit to remove this session's cache files
     def cleanup_on_exit() -> None:

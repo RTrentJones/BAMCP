@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 # Paths and networking defaults
-DEFAULT_HOST = "0.0.0.0"  # noqa: S104
+DEFAULT_HOST = "127.0.0.1"  # HTTP transports; Docker/OCI set BAMCP_HOST=0.0.0.0 explicitly
 DEFAULT_PORT = 8000
 DEFAULT_ISSUER_URL = "http://localhost:8000"
 DEFAULT_RESOURCE_SERVER_URL = "http://localhost:8000"

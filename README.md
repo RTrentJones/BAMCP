@@ -455,7 +455,7 @@ A region string is at most 100 characters and spans at most 1 Mbp (`scan_variant
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
 | `BAMCP_TRANSPORT` | Transport mode: `stdio`, `sse`, `streamable-http` | `stdio` |
-| `BAMCP_HOST` | HTTP bind address | `0.0.0.0` |
+| `BAMCP_HOST` | HTTP bind address (the Docker image sets `0.0.0.0`) | `127.0.0.1` |
 | `BAMCP_PORT` | HTTP port | `8000` |
 
 ### Authentication Settings
@@ -497,6 +497,8 @@ deploy-identity route is unauthenticated.
 | `BAMCP_ALLOW_REMOTE_FILES` | Allow HTTP(S) BAM/CRAM/VCF/reference URLs | `false` |
 | `BAMCP_ALLOWED_REMOTE_HOSTS` | Comma-separated host allow-list for remote fetch (the real SSRF control) | None |
 | `BAMCP_ALLOWED_DIRECTORIES` | Comma-separated local dirs that file paths must be under | None |
+| `BAMCP_ALLOW_LOCAL_FILES` | Accept caller-supplied local paths (BAM/CRAM, VCF, reference). Set `false` on a remote-only server; the operator's `BAMCP_REFERENCE` still works | `true` |
+| `BAMCP_MAX_REQUEST_BYTES` | Largest HTTP request body accepted (413 above it); OAuth endpoints are capped at 64 KiB | `1048576` |
 | `BAMCP_RATE_LIMIT` | Requests per minute per client IP (every MCP JSON-RPC message counts) | `120` |
 | `BAMCP_RATE_LIMIT_TRUSTED_PROXIES` | IPs/CIDRs whose `CF-Connecting-IP` / `X-Forwarded-For` headers are trusted | loopback (`127.0.0.1`, `::1`) |
 | `BAMCP_TRUSTED_HOSTS` | Comma-separated allowed `Host` headers (DNS-rebinding protection) | None (no Host check) |

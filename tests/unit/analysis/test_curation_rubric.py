@@ -235,13 +235,13 @@ class TestHandlerFormatParam:
 
 
 class TestRubricErrorResponses:
-    """Invalid input is a tool ERROR (ValueError → isError via _run), in either format."""
+    """Invalid input is a tool ERROR (ToolInputError → isError via _run), in either format."""
 
     @pytest.mark.unit
     @pytest.mark.asyncio
     @pytest.mark.parametrize("fmt", ["rubric", "text"])
     async def test_validation_error_raises(self, small_bam_path, config, fmt):
-        with pytest.raises(ValueError, match="Invalid chromosome"):
+        with pytest.raises(ToolInputError, match="Invalid chromosome"):
             await handle_get_variant_curation_summary(
                 {
                     "file_path": small_bam_path,
@@ -265,7 +265,7 @@ class TestRubricErrorResponses:
             raise AssertionError("reference resolved before input validation")
 
         monkeypatch.setattr("bamcp.core.tools._resolve_reference_info", must_not_run)
-        with pytest.raises(ValueError, match="Invalid alternate allele"):
+        with pytest.raises(ToolInputError, match="Invalid alternate allele"):
             await handle_get_variant_curation_summary(
                 {"file_path": small_bam_path, "chrom": "chr1", "pos": 1, "ref": "A", "alt": "Z"},
                 config,

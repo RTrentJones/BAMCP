@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from ..config import BAMCPConfig
 from ..constants import REMOTE_FILE_SCHEMES
+from .errors import InvalidVariantInputError
 
 logger = logging.getLogger(__name__)
 
@@ -406,19 +407,20 @@ def check_variant_input(chrom: str, pos: int, ref: str, alt: str) -> None:
     """Validate a variant's chrom/pos/ref/alt (``pos`` 1-based).
 
     Raises:
-        ValueError: with a caller-safe message (built only from the given values) if any
-            field is invalid. ``_run`` maps it to an ``isError`` result.
+        InvalidVariantInputError: (a ``ToolInputError`` and a ``ValueError``) with a
+            caller-safe message built only from the given values; ``_run`` maps it to an
+            ``isError`` result.
     """
     if not CHROM_PATTERN.match(chrom):
-        raise ValueError(f"Invalid chromosome: {chrom}")
+        raise InvalidVariantInputError(f"Invalid chromosome: {chrom}")
     if pos < 1:
-        raise ValueError(f"Position must be positive, got {pos}")
+        raise InvalidVariantInputError(f"Position must be positive, got {pos}")
     if not ALLELE_PATTERN.match(ref):
-        raise ValueError(f"Invalid reference allele: {ref}")
+        raise InvalidVariantInputError(f"Invalid reference allele: {ref}")
     if not ALLELE_PATTERN.match(alt):
-        raise ValueError(f"Invalid alternate allele: {alt}")
+        raise InvalidVariantInputError(f"Invalid alternate allele: {alt}")
     if len(ref) > MAX_ALLELE_LENGTH or len(alt) > MAX_ALLELE_LENGTH:
-        raise ValueError(f"Allele length exceeds maximum ({MAX_ALLELE_LENGTH}bp)")
+        raise InvalidVariantInputError(f"Allele length exceeds maximum ({MAX_ALLELE_LENGTH}bp)")
 
 
 def validate_variant_input(chrom: str, pos: int, ref: str, alt: str) -> str | None:
@@ -429,6 +431,6 @@ def validate_variant_input(chrom: str, pos: int, ref: str, alt: str) -> str | No
     """
     try:
         check_variant_input(chrom, pos, ref, alt)
-    except ValueError as exc:
+    except InvalidVariantInputError as exc:
         return str(exc)
     return None

@@ -530,6 +530,14 @@ class TestCheckVariantInput:
             check_variant_input(chrom, pos, ref, alt)
 
     @pytest.mark.unit
+    def test_error_is_tool_input_error_and_value_error(self):
+        from bamcp.core.errors import ToolInputError
+
+        with pytest.raises(ToolInputError) as exc_info:
+            check_variant_input("chr1", 0, "A", "T")
+        assert isinstance(exc_info.value, ValueError)
+
+    @pytest.mark.unit
     def test_allele_length_limit(self):
         at_limit = "A" * MAX_ALLELE_LENGTH
         assert check_variant_input("chr1", 100, at_limit, "T") is None

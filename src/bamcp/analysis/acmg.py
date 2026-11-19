@@ -440,7 +440,7 @@ async def handle_classify_variant(args: dict[str, Any], config: BAMCPConfig) -> 
     alt = args["alt"]
     gene = args.get("gene")
     window = args.get("window", 50)
-    # Invalid input is a tool error (ValueError -> isError via the server envelope), not an
+    # Invalid input is a tool error (ToolInputError -> isError via the server envelope), not an
     # answer — and is checked before reference resolution, which can read a remote BAM header.
     check_variant_input(chrom, pos, ref, alt)
     # Same resolution as every read tool: a caller-supplied reference is SSRF-validated (it is

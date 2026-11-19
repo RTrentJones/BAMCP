@@ -102,8 +102,10 @@ async def test_handle_classify_variant_offline(offline_cfg, comprehensive_bam_pa
 
 @pytest.mark.unit
 async def test_handle_classify_variant_rejects_bad_input(offline_cfg, comprehensive_bam_path):
-    # Invalid input is a tool error (ValueError → isError via _run), never a success payload.
-    with pytest.raises(ValueError, match="Position must be positive"):
+    from bamcp.core.errors import ToolInputError
+
+    # Invalid input is a tool error (isError), never a success payload carrying "error".
+    with pytest.raises(ToolInputError, match="Position must be positive"):
         await handle_classify_variant(
             {
                 "file_path": comprehensive_bam_path,
@@ -126,7 +128,9 @@ async def test_classify_validates_before_reference_resolution(
         raise AssertionError("reference resolved before input validation")
 
     monkeypatch.setattr("bamcp.core.tools._resolve_reference", must_not_run)
-    with pytest.raises(ValueError, match="Invalid alternate allele"):
+    from bamcp.core.errors import ToolInputError
+
+    with pytest.raises(ToolInputError, match="Invalid alternate allele"):
         await handle_classify_variant(
             {
                 "file_path": comprehensive_bam_path,

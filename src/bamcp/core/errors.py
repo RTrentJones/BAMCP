@@ -36,6 +36,11 @@ class ToolInputError(Exception):
     """
 
 
+class InvalidVariantInputError(ToolInputError, ValueError):
+    """Bad chrom/pos/ref/alt. Both a ``ToolInputError`` (the handler contract) and a
+    ``ValueError`` (validation's vocabulary), so either ``except`` catches it."""
+
+
 class ReferenceUnavailableError(ToolInputError):
     """A check needed the reference base and none was available (no reference resolved).
 

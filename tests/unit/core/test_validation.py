@@ -8,8 +8,10 @@ from bamcp.config import BAMCPConfig
 from bamcp.core.validation import (
     ALLELE_PATTERN,
     CHROM_PATTERN,
+    MAX_ALLELE_LENGTH,
     REGION_PATTERN,
     _is_private_ip,
+    check_variant_input,
     is_cram,
     validate_data_sources,
     validate_path,
@@ -505,6 +507,36 @@ class TestValidateVariantInput:
         result = validate_variant_input("chr1", 100, "A", "")
         assert result is not None
         assert "Invalid alternate allele" in result
+
+
+class TestCheckVariantInput:
+    """The raising form: ValueError (mapped to isError by _run), limit is a named constant."""
+
+    @pytest.mark.unit
+    def test_valid_input_returns_none(self):
+        assert check_variant_input("chr17", 7674220, "G", "A") is None
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("chrom", "pos", "ref", "alt", "match"),
+        [
+            ("chrABC", 100, "A", "T", "Invalid chromosome"),
+            ("chr1", 0, "A", "T", "Position must be positive"),
+            ("chr1", 100, "X", "A", "Invalid reference allele"),
+            ("chr1", 100, "A", "", "Invalid alternate allele"),
+        ],
+    )
+    def test_invalid_input_raises(self, chrom, pos, ref, alt, match):
+        with pytest.raises(ValueError, match=match):
+            check_variant_input(chrom, pos, ref, alt)
+
+    @pytest.mark.unit
+    def test_allele_length_limit(self):
+        at_limit = "A" * MAX_ALLELE_LENGTH
+        assert check_variant_input("chr1", 100, at_limit, "T") is None
+        with pytest.raises(ValueError, match=f"maximum \\({MAX_ALLELE_LENGTH}bp\\)"):
+            check_variant_input("chr1", 100, at_limit + "A", "T")
+        assert validate_variant_input("chr1", 100, "T", at_limit + "A") is not None
 
 
 class TestValidateReferencePath:

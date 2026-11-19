@@ -418,20 +418,37 @@ def validate_gene_symbol(symbol: str) -> None:
         )
 
 
-def validate_variant_input(chrom: str, pos: int, ref: str, alt: str) -> str | None:
-    """Validate variant lookup input parameters.
+# Longest REF/ALT allele accepted by a variant lookup or classification.
+MAX_ALLELE_LENGTH = 1000
 
-    Returns:
-        Error message if validation fails, None if valid.
+
+def check_variant_input(chrom: str, pos: int, ref: str, alt: str) -> None:
+    """Validate a variant's chrom/pos/ref/alt (``pos`` 1-based).
+
+    Raises:
+        ValueError: with a caller-safe message (built only from the given values) if any
+            field is invalid. ``_run`` maps it to an ``isError`` result.
     """
     if not CHROM_PATTERN.match(chrom):
-        return f"Invalid chromosome: {chrom}"
+        raise ValueError(f"Invalid chromosome: {chrom}")
     if pos < 1:
-        return f"Position must be positive, got {pos}"
+        raise ValueError(f"Position must be positive, got {pos}")
     if not ALLELE_PATTERN.match(ref):
-        return f"Invalid reference allele: {ref}"
+        raise ValueError(f"Invalid reference allele: {ref}")
     if not ALLELE_PATTERN.match(alt):
-        return f"Invalid alternate allele: {alt}"
-    if len(ref) > 1000 or len(alt) > 1000:
-        return "Allele length exceeds maximum (1000bp)"
+        raise ValueError(f"Invalid alternate allele: {alt}")
+    if len(ref) > MAX_ALLELE_LENGTH or len(alt) > MAX_ALLELE_LENGTH:
+        raise ValueError(f"Allele length exceeds maximum ({MAX_ALLELE_LENGTH}bp)")
+
+
+def validate_variant_input(chrom: str, pos: int, ref: str, alt: str) -> str | None:
+    """Non-raising form of :func:`check_variant_input`.
+
+    Returns:
+        The error message if validation fails, None if valid.
+    """
+    try:
+        check_variant_input(chrom, pos, ref, alt)
+    except ValueError as exc:
+        return str(exc)
     return None

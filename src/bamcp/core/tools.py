@@ -62,6 +62,7 @@ from ..constants import (
 from ..middleware.telemetry import telemetry_wrapper
 from .cache import BAMIndexCache
 from .errors import ReferenceUnavailableError, ToolInputError
+from .filters import failed_candidate_filters, passes_candidate_filters
 from .parsers import (
     EXCLUDED_READ_FLAGS,
     MAX_REGION_SIZE,
@@ -1632,31 +1633,14 @@ _UNSCORED_CAP_NOTE = (
 _UNSCORED_TIMEOUT_NOTE = "Per-site evidence timed out; retry or narrow the region."
 
 
-def _passes_candidate_filters(
-    v: dict[str, Any], min_vaf: float, min_depth: int, min_alt_count: int
-) -> bool:
-    """Tool-layer thresholds for a BAMCP candidate. VCF records always pass (authoritative)."""
-    if v.get("source") == "vcf":
-        return True
-    alt_count = v.get("alt_count")
-    return (
-        v["vaf"] >= min_vaf
-        and v["depth"] >= min_depth
-        and (alt_count is None or alt_count >= min_alt_count)
-    )
-
-
 def _apply_alt_count(data: RegionData, min_alt_count: int) -> RegionData:
     """``data`` with BAMCP candidates below ``min_alt_count`` dropped (never mutates the cache).
 
     Detection's VAF/depth floors already ran in the parser; the alt-read floor is applied here so
-    the region cache stays keyed by the parser thresholds only.
+    the region cache stays keyed by the parser thresholds only. Same predicate as every other
+    candidate filter (:func:`passes_candidate_filters`): an unknown alt_count is kept.
     """
-    kept = [
-        v
-        for v in data.variants
-        if v.get("source") == "vcf" or (v.get("alt_count") or 0) >= min_alt_count
-    ]
+    kept = [v for v in data.variants if passes_candidate_filters(v, min_alt_count=min_alt_count)]
     if len(kept) == len(data.variants):
         return data
     return replace(data, variants=kept)
@@ -1765,27 +1749,6 @@ SITE_PROBE_NOTE = (
 )
 
 
-def _failed_filters(
-    at_filters: dict[str, Any],
-    *,
-    min_vaf: float,
-    min_depth: int,
-    min_alt_count: int,
-    baseq_removed: int,
-) -> list[str]:
-    """Which calling thresholds the site's filtered counts fail (min_baseq when it dropped alts)."""
-    failed = []
-    if at_filters["vaf"] < min_vaf:
-        failed.append("min_vaf")
-    if at_filters["depth"] < min_depth:
-        failed.append("min_depth")
-    if at_filters["alt_count"] < min_alt_count:
-        failed.append("min_alt_count")
-    if failed and baseq_removed > 0:
-        failed.insert(0, "min_baseq")
-    return failed
-
-
 def site_filter_check(
     variant: dict[str, Any],
     config: BAMCPConfig,
@@ -1803,21 +1766,22 @@ def site_filter_check(
     min_vaf = config.min_vaf if min_vaf is None else min_vaf
     min_depth = config.min_depth if min_depth is None else min_depth
     min_alt_count = config.min_alt_count if min_alt_count is None else min_alt_count
+    alt_count = variant.get("alt_count")
     at_filters: dict[str, Any] = {
-        "alt_count": int(variant.get("alt_count") or 0),
+        # None = count unknown (never fails min_alt_count; see core.filters).
+        "alt_count": int(alt_count) if alt_count is not None else None,
         "depth": int(variant.get("depth") or 0),
         "vaf": float(variant.get("vaf") or 0.0),
     }
     removed = 0
-    if unfiltered is not None:
+    if unfiltered is not None and at_filters["alt_count"] is not None:
         removed = max(0, int(unfiltered["alt_count"]) - at_filters["alt_count"])
-    failed = _failed_filters(
-        at_filters,
-        min_vaf=min_vaf,
-        min_depth=min_depth,
-        min_alt_count=min_alt_count,
-        baseq_removed=removed,
+    failed = failed_candidate_filters(
+        at_filters, min_vaf=min_vaf, min_depth=min_depth, min_alt_count=min_alt_count
     )
+    if failed and removed > 0:
+        # The site fails a floor AND min_baseq dropped some of its alt reads: name it first.
+        failed.insert(0, "min_baseq")
     check: dict[str, Any] = {
         "passes_filters": not failed,
         "failed_filters": failed,
@@ -2001,7 +1965,11 @@ def _select_get_variants(
     before :func:`enhance_vcf_variants` gives the same records as enhancing first.
     """
     passing = [
-        v for v in data.variants if _passes_candidate_filters(v, min_vaf, min_depth, min_alt_count)
+        v
+        for v in data.variants
+        if passes_candidate_filters(
+            v, min_vaf=min_vaf, min_depth=min_depth, min_alt_count=min_alt_count
+        )
     ]
     capped = _cap_variants(passing, GET_VARIANTS_MAX_RESULTS)
     detected = enhance_vcf_variants(capped, data.reference_sequence, data.start)
@@ -2866,11 +2834,14 @@ def _scan_chunk(
             if gap:
                 v["depth"] += gap
                 v["vaf"] = round(v["alt_count"] / v["depth"], 3)
-        # Adding deletion depth only lowers VAF: re-apply the threshold.
-        variants = [v for v in variants if v["vaf"] >= min_vaf]
-    if min_alt_count:
-        variants = [v for v in variants if v.get("alt_count", 0) >= min_alt_count]
-    return variants
+    # Adding deletion depth only lowers VAF: re-apply the floors (the shared predicate).
+    return [
+        v
+        for v in variants
+        if passes_candidate_filters(
+            v, min_vaf=min_vaf, min_depth=min_depth, min_alt_count=min_alt_count
+        )
+    ]
 
 
 def _scan_contig_progressive(

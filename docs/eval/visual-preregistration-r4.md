@@ -93,3 +93,6 @@ that kept the model from producing an answer. No item is dropped after seeing re
   weights and Holm family are as registered above. 240 runs first stopped on a usage limit
   before answering and were re-run with the identical prompt (Exclusions); one run produced two
   identical answers and is counted once.
+- **2026-11-19 (documentation; no effect on items or analysis).** The commit cited above as
+  `1b20d44` is on the PR #70 branch, which was squash-merged, so `git log` on `main` does not list
+  it. It remains on GitHub at https://github.com/RTrentJones/BAMCP/commit/1b20d44.

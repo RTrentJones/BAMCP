@@ -234,10 +234,10 @@ rises in both (insertions 0.70 → 0.80, deletions 0.57 → 0.71).
 - On these items, **a picture of the pileup does not beat the reads as text**. Raw read text is
   the strongest single input on synthetic and on real data, and adding the image to it neither
   helps nor hurts measurably (two pre-registered tests, both null at the ceiling).
-- **The picture alone is a usable but weaker channel**: 0.87–0.89 joint accuracy, close to
-  BAMCP's structured JSON and well behind raw text, and overconfident when wrong. The round-2
-  gain from the legibility fix is real in direction (fresh items: `V` 0.889 vs `Tjson` 0.824)
-  but did not reach significance, so it is not confirmed.
+- **The picture alone is a usable but weaker channel**: 0.87–0.89 joint accuracy in round 3, close
+  to BAMCP's structured JSON and well behind raw text, and overconfident when wrong. The round-2
+  gain from the legibility fix is real in direction (fresh items: `V` 0.889 vs `Tjson` 0.824) but
+  did not reach significance, so it is not confirmed.
 - **Model size matters most for images**: the largest model was near-perfect from pictures
   (1.000 synthetic, 0.972 real); the smallest was not (0.81, 0.69).
 - **Harder real items do not open a gap (round 4).** On hard classes of real HG002 sites the
@@ -273,3 +273,11 @@ no longer claims a larger joint-accuracy gain for insertions (deletions gain sli
 every arm; the round-3 truth composition is stated exactly; and the round-4 product changes are
 described as made.
 
+## Corrections (2026-11-19)
+
+The conclusion's image-only range (0.87–0.89) now says it is round 3's (the pilot's `V` was 0.821
+and iteration 2's 0.910). Commits cited here by short hash (`4cb4048`, `36513ba`, `7866bbb`) are
+on the PR branches, which were squash-merged, so `git log` on `main` does not list them. They
+remain on GitHub: [`4cb4048`](https://github.com/RTrentJones/BAMCP/commit/4cb4048) (PR #69);
+[`36513ba`](https://github.com/RTrentJones/BAMCP/commit/36513ba) (PR #74);
+[`7866bbb`](https://github.com/RTrentJones/BAMCP/commit/7866bbb) (PR #74).

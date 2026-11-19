@@ -229,3 +229,80 @@ class TestEnsureCachedIndex:
         assert await _ensure_cached_index("https://data.example.com/x.bam", config) is None
         assert get_services(config).index_download_locks == {}
         assert _tmp_files(get_services(config).cache.cache_dir) == []
+
+
+@pytest.mark.unit
+class TestSiblingUrl:
+    @pytest.mark.parametrize(
+        ("url", "suffix", "replace_ext", "expected"),
+        [
+            ("https://h/x.bam", ".bai", False, "https://h/x.bam.bai"),
+            ("https://h/x.bam", ".bai", True, "https://h/x.bai"),
+            (
+                "https://h/d/x.bam?X-Amz-Signature=ab.cd&X-Amz-Expires=60",
+                ".bai",
+                False,
+                "https://h/d/x.bam.bai?X-Amz-Signature=ab.cd&X-Amz-Expires=60",
+            ),
+            ("https://h/d/x.bam?sig=a.b", ".bai", True, "https://h/d/x.bai?sig=a.b"),
+            (
+                "https://h.example.com/noext?s=1",
+                ".bai",
+                True,
+                "https://h.example.com/noext.bai?s=1",
+            ),
+            ("https://h/ref.fa.gz?t=1", ".gzi", False, "https://h/ref.fa.gz.gzi?t=1"),
+        ],
+    )
+    def test_suffix_lands_on_the_path(self, url, suffix, replace_ext, expected):
+        assert tools_module._sibling_url(url, suffix, replace_ext=replace_ext) == expected
+
+
+@pytest.mark.unit
+class TestSignedUrlIndexes:
+    @staticmethod
+    def _mock_clients(monkeypatch, handler, timeouts: list):
+        real_client = httpx.AsyncClient
+
+        def client_factory(**kwargs):
+            timeouts.append(kwargs.get("timeout"))
+            return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+        monkeypatch.setattr(tools_module.httpx, "AsyncClient", client_factory)
+
+    async def test_bam_index_urls_keep_the_query_string(self, tmp_path, monkeypatch):
+        from bamcp.constants import INDEX_DOWNLOAD_TIMEOUT_SECONDS
+        from bamcp.core.tools import _ensure_cached_index
+
+        seen: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append((request.url.path, request.url.query.decode()))
+            if request.url.path == "/d/x.bai":
+                return httpx.Response(200, content=b"BAI\x01")
+            return httpx.Response(404)
+
+        timeouts: list = []
+        self._mock_clients(monkeypatch, handler, timeouts)
+        config = BAMCPConfig(cache_dir=str(tmp_path), allow_remote_files=True)
+        result = await _ensure_cached_index("https://data.example.com/d/x.bam?sig=a.b", config)
+
+        assert result is not None
+        assert seen == [("/d/x.bam.bai", "sig=a.b"), ("/d/x.bai", "sig=a.b")]
+        assert timeouts == [INDEX_DOWNLOAD_TIMEOUT_SECONDS]
+
+    async def test_reference_index_urls_keep_the_query_string(self, tmp_path, monkeypatch):
+        from bamcp.core.tools import _ensure_reference_indexes, get_services
+
+        seen: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append((request.url.path, request.url.query.decode()))
+            return httpx.Response(200, content=b"idx")
+
+        self._mock_clients(monkeypatch, handler, [])
+        config = BAMCPConfig(cache_dir=str(tmp_path), allow_remote_files=True)
+        await _ensure_reference_indexes("https://data.example.com/ref.fa.gz?tok=1", config)
+
+        assert seen == [("/ref.fa.gz.fai", "tok=1"), ("/ref.fa.gz.gzi", "tok=1")]
+        assert get_services(config).index_download_locks == {}

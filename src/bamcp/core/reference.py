@@ -80,11 +80,6 @@ GENOME_BUILDS: dict[str, GenomeBuildInfo] = {
 }
 
 
-# Kept as a name for existing callers; the one normalizer (and alias table) lives in
-# ``constants`` so lookups and gene search accept exactly the same spellings.
-normalize_build_name = normalize_genome_build
-
-
 def contig_style(contigs: list[dict]) -> str:
     """Return the naming style of the BAM's *build-defining* contig.
 
@@ -160,7 +155,7 @@ def get_public_reference_url(build: str, style: str | None = None) -> str | None
         that naming style. None means "nothing safe to suggest" — callers should
         say so rather than falling back to a URL that will fail to open.
     """
-    canonical = normalize_build_name(build)
+    canonical = normalize_genome_build(build)
     if not canonical or canonical not in GENOME_BUILDS:
         return None
     url = GENOME_BUILDS[canonical]["fasta_urls"].get(style or CONTIG_STYLE_NOCHR)

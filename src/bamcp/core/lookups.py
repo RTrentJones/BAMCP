@@ -20,7 +20,7 @@ from ..config import BAMCPConfig
 from ..middleware.telemetry import telemetry_wrapper
 from .errors import ToolInputError
 from .services import get_clinvar_client, get_gnomad_client
-from .validation import validate_variant_input
+from .validation import check_variant_input
 
 logger = logging.getLogger(__name__)
 
@@ -134,9 +134,7 @@ def _validate_lookup_input(args: dict[str, Any], config: BAMCPConfig) -> tuple[s
 
     Returns the resolved ``(build, build_source)``.
     """
-    error = validate_variant_input(args["chrom"], args["pos"], args["ref"], args["alt"])
-    if error:
-        raise ToolInputError(error)
+    check_variant_input(args["chrom"], args["pos"], args["ref"], args["alt"])
     build, build_source = _lookup_build(args, config)
     if build is None:
         raise ToolInputError(

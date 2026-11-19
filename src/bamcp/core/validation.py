@@ -421,16 +421,3 @@ def check_variant_input(chrom: str, pos: int, ref: str, alt: str) -> None:
         raise InvalidVariantInputError(f"Invalid alternate allele: {alt}")
     if len(ref) > MAX_ALLELE_LENGTH or len(alt) > MAX_ALLELE_LENGTH:
         raise InvalidVariantInputError(f"Allele length exceeds maximum ({MAX_ALLELE_LENGTH}bp)")
-
-
-def validate_variant_input(chrom: str, pos: int, ref: str, alt: str) -> str | None:
-    """Non-raising form of :func:`check_variant_input`.
-
-    Returns:
-        The error message if validation fails, None if valid.
-    """
-    try:
-        check_variant_input(chrom, pos, ref, alt)
-    except InvalidVariantInputError as exc:
-        return str(exc)
-    return None

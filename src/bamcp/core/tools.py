@@ -1649,7 +1649,7 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     The response always states the coordinates' build, the source of that choice, and a loud
     warning on any mismatch against the BAM.
     """
-    from .reference import normalize_build_name
+    from ..constants import normalize_genome_build
     from .validation import validate_gene_symbol
 
     def _answer(status: str, **fields: Any) -> dict:
@@ -1663,7 +1663,7 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     validate_gene_symbol(symbol)  # Entrez query-term injection guard
 
     file_path = args.get("file_path")
-    requested = normalize_build_name(args["build"]) if args.get("build") else None
+    requested = normalize_genome_build(args["build"]) if args.get("build") else None
     if args.get("build") and requested is None:
         raise ToolInputError(
             f"Unrecognized build {args['build']!r}; use GRCh37/hg19 or GRCh38/hg38"

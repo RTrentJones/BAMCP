@@ -728,3 +728,19 @@ class TestDockerConsistency:
         assert "tests" not in lines and "tests/" not in lines, (
             "tests/ must not be in .dockerignore — Dockerfile.dev needs it"
         )
+
+
+def test_node_version_is_pinned_once():
+    """CI and the image build the viewer with the same Node major (src/bamcp/static/.nvmrc)."""
+    with open(os.path.join(PROJECT_ROOT, "src", "bamcp", "static", ".nvmrc")) as f:
+        pinned = f.read().strip()
+    with open(os.path.join(PROJECT_ROOT, "Dockerfile")) as f:
+        image = re.search(r"^FROM node:(\d+)", f.read(), re.MULTILINE)
+    assert image is not None and image.group(1) == pinned
+    workflows = os.path.join(PROJECT_ROOT, ".github", "workflows")
+    for name in os.listdir(workflows):
+        with open(os.path.join(workflows, name)) as f:
+            text = f.read()
+        assert "node-version:" not in text, f"{name} pins Node inline; use node-version-file"
+        if "make install" in text:
+            assert "node-version-file: src/bamcp/static/.nvmrc" in text, name

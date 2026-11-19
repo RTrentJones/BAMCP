@@ -34,7 +34,7 @@ depth with large refactors scoped as follow-ups (see [Deferred](#deferred-follow
 | Rate limiter trusts `X-Forwarded-For`; unbounded dict | ✅ Confirmed | `middleware/ratelimit.py:33-37`; `_requests` is a `defaultdict(list)` cleaned only when the same IP returns |
 | Remote-file validation is one-shot DNS; no redirect re-validation | ✅ Confirmed | `core/validation.py:88-100`; docstring admits the TOCTOU/rebind gap |
 | **Reference-FASTA URL is unvalidated** | ✅ Confirmed | No validator for the `reference` arg; flows straight to `pysam.AlignmentFile(reference_filename=…)` — the one genuinely-open SSRF path |
-| Index (`.bai`/`.crai`) URL *is* validated | ✅ Already handled | `core/tools.py:242` calls `validate_remote_url(index_url, config)` — review was wrong here; drop that item |
+| Index (`.bai`/`.crai`) URL *is* validated | ✅ Already handled | `core/tools.py:242` (index download now in `core/remote.py`) calls `validate_remote_url(index_url, config)` — review was wrong here; drop that item |
 | Caches/registry unbounded, lazy expiry | ✅ Confirmed | `region_cache` plain dict (`tools.py:74`); `_services_registry` keyed by `id(config)`, never evicts |
 | `id(config)` registry can alias stale services | ✅ Confirmed | `id()` reuse after GC → correctness bug, not just a leak |
 | Grader passes on tool invocation alone | ✅ Confirmed | `eval/grader.py:48-92` — `tools_expected` satisfied + no score markers → deterministic PASS; answer text never checked |

@@ -27,6 +27,35 @@ landed after that review.
   at every hop; every non-global address is blocked; DNS resolution runs off the event loop;
   the OAuth stores and caches are bounded; the rate limiter reads `CF-Connecting-IP` behind the
   tunnel (default 120 requests/min per IP); viewer strings are HTML-escaped (XSS).
+- **One URI-scheme classifier** — a `vcf_path` such as `http:/127.0.0.1:<port>/x.vcf.gz` (one
+  slash, so no `://`) was treated as a local path and reached htslib, which fetched it over HTTP
+  without the SSRF checks. Every data source now goes through `_is_remote_source`: only an exact
+  `http://` / `https://` prefix is remote, and any other scheme-looking value (`data:`, `ftp:`,
+  `file:`, `s3:`, `http:/`, …) or a local path embedding `://` / `##idx##` is rejected. A local
+  VCF/BCF must exist.
+- **`BAMCP_ALLOW_LOCAL_FILES`** (default `true`) — `false` rejects every caller-supplied local
+  path before any filesystem access; the operator's `BAMCP_REFERENCE` keeps working. The compose
+  `prod` profile sets it to `false`, sets `BAMCP_ALLOWED_REMOTE_HOSTS`, and binds the port to
+  `127.0.0.1`.
+- **Request body limit** — `BodySizeLimitMiddleware` answers 413 above `BAMCP_MAX_REQUEST_BYTES`
+  (default 1 MiB; 64 KiB on `/register`, `/token`, `/revoke`, `/authorize`), on the declared
+  `Content-Length` and on streamed bytes; a malformed or conflicting `Content-Length` is a 400. It
+  sits after `SecurityHeadersMiddleware` and before the rate limiter.
+- **Client-registration caps** — at most 10 `redirect_uris` of at most 2048 characters, a
+  `client_name` of at most 256 characters, and 16 KiB of metadata per client.
+- **IPv6 rate-limit buckets** — an IPv6 client is keyed by its /64 (IPv4-mapped addresses by the
+  embedded IPv4), so rotating source addresses inside one /64 does not dodge the limit.
+- **CRAM reference lookup stays local** — at startup `REF_PATH` / `REF_CACHE` default to a
+  directory under the cache dir, so htslib never fetches a reference by M5 checksum from the
+  network; an operator-set URL value is kept and logged with a warning.
+- **`search_gene` symbol validation** — symbols must be 1–40 letters, digits, `.`, `_` or `-`
+  before they are put into an NCBI Entrez query.
+- **`BAMCP_HOST` defaults to `127.0.0.1`** in code; the Docker image still sets `0.0.0.0`.
+- **Lookup answers no longer echo upstream error text** — an `unavailable` ClinVar/gnomAD answer
+  carries a fixed `reason_code` (`timeout`, `network_error`, `upstream_error`,
+  `unsupported_build`); the upstream detail is logged server-side.
+- CI: `packages: write` is granted only to the image `build` job; CodeQL also scans
+  `javascript-typescript` (the viewer).
 
 ### Fixed
 
@@ -53,8 +82,33 @@ landed after that review.
   CRAM failed to decode after navigation) — the full data-source context is now preserved.
 - Negative ClinVar/gnomAD results (variant-not-found) were re-fetched every lookup — a distinct
   cache-miss sentinel now caches absences.
-- Region cache and the services registry were unbounded — both are bounded now; the registry
-  also guards against `id()` reuse and removes entries on close.
+- Region cache and the services registry were unbounded — both are bounded now; each registry
+  entry holds its own config (so its `id()` cannot be reused while registered) and is removed on
+  close.
+- Per-call resource bounds: at most `VCF_MAX_RECORDS` (5,000) VCF records per call
+  (`vcf_truncated` + `vcf_max_records` in `applied_filters`); records with more than
+  `VCF_MAX_SAMPLES_DETAIL` (16) samples keep the GT of the first 16 (`samples_truncated`,
+  `sample_count`; the viewer shows the full count); at most `READ_MAX_MISMATCHES` (1,000)
+  mismatches per read (`mismatches_truncated`); read extraction stops past an estimated
+  `READ_PAYLOAD_MAX_BYTES` (64 MiB, `reads_truncated`); `get_variants` returns at most
+  `GET_VARIANTS_MAX_RESULTS` (1,000) variants (`truncated`, `total_candidates`, `max_results`),
+  and `get_region_summary` lists at most as many.
+- ClinVar/gnomAD timeouts were reported as network errors on Python 3.11+ (`asyncio.TimeoutError`
+  is an `OSError` there); the timeout branch is now reached, and every lookup outcome carries
+  `genome_build` / `build_source`.
+- Index URLs for signed BAM/CRAM/reference URLs put `.bai`/`.crai`/`.fai`/`.gzi` inside the query
+  string; the suffix now goes on the URL path and the query is kept.
+- `scan_variants` re-raised pysam's `ValueError` text unsanitized; an unknown contig is now a
+  `ToolInputError` naming the file's own spelling, and other errors go through the sanitizer.
+- `get_variant_curation_summary` returned invalid input, timeouts, unknown contigs and unreadable
+  files as ordinary results; invalid input now raises `ToolInputError` (checked before reference
+  resolution, as `classify_variant` now also does) and other failures take the `isError` envelope.
+- 10 of 13 tool descriptions in `tool_specs.py` had drifted from the registered text; the eval
+  router sent placeholder descriptions to the eval model.
+- `cleanup_cache` now also forgets which remote inputs are warm, so the next open of a remote
+  input gets the cold-start budget again.
+- A candidate with an unknown `alt_count` was dropped by the viewer/region-summary floor and the
+  site probe but kept by `get_variants`; all of them now keep it.
 - pysam parses ran on the event loop's default executor, so a hung parse could starve unrelated
   async work — parsing is confined to a dedicated bounded pool.
 
@@ -80,6 +134,8 @@ landed after that review.
 - Evaluation: a real-data GIAB HG002 tier and pre-registered visual-vs-text rounds 3–5
   (#69, #70, #74); results in `docs/eval/visual-results.md`.
 - `make verify` runs every `ci.yml` gate in one command (#63).
+- `compact_threshold_bp` in the viewer's `ui/init` payload (`schema_version` unchanged); the
+  viewer's sequence auto-fetch uses it, with a 500 bp fallback for older servers.
 
 ### Changed
 
@@ -91,6 +147,18 @@ landed after that review.
 - Test suite is hermetic by default (live-network tests behind a `network` marker); CI's
   `lockfile` job checks `uv.lock` is fresh and runs the ship-gate from the frozen lock, while the
   3.10–3.12 `test` matrix installs broad ranges as the compatibility check.
+- `tool_specs.TOOL_SPECS` is the one source of tool descriptions: `server.py` registers from it,
+  the eval router sends its descriptions and schemas, and the parity test checks descriptions as
+  well as parameters.
+- `core/tools.py` split into `core/services.py`, `remote.py`, `lookups.py`, `scan.py` and
+  `filters.py` (one candidate-filter predicate); the region tools share one `RegionRequest`
+  preamble; one genome-build alias table in `constants.py`.
+- Removed dead code: `validate_data_sources`, `get_tool_spec`, telemetry `is_enabled` /
+  `get_session_id`, the test-only `parsers.scan_contig` / `scan_variants_chunked`, and unused
+  visual-eval constants.
+- Docker: the runtime `HEALTHCHECK` GETs `/__version` on HTTP transports; the entrypoint's
+  pre-flight runs the import check (`--preflight`).
+- One Node version for the viewer build, in `src/bamcp/static/.nvmrc`, read by every workflow.
 
 ### Biological correctness (peer-review round)
 

@@ -18,7 +18,6 @@ from bamcp.core.validation import (
     validate_region,
     validate_remote_url,
     validate_variant_file_path,
-    validate_variant_input,
     warn_if_remote_unrestricted,
 )
 
@@ -445,75 +444,13 @@ class TestAllelePattern:
             assert not ALLELE_PATTERN.match(allele), f"{allele} should be invalid"
 
 
-class TestValidateVariantInput:
-    """Tests for validate_variant_input function."""
-
-    @pytest.mark.unit
-    def test_valid_input(self):
-        """Valid chromosome, position, ref, alt should pass validation."""
-        assert validate_variant_input("chr17", 7674220, "G", "A") is None
-
-    @pytest.mark.unit
-    def test_valid_input_without_chr_prefix(self):
-        """Chromosome without chr prefix should be valid."""
-        assert validate_variant_input("17", 7674220, "G", "A") is None
-
-    @pytest.mark.unit
-    def test_invalid_chromosome(self):
-        """Invalid chromosome should return error."""
-        result = validate_variant_input("chrABC", 100, "A", "T")
-        assert result is not None
-        assert "Invalid chromosome" in result
-
-    @pytest.mark.unit
-    def test_negative_position(self):
-        """Negative position should return error."""
-        result = validate_variant_input("chr1", -1, "A", "T")
-        assert result is not None
-        assert "Position must be positive" in result
-
-    @pytest.mark.unit
-    def test_zero_position(self):
-        """Zero position should return error."""
-        result = validate_variant_input("chr1", 0, "A", "T")
-        assert result is not None
-        assert "Position must be positive" in result
-
-    @pytest.mark.unit
-    def test_invalid_ref_allele(self):
-        """Invalid reference allele should return error."""
-        result = validate_variant_input("chr1", 100, "X", "A")
-        assert result is not None
-        assert "Invalid reference allele" in result
-
-    @pytest.mark.unit
-    def test_invalid_alt_allele(self):
-        """Invalid alternate allele should return error."""
-        result = validate_variant_input("chr1", 100, "A", "X")
-        assert result is not None
-        assert "Invalid alternate allele" in result
-
-    @pytest.mark.unit
-    def test_empty_ref_allele(self):
-        """Empty reference allele should return error."""
-        result = validate_variant_input("chr1", 100, "", "A")
-        assert result is not None
-        assert "Invalid reference allele" in result
-
-    @pytest.mark.unit
-    def test_empty_alt_allele(self):
-        """Empty alternate allele should return error."""
-        result = validate_variant_input("chr1", 100, "A", "")
-        assert result is not None
-        assert "Invalid alternate allele" in result
-
-
 class TestCheckVariantInput:
     """The raising form: ValueError (mapped to isError by _run), limit is a named constant."""
 
     @pytest.mark.unit
     def test_valid_input_returns_none(self):
         assert check_variant_input("chr17", 7674220, "G", "A") is None
+        assert check_variant_input("17", 7674220, "G", "A") is None
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -521,7 +458,10 @@ class TestCheckVariantInput:
         [
             ("chrABC", 100, "A", "T", "Invalid chromosome"),
             ("chr1", 0, "A", "T", "Position must be positive"),
+            ("chr1", -1, "A", "T", "Position must be positive"),
             ("chr1", 100, "X", "A", "Invalid reference allele"),
+            ("chr1", 100, "", "A", "Invalid reference allele"),
+            ("chr1", 100, "A", "X", "Invalid alternate allele"),
             ("chr1", 100, "A", "", "Invalid alternate allele"),
         ],
     )
@@ -543,7 +483,8 @@ class TestCheckVariantInput:
         assert check_variant_input("chr1", 100, at_limit, "T") is None
         with pytest.raises(ValueError, match=f"maximum \\({MAX_ALLELE_LENGTH}bp\\)"):
             check_variant_input("chr1", 100, at_limit + "A", "T")
-        assert validate_variant_input("chr1", 100, "T", at_limit + "A") is not None
+        with pytest.raises(ValueError, match="maximum"):
+            check_variant_input("chr1", 100, "T", at_limit + "A")
 
 
 class TestValidateReferencePath:

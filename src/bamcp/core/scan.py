@@ -213,6 +213,7 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
         _FILTER_ABSENCE_NOTE,
         _LLM_COORDINATE_SYSTEM,
         _applied_filters,
+        _check_cram_header_references,
         _first_contig,
         _one_based,
         _resolve_reference_info,
@@ -235,6 +236,7 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
     index_path = await _ensure_cached_index(file_path, config)
     # Cold remote inputs get their one-off open under the cold budget, not the scan deadline.
     await _warm_remote_inputs(file_path, reference, index_path, config)
+    await _check_cram_header_references(file_path, reference, config)
     scan_start, scan_stop = 0, None
     if args.get("region"):
         validate_region(args["region"])

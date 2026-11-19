@@ -3290,6 +3290,28 @@ class TestSearchGeneHonesty:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_unavailable_reason_is_fixed_not_upstream_text(self, monkeypatch):
+        import httpx
+
+        from bamcp.clients.genes import GeneLookupError
+        from bamcp.core.tools import _LOOKUP_REASONS, handle_search_gene
+
+        leaky = "NCBI said: <internal detail 10.0.0.7>"
+        self._client(monkeypatch, exc=GeneLookupError(leaky))
+        r = await handle_search_gene({"symbol": "TP53", "build": "GRCh38"}, BAMCPConfig())
+        p = json.loads(r["content"][0]["text"])
+        assert p["reason_code"] == "upstream_error"
+        assert p["reason"] == f"NCBI Gene: {_LOOKUP_REASONS['upstream_error']}"
+        assert leaky not in r["content"][0]["text"]
+
+        exc = GeneLookupError("Gene esearch: NCBI request failed (ConnectError)")
+        exc.__cause__ = httpx.ConnectError("boom")
+        self._client(monkeypatch, exc=exc)
+        r = await handle_search_gene({"symbol": "TP53", "build": "GRCh38"}, BAMCPConfig())
+        assert json.loads(r["content"][0]["text"])["reason_code"] == "network_error"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_genuine_absence_is_not_found(self, monkeypatch):
         from bamcp.core.tools import handle_search_gene
 

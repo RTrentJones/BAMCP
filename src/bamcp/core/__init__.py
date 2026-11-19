@@ -16,10 +16,10 @@ from .tools import (
     handle_visualize_region,
 )
 from .validation import (
+    check_variant_input,
     validate_path,
     validate_region,
     validate_remote_url,
-    validate_variant_input,
 )
 
 __all__ = [
@@ -27,6 +27,7 @@ __all__ = [
     "BAMIndexCache",
     "RegionData",
     "SoftClip",
+    "check_variant_input",
     "detect_genome_build",
     "fetch_region",
     "get_cache",
@@ -43,5 +44,4 @@ __all__ = [
     "validate_path",
     "validate_region",
     "validate_remote_url",
-    "validate_variant_input",
 ]

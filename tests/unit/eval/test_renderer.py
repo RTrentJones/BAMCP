@@ -141,6 +141,100 @@ class TestExecutablePath:
         assert "executable_path" not in fake_chromium.launch_kwargs
 
 
+def _fake_chrome(root, rev: int, rel: str = "chrome-linux64/chrome"):
+    path = root / f"chromium-{rev}" / rel
+    path.parent.mkdir(parents=True)
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o755)
+    return path
+
+
+class TestFindFallbackChromium:
+    @pytest.mark.unit
+    def test_missing_root_is_none(self, tmp_path):
+        assert renderer_mod.find_fallback_chromium(tmp_path / "nope") is None
+
+    @pytest.mark.unit
+    def test_highest_revision_wins_and_layouts(self, tmp_path):
+        _fake_chrome(tmp_path, 1100, "chrome-linux/chrome")
+        newest = _fake_chrome(tmp_path, 1243)
+        (tmp_path / "chromium_headless_shell-1300" / "chrome-linux64").mkdir(parents=True)
+        assert renderer_mod.find_fallback_chromium(tmp_path) == str(newest)
+
+    @pytest.mark.unit
+    def test_legacy_layout_and_non_executable_skipped(self, tmp_path):
+        legacy = _fake_chrome(tmp_path, 900, "chrome-linux/chrome")
+        _fake_chrome(tmp_path, 1000).chmod(0o644)
+        assert renderer_mod.find_fallback_chromium(tmp_path) == str(legacy)
+
+    @pytest.mark.unit
+    def test_env_browsers_path(self, tmp_path, monkeypatch):
+        chrome = _fake_chrome(tmp_path, 1243)
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+        assert renderer_mod.find_fallback_chromium() == str(chrome)
+
+
+class _MissingDefaultChromium(_FakeChromium):
+    """Fails like Playwright does when its pinned headless shell is not installed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[dict[str, Any]] = []
+
+    async def launch(self, **kw: Any) -> _FakeBrowser:
+        self.calls.append(dict(kw))
+        if "executable_path" not in kw:
+            raise RuntimeError("BrowserType.launch: Executable doesn't exist at /x/headless_shell")
+        return await super().launch(**kw)
+
+
+class TestLaunchFallback:
+    @pytest.mark.unit
+    async def test_retries_with_discovered_chromium(self, fake_chromium, monkeypatch, tmp_path):
+        chrome = _fake_chrome(tmp_path, 1243)
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+        missing = _MissingDefaultChromium()
+        api = sys.modules["playwright.async_api"]
+        monkeypatch.setattr(api, "async_playwright", lambda: _FakePlaywrightCM(missing))
+        async with ViewerRenderer():
+            pass
+        assert len(missing.calls) == 2
+        assert missing.calls[1]["executable_path"] == str(chrome)
+
+    @pytest.mark.unit
+    async def test_explicit_executable_is_not_overridden(
+        self, fake_chromium, monkeypatch, tmp_path
+    ):
+        _fake_chrome(tmp_path, 1243)
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+        monkeypatch.setenv("BAMCP_CHROMIUM_EXECUTABLE", "/explicit/chrome")
+
+        class _Broken(_FakeChromium):
+            async def launch(self, **kw: Any) -> _FakeBrowser:
+                raise RuntimeError("Executable doesn't exist at /explicit/chrome")
+
+        api = sys.modules["playwright.async_api"]
+        monkeypatch.setattr(api, "async_playwright", lambda: _FakePlaywrightCM(_Broken()))
+        with pytest.raises(RuntimeError, match="/explicit/chrome"):
+            async with ViewerRenderer():
+                pass
+
+    @pytest.mark.unit
+    async def test_other_launch_errors_propagate(self, fake_chromium, monkeypatch, tmp_path):
+        _fake_chrome(tmp_path, 1243)
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+
+        class _Crash(_FakeChromium):
+            async def launch(self, **kw: Any) -> _FakeBrowser:
+                raise RuntimeError("Target page, context or browser has been closed")
+
+        api = sys.modules["playwright.async_api"]
+        monkeypatch.setattr(api, "async_playwright", lambda: _FakePlaywrightCM(_Crash()))
+        with pytest.raises(RuntimeError, match="has been closed"):
+            async with ViewerRenderer():
+                pass
+
+
 def _payload() -> dict:
     return {
         "schema_version": 2,

@@ -2,6 +2,7 @@
 
 import pytest
 
+from bamcp.constants import normalize_genome_build
 from bamcp.core.reference import (
     CONTIG_STYLE_CHR,
     CONTIG_STYLE_NOCHR,
@@ -9,64 +10,62 @@ from bamcp.core.reference import (
     contig_style,
     detect_genome_build,
     get_public_reference_url,
-    normalize_build_name,
 )
 
 
 class TestNormalizeBuildName:
-    """Tests for normalize_build_name function."""
+    """Tests for constants.normalize_genome_build (the one build normalizer)."""
 
     @pytest.mark.unit
     def test_canonical_grch38(self):
         """GRCh38 should normalize to itself."""
-        assert normalize_build_name("GRCh38") == "GRCh38"
+        assert normalize_genome_build("GRCh38") == "GRCh38"
 
     @pytest.mark.unit
     def test_canonical_grch37(self):
         """GRCh37 should normalize to itself."""
-        assert normalize_build_name("GRCh37") == "GRCh37"
+        assert normalize_genome_build("GRCh37") == "GRCh37"
 
     @pytest.mark.unit
     def test_hg38_alias(self):
         """hg38 should normalize to GRCh38."""
-        assert normalize_build_name("hg38") == "GRCh38"
+        assert normalize_genome_build("hg38") == "GRCh38"
 
     @pytest.mark.unit
     def test_hg19_alias(self):
         """hg19 should normalize to GRCh37."""
-        assert normalize_build_name("hg19") == "GRCh37"
+        assert normalize_genome_build("hg19") == "GRCh37"
 
     @pytest.mark.unit
     def test_b37_alias(self):
         """b37 should normalize to GRCh37."""
-        assert normalize_build_name("b37") == "GRCh37"
+        assert normalize_genome_build("b37") == "GRCh37"
 
     @pytest.mark.unit
     def test_case_insensitive(self):
         """Normalization should be case insensitive."""
-        assert normalize_build_name("GRCH38") == "GRCh38"
-        assert normalize_build_name("HG38") == "GRCh38"
-        assert normalize_build_name("grch37") == "GRCh37"
+        assert normalize_genome_build("GRCH38") == "GRCh38"
+        assert normalize_genome_build("HG38") == "GRCh38"
+        assert normalize_genome_build("grch37") == "GRCh37"
 
     @pytest.mark.unit
     def test_unknown_build(self):
         """Unknown builds should return None."""
-        assert normalize_build_name("unknown") is None
-        assert normalize_build_name("mm10") is None
-        assert normalize_build_name("") is None
+        assert normalize_genome_build("unknown") is None
+        assert normalize_genome_build("mm10") is None
+        assert normalize_genome_build("") is None
 
     @pytest.mark.unit
     def test_whitespace_is_ignored(self):
         """Surrounding whitespace normalizes the same as for lookups (one normalizer)."""
-        assert normalize_build_name(" hg38") == "GRCh38"
-        assert normalize_build_name("GRCh37 \n") == "GRCh37"
+        assert normalize_genome_build(" hg38") == "GRCh38"
+        assert normalize_genome_build("GRCh37 \n") == "GRCh37"
 
     @pytest.mark.unit
     def test_single_alias_table(self):
-        """reference and constants share one normalizer and one alias table."""
-        from bamcp.constants import GENOME_BUILD_ALIASES, normalize_genome_build
+        """The GENOME_BUILDS aliases and constants.GENOME_BUILD_ALIASES agree."""
+        from bamcp.constants import GENOME_BUILD_ALIASES
 
-        assert normalize_build_name is normalize_genome_build
         for canonical, info in GENOME_BUILDS.items():
             assert set(info["aliases"]) == {
                 a for a, c in GENOME_BUILD_ALIASES.items() if c == canonical

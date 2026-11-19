@@ -64,7 +64,7 @@ _MIN_ALT_COUNT = {
     "description": "Minimum alt-supporting reads for a BAMCP candidate "
     f"(default {DEFAULT_MIN_ALT_COUNT})",
 }
-# The answer vocabulary shared by the external-database lookups (core/tools._LOOKUP_*).
+# The answer vocabulary shared by the external-database lookups (core/lookups._LOOKUP_*).
 _LOOKUP_STATUS_NOTE = (
     "The response's status is found, not_found, unavailable (the lookup failed — absence is "
     "NOT established) or disabled."

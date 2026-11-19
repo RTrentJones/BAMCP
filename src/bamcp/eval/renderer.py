@@ -28,8 +28,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import logging
 import os
+import re
 from contextlib import AsyncExitStack
+from pathlib import Path
 from typing import Any
 
 from ..resources import get_viewer_html
@@ -138,6 +141,45 @@ _OVERFLOW_JS = """
 _RESIZE_JS = "(() => { viewer.renderer.resize(); })"
 
 
+logger = logging.getLogger(__name__)
+
+# Where sandbox images pre-install Playwright browsers when PLAYWRIGHT_BROWSERS_PATH is unset.
+DEFAULT_BROWSERS_PATH = "/opt/pw-browsers"
+_CHROMIUM_BINARIES = ("chrome-linux64/chrome", "chrome-linux/chrome")
+_CHROMIUM_DIR_RE = re.compile(r"^chromium-(\d+)$")
+
+
+def find_fallback_chromium(browsers_path: str | os.PathLike[str] | None = None) -> str | None:
+    """Return a pre-installed full Chromium under the Playwright browsers directory, or None.
+
+    Used when the installed Playwright's default (a headless-shell build of a newer revision)
+    is missing: any ``chromium-<rev>/chrome-linux64/chrome`` (or ``chrome-linux/chrome``) under
+    ``browsers_path`` (default ``$PLAYWRIGHT_BROWSERS_PATH``, then ``/opt/pw-browsers``) can
+    drive the renderer. The highest revision wins.
+    """
+    root = Path(
+        browsers_path or os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or DEFAULT_BROWSERS_PATH
+    )
+    if not root.is_dir():
+        return None
+    revisions: list[tuple[int, Path]] = []
+    for child in root.iterdir():
+        match = _CHROMIUM_DIR_RE.match(child.name)
+        if match and child.is_dir():
+            revisions.append((int(match.group(1)), child))
+    for _, directory in sorted(revisions, reverse=True):
+        for rel in _CHROMIUM_BINARIES:
+            candidate = directory / rel
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return None
+
+
+def _is_missing_executable(exc: Exception) -> bool:
+    """True for Playwright's launch error when its expected browser binary is not installed."""
+    return "Executable doesn't exist" in str(exc)
+
+
 class ViewerRenderer:
     """Async context manager that captures viewer screenshots via Playwright.
 
@@ -176,14 +218,27 @@ class ViewerRenderer:
         self._stack = AsyncExitStack()
         playwright = await self._stack.enter_async_context(async_playwright())
         # A sandbox may ship a Chromium whose revision differs from the pinned playwright's;
-        # point at it explicitly instead of requiring `playwright install` (unset: no-op).
+        # BAMCP_CHROMIUM_EXECUTABLE points at it explicitly. Unset, launch the default and, if
+        # its binary is missing, retry once with a Chromium found under the browsers path.
         executable = os.environ.get("BAMCP_CHROMIUM_EXECUTABLE") or os.environ.get(
             "PLAYWRIGHT_CHROMIUM_EXECUTABLE"
         )
         launch_kwargs: dict[str, Any] = {"headless": self.headless, "args": ["--no-sandbox"]}
         if executable:
             launch_kwargs["executable_path"] = executable
-        self._browser = await playwright.chromium.launch(**launch_kwargs)
+        try:
+            self._browser = await playwright.chromium.launch(**launch_kwargs)
+        except Exception as e:
+            fallback = None if executable else find_fallback_chromium()
+            if fallback is None or not _is_missing_executable(e):
+                raise
+            logger.warning(
+                "Playwright's default Chromium is not installed; falling back to %s "
+                "(set BAMCP_CHROMIUM_EXECUTABLE to choose explicitly)",
+                fallback,
+            )
+            launch_kwargs["executable_path"] = fallback
+            self._browser = await playwright.chromium.launch(**launch_kwargs)
         self._html = get_viewer_html()
         return self
 

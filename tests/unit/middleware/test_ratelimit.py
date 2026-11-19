@@ -194,3 +194,39 @@ class TestAmortizedSweep:
         mw = _mw()
         mw._sweep_expired(0.0)
         assert len(mw._requests) == 0
+
+
+class TestIPv6Bucketing:
+    @pytest.mark.unit
+    def test_ipv4_unchanged(self):
+        assert RateLimitMiddleware._bucket_key("203.0.113.7") == "203.0.113.7"
+
+    @pytest.mark.unit
+    def test_ipv6_keyed_by_slash_64(self):
+        a = RateLimitMiddleware._bucket_key("2001:db8:1:2:aaaa::1")
+        b = RateLimitMiddleware._bucket_key("2001:db8:1:2:ffff:ffff:ffff:ffff")
+        c = RateLimitMiddleware._bucket_key("2001:db8:1:3::1")
+        assert a == b == "2001:db8:1:2::/64"
+        assert c != a
+
+    @pytest.mark.unit
+    def test_ipv4_mapped_ipv6_is_the_ipv4(self):
+        assert RateLimitMiddleware._bucket_key("::ffff:203.0.113.7") == "203.0.113.7"
+
+    @pytest.mark.unit
+    def test_non_ip_passthrough(self):
+        assert RateLimitMiddleware._bucket_key("unknown") == "unknown"
+
+    @pytest.mark.unit
+    def test_rotating_ipv6_addresses_share_a_limit(self):
+        app = Starlette(routes=[Route("/", lambda r: PlainTextResponse("ok"))])
+        app.add_middleware(RateLimitMiddleware, requests_per_minute=2)
+        # Behind the (loopback) tunnel sidecar, so CF-Connecting-IP is honored.
+        client = TestClient(app, client=("127.0.0.1", 50000))
+        codes = [
+            client.get("/", headers={"cf-connecting-ip": f"2001:db8:0:1::{i:x}"}).status_code
+            for i in range(1, 5)
+        ]
+        assert codes == [200, 200, 429, 429]
+        other = client.get("/", headers={"cf-connecting-ip": "2001:db8:0:2::1"})
+        assert other.status_code == 200

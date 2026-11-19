@@ -25,6 +25,7 @@ class TestMiddlewareOrder:
     def test_trusted_host_is_outermost_ratelimit_innermost(self):
         from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+        from bamcp.middleware.bodylimit import BodySizeLimitMiddleware
         from bamcp.middleware.ratelimit import RateLimitMiddleware
         from bamcp.middleware.security import SecurityHeadersMiddleware
 
@@ -34,6 +35,7 @@ class TestMiddlewareOrder:
         assert [m.cls for m in app.user_middleware] == [
             TrustedHostMiddleware,
             SecurityHeadersMiddleware,
+            BodySizeLimitMiddleware,
             RateLimitMiddleware,
         ]
 
@@ -75,3 +77,51 @@ class TestMainConfigErrors:
         err = capsys.readouterr().err
         assert err.startswith("Invalid BAMCP configuration:")
         assert value in err
+
+
+class TestHtslibReferenceLookup:
+    @pytest.mark.unit
+    def test_sets_local_only_paths_when_unset(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("REF_PATH", raising=False)
+        monkeypatch.delenv("REF_CACHE", raising=False)
+        applied = entry._configure_htslib_reference_lookup(BAMCPConfig(cache_dir=str(tmp_path)))
+        expected = str(tmp_path / "hts-ref" / "%2s" / "%2s" / "%s")
+        assert os.environ["REF_PATH"] == expected
+        assert os.environ["REF_CACHE"] == expected
+        assert applied == {"REF_PATH": expected, "REF_CACHE": expected}
+        # No network entry: htslib only fetches http(s)/URL= components of REF_PATH.
+        assert "://" not in os.environ["REF_PATH"] and "URL=" not in os.environ["REF_PATH"]
+
+    @pytest.mark.unit
+    def test_operator_values_are_kept(self, monkeypatch, tmp_path, caplog):
+        monkeypatch.setenv("REF_PATH", "https://www.ebi.ac.uk/ena/cram/md5/%s")
+        monkeypatch.setenv("REF_CACHE", "/srv/ref-cache/%s")
+        with caplog.at_level("WARNING"):
+            entry._configure_htslib_reference_lookup(BAMCPConfig(cache_dir=str(tmp_path)))
+        assert os.environ["REF_PATH"] == "https://www.ebi.ac.uk/ena/cram/md5/%s"
+        assert os.environ["REF_CACHE"] == "/srv/ref-cache/%s"
+        assert "REF_PATH" in caplog.text
+
+    @pytest.mark.unit
+    def test_main_calls_it_before_serving(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("REF_PATH", raising=False)
+        monkeypatch.delenv("REF_CACHE", raising=False)
+        monkeypatch.setenv("BAMCP_CACHE_DIR", str(tmp_path))
+        monkeypatch.setenv("BAMCP_TRANSPORT", "stdio")
+        seen = {}
+
+        class _Server:
+            def run(self, transport):
+                seen["ref_path"] = os.environ.get("REF_PATH")
+
+        monkeypatch.setattr(entry, "create_server", lambda config: _Server())
+        monkeypatch.setattr(entry.atexit, "register", lambda fn: None)
+        entry.main()
+        assert seen["ref_path"] == str(tmp_path / "hts-ref" / "%2s" / "%2s" / "%s")
+
+
+@pytest.mark.unit
+def test_default_host_is_loopback():
+    from bamcp.constants import DEFAULT_HOST
+
+    assert DEFAULT_HOST == "127.0.0.1"

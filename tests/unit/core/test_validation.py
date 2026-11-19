@@ -13,7 +13,6 @@ from bamcp.core.validation import (
     _is_private_ip,
     check_variant_input,
     is_cram,
-    validate_data_sources,
     validate_path,
     validate_reference_path,
     validate_region,
@@ -622,31 +621,6 @@ class TestValidateReferencePath:
         config = BAMCPConfig(allowed_directories=["/some/other/dir"])
         with pytest.raises(ValueError, match="not in allowed directories"):
             validate_reference_path(str(f), config)
-
-
-class TestValidateDataSources:
-    """The one-call aggregator validates every source a tool hands to pysam."""
-
-    @pytest.mark.unit
-    def test_reference_is_validated_via_aggregator(self, tmp_path):
-        bam = tmp_path / "sample.bam"
-        bam.write_bytes(b"BAM\x01")
-        config = BAMCPConfig(allow_remote_files=True, allowed_directories=None)
-        # A poisoned remote reference must be rejected even when the BAM is fine.
-        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
-            m.return_value = _PRIVATE_IP_ADDRINFO
-            with pytest.raises(ValueError, match="private/internal address"):
-                validate_data_sources(
-                    str(bam), config, reference="https://internal.example.com/hg38.fa"
-                )
-
-    @pytest.mark.unit
-    def test_none_sources_skipped(self, tmp_path):
-        bam = tmp_path / "sample.bam"
-        bam.write_bytes(b"BAM\x01")
-        config = BAMCPConfig(allowed_directories=None)
-        # reference/vcf None → only the BAM is validated, no error.
-        validate_data_sources(str(bam), config)
 
 
 class TestRemoteUrlHardening:

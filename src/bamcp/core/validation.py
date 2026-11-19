@@ -384,26 +384,6 @@ def validate_reference_path(reference_path: str, config: BAMCPConfig) -> None:
         raise FileNotFoundError(f"Reference file not found: {reference_path}")
 
 
-def validate_data_sources(
-    file_path: str,
-    config: BAMCPConfig,
-    *,
-    reference: str | None = None,
-    vcf_path: str | None = None,
-) -> None:
-    """Validate every data source a tool call will hand to pysam, in one place.
-
-    The single choke point for the remote-resource policy: alignment file, optional
-    reference FASTA, and optional variant (VCF/BCF) overlay all pass through the same
-    SSRF-aware validators so no input reaches htslib unchecked.
-    """
-    validate_path(file_path, config)
-    if reference:
-        validate_reference_path(reference, config)
-    if vcf_path:
-        validate_variant_file_path(vcf_path, config)
-
-
 # Gene symbols are interpolated into an NCBI Entrez ``term`` query; restrict them to the
 # HGNC-style alphabet so a caller cannot inject Entrez query syntax ([field], AND/OR, quotes).
 GENE_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}\Z")

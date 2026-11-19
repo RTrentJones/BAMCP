@@ -155,9 +155,12 @@ Cheapest wins: align words with reality, de-flake CI. Do first — changes how e
   (not applied — needs sign-off on user cloud-bucket hosts).**
 - [x] **(M) [sub]** **Reference-URL validation** — `validate_reference_path()` closes the one open
   SSRF path (allowlist-aware, shares the `validate_remote_url` core). Wired into all 7 handlers.
-- [x] **(M–L) [sub]** **Unified data-source validation** — `validate_data_sources()` is the one
-  choke point over BAM/CRAM/VCF/reference/index. Index + BAM/VCF were already validated; reference
-  folded in. Option A (allowlist-first) chosen and documented; Option B (BAMCP-proxied fetch) deferred.
+- [x] **(M–L) [sub]** **Unified data-source validation** — every source is checked by its own
+  validator (`validate_path` for BAM/CRAM, `validate_variant_file_path` for VCF/BCF,
+  `validate_reference_path` for the reference — explicit or auto-selected, in
+  `_resolve_reference_info`), and all of them share the one remote choke point,
+  `validate_remote_url()`; index downloads re-validate each redirect hop. Index + BAM/VCF were
+  already validated; reference folded in. Option A (allowlist-first) chosen and documented; Option B (BAMCP-proxied fetch) deferred.
   Adversarial tests: rebinding, metadata endpoint, CRAM-reference, allowlist. *(Temp-index atomic
   write/sweep — small follow-up; see Deferred.)*
 - [x] **(M) [sub] + [wrap]** **Auth: deleted the theater** — dynamic registration is a config flag

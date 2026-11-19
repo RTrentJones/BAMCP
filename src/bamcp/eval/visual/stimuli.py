@@ -50,7 +50,6 @@ CONDITIONS_R4 = (
     "Tmp+Tcur",
     "V+Tmp",
 )
-ALL_CONDITIONS = CONDITIONS + CONDITIONS_R4
 VISUAL_CONDITIONS = frozenset({"V", "V+Traw", "Tfull+V", "V+Traw-r4", "V+Tmp"})
 
 WIDE_BP = 200

@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from ..config import BAMCPConfig
 from ..constants import REMOTE_FILE_SCHEMES
+from .errors import InvalidVariantInputError
 
 logger = logging.getLogger(__name__)
 
@@ -384,26 +385,6 @@ def validate_reference_path(reference_path: str, config: BAMCPConfig) -> None:
         raise FileNotFoundError(f"Reference file not found: {reference_path}")
 
 
-def validate_data_sources(
-    file_path: str,
-    config: BAMCPConfig,
-    *,
-    reference: str | None = None,
-    vcf_path: str | None = None,
-) -> None:
-    """Validate every data source a tool call will hand to pysam, in one place.
-
-    The single choke point for the remote-resource policy: alignment file, optional
-    reference FASTA, and optional variant (VCF/BCF) overlay all pass through the same
-    SSRF-aware validators so no input reaches htslib unchecked.
-    """
-    validate_path(file_path, config)
-    if reference:
-        validate_reference_path(reference, config)
-    if vcf_path:
-        validate_variant_file_path(vcf_path, config)
-
-
 # Gene symbols are interpolated into an NCBI Entrez ``term`` query; restrict them to the
 # HGNC-style alphabet so a caller cannot inject Entrez query syntax ([field], AND/OR, quotes).
 GENE_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}\Z")
@@ -418,20 +399,38 @@ def validate_gene_symbol(symbol: str) -> None:
         )
 
 
-def validate_variant_input(chrom: str, pos: int, ref: str, alt: str) -> str | None:
-    """Validate variant lookup input parameters.
+# Longest REF/ALT allele accepted by a variant lookup or classification.
+MAX_ALLELE_LENGTH = 1000
 
-    Returns:
-        Error message if validation fails, None if valid.
+
+def check_variant_input(chrom: str, pos: int, ref: str, alt: str) -> None:
+    """Validate a variant's chrom/pos/ref/alt (``pos`` 1-based).
+
+    Raises:
+        InvalidVariantInputError: (a ``ToolInputError`` and a ``ValueError``) with a
+            caller-safe message built only from the given values; ``_run`` maps it to an
+            ``isError`` result.
     """
     if not CHROM_PATTERN.match(chrom):
-        return f"Invalid chromosome: {chrom}"
+        raise InvalidVariantInputError(f"Invalid chromosome: {chrom}")
     if pos < 1:
-        return f"Position must be positive, got {pos}"
+        raise InvalidVariantInputError(f"Position must be positive, got {pos}")
     if not ALLELE_PATTERN.match(ref):
-        return f"Invalid reference allele: {ref}"
+        raise InvalidVariantInputError(f"Invalid reference allele: {ref}")
     if not ALLELE_PATTERN.match(alt):
-        return f"Invalid alternate allele: {alt}"
-    if len(ref) > 1000 or len(alt) > 1000:
-        return "Allele length exceeds maximum (1000bp)"
+        raise InvalidVariantInputError(f"Invalid alternate allele: {alt}")
+    if len(ref) > MAX_ALLELE_LENGTH or len(alt) > MAX_ALLELE_LENGTH:
+        raise InvalidVariantInputError(f"Allele length exceeds maximum ({MAX_ALLELE_LENGTH}bp)")
+
+
+def validate_variant_input(chrom: str, pos: int, ref: str, alt: str) -> str | None:
+    """Non-raising form of :func:`check_variant_input`.
+
+    Returns:
+        The error message if validation fails, None if valid.
+    """
+    try:
+        check_variant_input(chrom, pos, ref, alt)
+    except InvalidVariantInputError as exc:
+        return str(exc)
     return None

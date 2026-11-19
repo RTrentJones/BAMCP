@@ -14,6 +14,7 @@
 import { BAMCPClient, DebugInfo, FetchResult } from "./client";
 import {
     baseColor,
+    compactThresholdBp,
     displayPos,
     escapeHtml,
     formatNearEndSummary,
@@ -93,7 +94,6 @@ class BAMCPViewer {
     private pendingSequenceRequest = false;
     private sequenceFallbackTimer: ReturnType<typeof setTimeout> | null = null;
     private static readonly BASE_RENDER_SCALE = 10;
-    private static readonly SEQUENCE_REGION_THRESHOLD = 500;
     private static readonly SEQUENCE_FETCH_TIMEOUT_MS = 3000;
 
     // Viewport refetch state — auto-load data when panning/zooming beyond loaded range
@@ -611,7 +611,7 @@ class BAMCPViewer {
         }
 
         // Check if region is small enough for sequences
-        if (viewportSpan > BAMCPViewer.SEQUENCE_REGION_THRESHOLD) {
+        if (viewportSpan > compactThresholdBp(this.state.data)) {
             this.sequenceNotice.classList.add('hidden');
             return;
         }

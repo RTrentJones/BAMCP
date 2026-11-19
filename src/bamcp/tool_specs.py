@@ -291,8 +291,3 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         ),
     },
 }
-
-
-def get_tool_spec(name: str) -> dict[str, Any] | None:
-    """Return the ``{description, input_schema}`` spec for a tool, or None."""
-    return TOOL_SPECS.get(name)

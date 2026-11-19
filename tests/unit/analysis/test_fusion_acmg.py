@@ -119,6 +119,31 @@ async def test_handle_classify_variant_rejects_bad_input(offline_cfg, comprehens
 
 
 @pytest.mark.unit
+async def test_classify_validates_before_reference_resolution(
+    offline_cfg, comprehensive_bam_path, monkeypatch
+):
+    """Bad input fails fast — before reference resolution can read a remote header."""
+
+    async def must_not_run(*_a, **_kw):
+        raise AssertionError("reference resolved before input validation")
+
+    monkeypatch.setattr("bamcp.core.tools._resolve_reference", must_not_run)
+    from bamcp.core.errors import ToolInputError
+
+    with pytest.raises(ToolInputError, match="Invalid alternate allele"):
+        await handle_classify_variant(
+            {
+                "file_path": comprehensive_bam_path,
+                "chrom": "chr1",
+                "pos": 1,
+                "ref": "A",
+                "alt": "Z",
+            },
+            offline_cfg,
+        )
+
+
+@pytest.mark.unit
 async def test_clinical_context_disabled_returns_disabled_blocks(offline_cfg):
     ctx = await clinical_context(offline_cfg, "chr1", 100, "A", "T")
     assert ctx == {

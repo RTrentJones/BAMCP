@@ -55,6 +55,23 @@ class TestNormalizeBuildName:
         assert normalize_build_name("mm10") is None
         assert normalize_build_name("") is None
 
+    @pytest.mark.unit
+    def test_whitespace_is_ignored(self):
+        """Surrounding whitespace normalizes the same as for lookups (one normalizer)."""
+        assert normalize_build_name(" hg38") == "GRCh38"
+        assert normalize_build_name("GRCh37 \n") == "GRCh37"
+
+    @pytest.mark.unit
+    def test_single_alias_table(self):
+        """reference and constants share one normalizer and one alias table."""
+        from bamcp.constants import GENOME_BUILD_ALIASES, normalize_genome_build
+
+        assert normalize_build_name is normalize_genome_build
+        for canonical, info in GENOME_BUILDS.items():
+            assert set(info["aliases"]) == {
+                a for a, c in GENOME_BUILD_ALIASES.items() if c == canonical
+            }
+
 
 class TestGetPublicReferenceUrl:
     """Tests for get_public_reference_url function."""

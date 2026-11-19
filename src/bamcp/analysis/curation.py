@@ -19,8 +19,7 @@ from ..constants import (
     LOW_CONFIDENCE_MAX_STRAND_BIAS,
     REPEAT_SPAN_MIN_READS,
 )
-from ..core.errors import ToolInputError
-from ..core.validation import validate_path, validate_variant_input
+from ..core.validation import check_variant_input, validate_path
 from ..middleware.telemetry import telemetry_wrapper
 from .evidence import (
     build_indel_index,
@@ -431,9 +430,7 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     window = args.get("window", 50)
     # Invalid input is a tool error (isError via the server envelope), not an answer — and is
     # checked before reference resolution, which can read a remote BAM header.
-    validation_error = validate_variant_input(chrom, pos, ref, alt)
-    if validation_error:
-        raise ToolInputError(validation_error)
+    check_variant_input(chrom, pos, ref, alt)
     # Same resolution as every other tool: a caller-supplied reference is validated (the
     # untrusted SSRF vector), then the operator default, then the public FASTA matching the
     # BAM's build and contig style — so a bare demo/remote BAM still gets SNV evidence.

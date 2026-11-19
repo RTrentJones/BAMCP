@@ -115,24 +115,25 @@ class InProcessRouter:
 
 
 def tool_descriptors(router: ToolRouter) -> list:
-    """Build provider-agnostic tool descriptors from the router's tool list.
+    """Provider-agnostic tool descriptors for the router's tools, from ``TOOL_SPECS``.
 
-    Each tool exposes a permissive JSON schema (object with arbitrary string
-    properties) since the eval harness doesn't have access to FastMCP's
-    inferred schemas. Real providers handle this gracefully.
+    The registry is the same description + JSON schema the MCP server registers, so the
+    eval model sees exactly what a real MCP client would. A routed tool without a spec is
+    a fidelity bug (``tests/unit/test_tool_specs.py``), so it raises rather than falling
+    back to a placeholder.
     """
+    from ..tool_specs import TOOL_SPECS
     from .providers import ToolDescriptor
 
-    out: list[ToolDescriptor] = []
-    for name in router.list_tools():
-        out.append(
-            ToolDescriptor(
-                name=name,
-                description=f"BAMCP tool: {name}",
-                input_schema={
-                    "type": "object",
-                    "additionalProperties": True,
-                },
-            )
+    names = router.list_tools()
+    missing = [n for n in names if n not in TOOL_SPECS]
+    if missing:
+        raise ValueError(f"No tool spec for routed tool(s): {', '.join(missing)}")
+    return [
+        ToolDescriptor(
+            name=name,
+            description=TOOL_SPECS[name]["description"],
+            input_schema=TOOL_SPECS[name]["input_schema"],
         )
-    return out
+        for name in names
+    ]

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import DEFAULT_SUBJECT_MODEL
+from .yaml_io import load_yaml_file
 
 
 @dataclass
@@ -124,14 +125,7 @@ def load_cases(path: str | Path) -> list[EvalCase]:
     Accepts both flat list (``- name: ...``) and MARRVEL-style nested
     (``- case: { name: ... }``) layouts.
     """
-    try:
-        import yaml  # type: ignore[import-untyped]
-    except ImportError as e:  # pragma: no cover — install hint
-        raise RuntimeError(
-            "pyyaml is required for the eval harness. Install with 'pip install \".[eval]\"'."
-        ) from e
-    text = Path(path).read_text(encoding="utf-8")
-    parsed = yaml.safe_load(text) or []
+    parsed = load_yaml_file(path) or []
     if not isinstance(parsed, list):
         raise ValueError(f"Top-level YAML must be a list of cases; got {type(parsed).__name__}")
     return [EvalCase.from_dict(item) for item in parsed]

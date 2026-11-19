@@ -46,6 +46,12 @@ REGION_TILE_SIZE = 4_096
 # of silently mis-decoding. A first step toward a generated, typed server<->viewer contract.
 PAYLOAD_SCHEMA_VERSION = 1
 
+# Regions wider than this (bp) are serialized in compact mode: read sequences omitted to
+# shrink the payload. Base-level rendering needs scale >= 10 px/bp (~80 bp at 800 px), so
+# 500 leaves a safety margin. Sent to the viewer as ``compact_threshold_bp`` so its
+# sequence auto-fetch uses the same cut-off.
+COMPACT_REGION_THRESHOLD_BP = 500
+
 # Cap on distinct regions held in a server's in-memory region cache (LRU-evicted).
 # Bounds memory: each entry can hold a full RegionData payload.
 REGION_CACHE_MAX_ENTRIES = 128
@@ -87,7 +93,9 @@ DEFAULT_GNOMAD_DATASET = "auto"
 GNOMAD_DATASET_BY_BUILD = {"GRCh37": "gnomad_r2_1", "GRCh38": "gnomad_r4"}
 GNOMAD_DATASET_BUILD = {"gnomad_r2_1": "GRCh37", "gnomad_r3": "GRCh38", "gnomad_r4": "GRCh38"}
 DEFAULT_GENOME_BUILD = "GRCh38"
-# Accepted spellings of the two supported human builds (case-insensitive).
+# The one table of accepted spellings of the two supported human builds
+# (case-insensitive, surrounding whitespace ignored). core.reference.GENOME_BUILDS
+# derives its "aliases" from it.
 GENOME_BUILD_ALIASES = {
     "grch37": "GRCh37",
     "hg19": "GRCh37",

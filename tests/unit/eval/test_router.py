@@ -8,6 +8,7 @@ import pytest
 
 from bamcp.config import BAMCPConfig
 from bamcp.eval.router import InProcessRouter, tool_descriptors
+from bamcp.tool_specs import TOOL_SPECS
 
 
 @pytest.fixture
@@ -60,11 +61,24 @@ def test_tool_descriptors_built_from_router_list():
     router = InProcessRouter()
     descs = tool_descriptors(router)
     names = [d.name for d in descs]
-    assert "get_variants" in names
-    # Every descriptor exposes a schema dict.
+    assert names == router.list_tools()
+    # Every descriptor carries the registry's real description + schema, not a placeholder.
     for d in descs:
-        assert isinstance(d.input_schema, dict)
+        assert d.description == TOOL_SPECS[d.name]["description"]
+        assert d.input_schema == TOOL_SPECS[d.name]["input_schema"]
         assert d.input_schema["type"] == "object"
+    gv = next(d for d in descs if d.name == "get_variants")
+    assert "file_path" in gv.input_schema["properties"]
+
+
+@pytest.mark.unit
+def test_tool_descriptors_reject_unspecified_tool():
+    class _Router:
+        def list_tools(self):
+            return ["get_variants", "not_a_tool"]
+
+    with pytest.raises(ValueError, match="not_a_tool"):
+        tool_descriptors(_Router())
 
 
 @pytest.mark.unit

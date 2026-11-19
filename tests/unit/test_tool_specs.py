@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from bamcp.eval.router import InProcessRouter
-from bamcp.tool_specs import TOOL_SPECS, get_tool_spec
+from bamcp.tool_specs import TOOL_SPECS
 
 
 @pytest.mark.unit
@@ -31,12 +31,6 @@ def test_specs_are_wellformed_json_schema():
         props = set(schema["properties"])
         for req in schema.get("required", []):
             assert req in props, f"{name}: required field {req!r} not in properties"
-
-
-@pytest.mark.unit
-def test_get_tool_spec_returns_none_for_unknown():
-    assert get_tool_spec("does_not_exist") is None
-    assert get_tool_spec("get_variants") is not None
 
 
 def _server_schemas() -> dict[str, dict]:

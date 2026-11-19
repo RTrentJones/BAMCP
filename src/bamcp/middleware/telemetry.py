@@ -127,16 +127,6 @@ def _init_otel_tracer() -> Any:
     return trace.get_tracer("bamcp")
 
 
-def is_enabled() -> bool:
-    """Whether telemetry capture is currently enabled."""
-    return _enabled
-
-
-def get_session_id() -> str:
-    """Return the session ID for this server process."""
-    return _session_id
-
-
 def sanitize_args(args: dict[str, Any]) -> dict[str, Any]:
     """Sanitize tool arguments for telemetry capture.
 

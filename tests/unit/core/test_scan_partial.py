@@ -8,7 +8,7 @@ import pytest
 
 from bamcp.config import BAMCPConfig
 from bamcp.core import tools
-from bamcp.core.errors import ToolInputError
+from bamcp.core.errors import ToolInputError, sanitize_tool_exception
 from bamcp.core.parsers import scan_contig
 
 pytestmark = pytest.mark.unit
@@ -187,10 +187,44 @@ async def test_region_start_beyond_contig_is_an_error(small_bam_path, ref_config
         )
     )
     past = full["applied_filters"]["contig_length"] + 100
-    with pytest.raises(ToolInputError, match="beyond the end of chr1"):
+    with pytest.raises(ValueError, match="beyond the end of chr1") as exc:
         await tools.handle_scan_variants(
             {"file_path": small_bam_path, "region": f"chr1:{past}-{past + 50}"}, ref_config
         )
+    # The server's _run maps it to a caller-facing error with the same text.
+    mapped = sanitize_tool_exception(exc.value, "scan_variants", ref_config)
+    assert "beyond the end of chr1" in str(mapped)
+
+
+async def test_unknown_contig_suggests_the_files_spelling(small_bam_path, ref_config):
+    """An unknown contig is a ToolInputError naming the file's own spelling."""
+    with pytest.raises(ToolInputError, match="not found in the alignment header") as exc:
+        await tools.handle_scan_variants({"file_path": small_bam_path, "contig": "1"}, ref_config)
+    assert "retry with 'chr1'" in str(exc.value)
+    with pytest.raises(ToolInputError, match="check contig names with list_contigs"):
+        await tools.handle_scan_variants(
+            {"file_path": small_bam_path, "contig": "chrNope"}, ref_config
+        )
+
+
+async def test_other_value_errors_are_sanitized_not_echoed(small_bam_path, monkeypatch):
+    """A ValueError carrying an operator path is left to _run's scrubbing, not re-raised raw."""
+    secret_ref = "/srv/secret/operator_ref.fa"
+    config = BAMCPConfig(reference=secret_ref)
+
+    def boom(*_a, **_kw):
+        raise ValueError(f"could not open {secret_ref}")
+
+    monkeypatch.setattr(tools, "_scan_contig_progressive", boom)
+
+    async def _noop(*_a, **_kw):
+        return None
+
+    monkeypatch.setattr(tools, "_warm_remote_inputs", _noop)
+    with pytest.raises(ValueError) as exc:
+        await tools.handle_scan_variants({"file_path": small_bam_path, "contig": "chr1"}, config)
+    assert not isinstance(exc.value, ToolInputError)
+    assert secret_ref not in str(sanitize_tool_exception(exc.value, "scan_variants", config))
 
 
 async def test_max_region_cap_is_reported_with_continuation(

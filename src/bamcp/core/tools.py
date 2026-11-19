@@ -2778,14 +2778,19 @@ def _scan_contig_progressive(
     chunks done so far rather than holding a worker until the whole contig is read.
 
     Raises:
-        ValueError: If ``contig`` is not in the alignment header.
+        ToolInputError: If ``contig`` is not in the alignment header (the message suggests the
+            file's own spelling, e.g. ``13`` for ``chr13``).
+        ValueError: If the region starts past the contig end (sanitized by the server's
+            ``_run``, like any other non-caller-facing failure).
     """
-    from .parsers import _header_lengths, _open_alignment
+    from .parsers import _header_lengths, _open_alignment, contig_not_found_message
 
     with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        contig_length = _header_lengths(samfile).get(contig)
+        lengths = _header_lengths(samfile)
+        contig_length = lengths.get(contig)
         if contig_length is None:
-            raise ValueError(f"Contig '{contig}' not found in the alignment header")
+            # Unknown contig: an error, never a silent empty "no variants" result.
+            raise ToolInputError(contig_not_found_message(contig, lengths))
         stop = contig_length if scan_stop is None else min(scan_stop, contig_length)
         if scan_start >= stop:
             # A start past the contig end would scan nothing and read as "no variants".
@@ -2908,9 +2913,8 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
         # check and answer with what is already complete.
         progress.stop.set()
         hard_timeout = True
-    except ValueError as e:
-        # Unknown contig: an error, never a silent empty "no variants" result.
-        raise ToolInputError(str(e)) from e
+    # Any other failure (pysam/OS text, a ValueError) propagates to the server's _run, which
+    # sanitizes it; the unknown-contig case already raised a caller-safe ToolInputError.
 
     with progress.lock:
         all_variants = list(progress.variants)

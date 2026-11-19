@@ -347,7 +347,7 @@ def _open_alignment(
 
 
 # Locally cached .fai/.gzi for remote reference FASTAs (url -> (fai, gzi)), registered by
-# core.tools._ensure_reference_indexes. Without them every FastaFile open of a remote bgzip FASTA
+# core.remote._ensure_reference_indexes. Without them every FastaFile open of a remote bgzip FASTA
 # re-downloads its .fai and .gzi (seconds per call on the public 1000 Genomes server). Bounded LRU.
 _REFERENCE_INDEXES: OrderedDict[str, tuple[str, str | None]] = OrderedDict()
 _REFERENCE_INDEXES_MAX = 32
@@ -817,6 +817,85 @@ def annotate_vcf_snv_support(
     return variants
 
 
+def _read_mismatches(
+    read: pysam.AlignedSegment, ref_seq: str | None, start: int, end: int
+) -> tuple[list[dict], bool]:
+    """``(mismatches, truncated)``: the read's mismatches against the reference in [start, end).
+
+    Uses the MD tag when present, else compares to ``ref_seq`` by coordinate. Capped at
+    READ_MAX_MISMATCHES (``truncated`` then True).
+    """
+    mismatches: list[dict] = []
+    if not (ref_seq and read.query_sequence):
+        return mismatches, False
+    try:
+        aligned_pairs = read.get_aligned_pairs(with_seq=True)
+    except ValueError:
+        # MD tag not present; fall back to coordinate-based comparison
+        aligned_pairs = []
+        for qpos, rpos in read.get_aligned_pairs():
+            if rpos is not None and start <= rpos < end:
+                idx = rpos - start
+                ref_base_chr = ref_seq[idx] if 0 <= idx < len(ref_seq) else None
+                aligned_pairs.append((qpos, rpos, ref_base_chr))
+            else:
+                aligned_pairs.append((qpos, rpos, None))
+
+    for qpos, rpos, ref_base in aligned_pairs:
+        if rpos is None or qpos is None:
+            continue
+        if start <= rpos < end:
+            query_base = read.query_sequence[qpos]
+            if ref_base and query_base != ref_base.upper():
+                if len(mismatches) >= READ_MAX_MISMATCHES:
+                    return mismatches, True
+                mismatches.append({"pos": rpos, "ref": ref_base.upper(), "alt": query_base})
+    return mismatches, False
+
+
+def _aligned_read(
+    read: pysam.AlignedSegment,
+    samfile: pysam.AlignmentFile,
+    mismatches: list[dict],
+    mismatches_truncated: bool,
+) -> AlignedRead:
+    """The viewer-facing :class:`AlignedRead` for one pysam read (mate info, soft clips)."""
+    mate_position = None
+    mate_contig = None
+    insert_size = None
+    is_proper_pair = False
+    is_read1 = False
+    if read.is_paired:
+        is_proper_pair = read.is_proper_pair
+        is_read1 = read.is_read1
+        insert_size = read.template_length if read.template_length != 0 else None
+        if read.next_reference_id >= 0:
+            mate_position = read.next_reference_start
+            mate_contig = samfile.get_reference_name(read.next_reference_id)
+
+    return AlignedRead(
+        name=read.query_name or "",
+        sequence=read.query_sequence or "",
+        qualities=list(read.query_qualities or []),
+        cigar=read.cigarstring or "",
+        position=read.reference_start if read.reference_start is not None else 0,
+        end_position=(
+            read.reference_end if read.reference_end is not None else (read.reference_start or 0)
+        ),
+        mapping_quality=read.mapping_quality,
+        is_reverse=read.is_reverse,
+        mismatches=mismatches,
+        soft_clips=extract_soft_clips(read),
+        mismatches_truncated=mismatches_truncated,
+        mate_position=mate_position,
+        mate_contig=mate_contig,
+        insert_size=insert_size,
+        is_proper_pair=is_proper_pair,
+        is_read1=is_read1,
+        is_paired=read.is_paired,
+    )
+
+
 def fetch_region(
     bam_path: str,
     region: str,
@@ -886,88 +965,13 @@ def fetch_region(
                 reads_truncated = True
                 break
 
-            mismatches: list[dict] = []
-            mismatches_truncated = False
-            if ref_seq and read.query_sequence:
-                try:
-                    aligned_pairs = read.get_aligned_pairs(with_seq=True)
-                except ValueError:
-                    # MD tag not present; fall back to coordinate-based comparison
-                    aligned_pairs = []
-                    for qpos, rpos in read.get_aligned_pairs():
-                        if rpos is not None and start <= rpos < end:
-                            idx = rpos - start
-                            ref_base_chr = ref_seq[idx] if 0 <= idx < len(ref_seq) else None
-                            aligned_pairs.append((qpos, rpos, ref_base_chr))
-                        else:
-                            aligned_pairs.append((qpos, rpos, None))
-
-                for qpos, rpos, ref_base in aligned_pairs:
-                    if rpos is None or qpos is None:
-                        continue
-                    if start <= rpos < end:
-                        query_base = read.query_sequence[qpos]
-                        if ref_base and query_base != ref_base.upper():
-                            if len(mismatches) >= READ_MAX_MISMATCHES:
-                                mismatches_truncated = True
-                                break
-                            mismatches.append(
-                                {
-                                    "pos": rpos,
-                                    "ref": ref_base.upper(),
-                                    "alt": query_base,
-                                }
-                            )
-
-            # Extract paired-end information
-            mate_position = None
-            mate_contig = None
-            insert_size = None
-            is_proper_pair = False
-            is_read1 = False
-
-            if read.is_paired:
-                is_proper_pair = read.is_proper_pair
-                is_read1 = read.is_read1
-                insert_size = read.template_length if read.template_length != 0 else None
-
-                if read.next_reference_id >= 0:
-                    mate_position = read.next_reference_start
-                    mate_contig = samfile.get_reference_name(read.next_reference_id)
-
-            # Extract soft clips from CIGAR
-            soft_clips = extract_soft_clips(read)
+            mismatches, mismatches_truncated = _read_mismatches(read, ref_seq, start, end)
             payload_bytes += (
                 READ_FIXED_BYTES
                 + READ_BYTES_PER_BASE * (read.query_length or 0)
                 + MISMATCH_BYTES * len(mismatches)
             )
-
-            reads.append(
-                AlignedRead(
-                    name=read.query_name or "",
-                    sequence=read.query_sequence or "",
-                    qualities=list(read.query_qualities or []),
-                    cigar=read.cigarstring or "",
-                    position=read.reference_start if read.reference_start is not None else 0,
-                    end_position=(
-                        read.reference_end
-                        if read.reference_end is not None
-                        else (read.reference_start or 0)
-                    ),
-                    mapping_quality=read.mapping_quality,
-                    is_reverse=read.is_reverse,
-                    mismatches=mismatches,
-                    soft_clips=soft_clips,
-                    mismatches_truncated=mismatches_truncated,
-                    mate_position=mate_position,
-                    mate_contig=mate_contig,
-                    insert_size=insert_size,
-                    is_proper_pair=is_proper_pair,
-                    is_read1=is_read1,
-                    is_paired=read.is_paired,
-                )
-            )
+            reads.append(_aligned_read(read, samfile, mismatches, mismatches_truncated))
 
     # Context manager ensures samfile is closed before we continue
 
@@ -1045,8 +1049,8 @@ def detect_variants(
             ``sum(A,C,G,T)`` denominator understates depth and inflates VAF. Adding
             gap_depth restores the true spanning depth.
         min_alt_count: Minimum alt-supporting reads (1 = no floor). The tool layer applies
-            the configured floor itself; scan_contig passes it here so its result cap
-            counts only candidates that survive it.
+            the configured floor itself; the contig scanner (``core.scan._scan_chunk``)
+            passes it here so floor-failing noise never reaches its deletion pileup.
 
     Returns:
         List of candidate variant dicts (contig, position, ref, alt, vaf, depth,
@@ -1105,6 +1109,111 @@ def detect_variants(
     return variants
 
 
+def _tally_indel_column(
+    column: Any, min_mapq: int, min_baseq: int
+) -> tuple[int, int, dict[int, int], dict[str, int]]:
+    """One pileup column's ``(matched, deleted, del_events, ins_events)`` read counts.
+
+    ``del_events``/``ins_events`` map a deletion length / inserted sequence to its support
+    (``pread.indel`` is the indel BETWEEN this column and the next).
+    """
+    matched = 0
+    del_here = 0
+    del_events: dict[int, int] = {}
+    ins_events: dict[str, int] = {}
+    for pread in column.pileups:
+        aln = pread.alignment
+        if not read_passes_filters(aln, min_mapq):
+            continue
+        if pread.is_refskip:
+            # A spliced (N) read skips this base entirely — it neither covers it
+            # nor carries a deletion, so it must not enter any depth denominator.
+            continue
+        if pread.is_del:
+            # A deletion has no base quality; count it regardless of min_baseq
+            # (pileup's own min_base_quality used to drop it here).
+            del_here += 1
+            continue
+        # Matched bases follow count_coverage's rule (A/C/G/T, qual >= min_baseq).
+        if _counted_base(pread, min_baseq) is None:
+            continue
+        matched += 1
+        if pread.indel > 0:
+            qpos = pread.query_position
+            seq = aln.query_sequence
+            if qpos is not None and seq is not None:
+                ins_seq = seq[qpos + 1 : qpos + 1 + pread.indel].upper()
+                if ins_seq:
+                    ins_events[ins_seq] = ins_events.get(ins_seq, 0) + 1
+        elif pread.indel < 0:
+            del_len = -pread.indel
+            del_events[del_len] = del_events.get(del_len, 0) + 1
+    return matched, del_here, del_events, ins_events
+
+
+def _column_indels(
+    contig: str,
+    position: int,
+    idx: int,
+    ref_seq: str,
+    depth: int,
+    min_vaf: float,
+    del_events: dict[int, int],
+    ins_events: dict[str, int],
+) -> list[dict]:
+    """VCF-style anchored indel candidates at one column (anchor ``ref_seq[idx]``)."""
+    anchor = ref_seq[idx].upper()
+    out: list[dict] = []
+    for del_len, support in del_events.items():
+        vaf = support / depth
+        if vaf < min_vaf:
+            continue
+        # VCF-style: ref = anchor + deleted bases, alt = anchor. If the
+        # deletion runs past the fetched reference slice (anchor near the
+        # region edge) we can't build the real deleted allele, so skip it
+        # rather than emit a non-variant with ref == alt == anchor.
+        del_end = idx + 1 + del_len
+        if del_end > len(ref_seq):
+            continue
+        ref_allele = ref_seq[idx:del_end].upper()
+        if not set(ref_allele) <= _ACGT:
+            continue  # deleted bases include N/IUPAC — no real ref allele
+        out.append(
+            {
+                "contig": contig,
+                "position": position,
+                "ref": ref_allele,
+                "alt": anchor,
+                "variant_kind": "indel",
+                "indel_type": "del",
+                "vaf": round(vaf, 3),
+                "depth": depth,
+                "alt_count": support,
+                "source": "bamcp",
+            }
+        )
+    for ins_seq, support in ins_events.items():
+        vaf = support / depth
+        if vaf < min_vaf:
+            continue
+        # VCF-style: ref = anchor, alt = anchor + inserted bases.
+        out.append(
+            {
+                "contig": contig,
+                "position": position,
+                "ref": anchor,
+                "alt": anchor + ins_seq,
+                "variant_kind": "indel",
+                "indel_type": "ins",
+                "vaf": round(vaf, 3),
+                "depth": depth,
+                "alt_count": support,
+                "source": "bamcp",
+            }
+        )
+    return out
+
+
 def detect_indels(
     bam_path: str,
     region: str,
@@ -1155,39 +1264,9 @@ def detect_indels(
             if not (0 <= idx < length):
                 continue
 
-            matched = 0
-            del_here = 0
-            del_events: dict[int, int] = {}
-            ins_events: dict[str, int] = {}
-
-            for pread in column.pileups:
-                aln = pread.alignment
-                if not read_passes_filters(aln, min_mapq):
-                    continue
-                if pread.is_refskip:
-                    # A spliced (N) read skips this base entirely — it neither covers it
-                    # nor carries a deletion, so it must not enter any depth denominator.
-                    continue
-                if pread.is_del:
-                    # A deletion has no base quality; count it regardless of min_baseq
-                    # (pileup's own min_base_quality used to drop it here).
-                    del_here += 1
-                    continue
-                # Matched bases follow count_coverage's rule (A/C/G/T, qual >= min_baseq).
-                if _counted_base(pread, min_baseq) is None:
-                    continue
-                matched += 1
-                # pread.indel is the indel BETWEEN this column and the next.
-                if pread.indel > 0:
-                    qpos = pread.query_position
-                    seq = aln.query_sequence
-                    if qpos is not None and seq is not None:
-                        ins_seq = seq[qpos + 1 : qpos + 1 + pread.indel].upper()
-                        if ins_seq:
-                            ins_events[ins_seq] = ins_events.get(ins_seq, 0) + 1
-                elif pread.indel < 0:
-                    del_len = -pread.indel
-                    del_events[del_len] = del_events.get(del_len, 0) + 1
+            matched, del_here, del_events, ins_events = _tally_indel_column(
+                column, min_mapq, min_baseq
+            )
 
             gap_depth[idx] = del_here
             # Guard against a reference shorter than the BAM contig (mismatched
@@ -1204,54 +1283,18 @@ def detect_indels(
             if anchor not in _ACGT:
                 continue
 
-            for del_len, support in del_events.items():
-                vaf = support / depth
-                if vaf < min_vaf:
-                    continue
-                # VCF-style: ref = anchor + deleted bases, alt = anchor. If the
-                # deletion runs past the fetched reference slice (anchor near the
-                # region edge) we can't build the real deleted allele, so skip it
-                # rather than emit a non-variant with ref == alt == anchor.
-                del_end = idx + 1 + del_len
-                if del_end > ref_len:
-                    continue
-                ref_allele = ref_seq[idx:del_end].upper()
-                if not set(ref_allele) <= _ACGT:
-                    continue  # deleted bases include N/IUPAC — no real ref allele
-                indels.append(
-                    {
-                        "contig": contig,
-                        "position": column.reference_pos,
-                        "ref": ref_allele,
-                        "alt": anchor,
-                        "variant_kind": "indel",
-                        "indel_type": "del",
-                        "vaf": round(vaf, 3),
-                        "depth": depth,
-                        "alt_count": support,
-                        "source": "bamcp",
-                    }
+            indels.extend(
+                _column_indels(
+                    contig,
+                    column.reference_pos,
+                    idx,
+                    ref_seq,
+                    depth,
+                    min_vaf,
+                    del_events,
+                    ins_events,
                 )
-
-            for ins_seq, support in ins_events.items():
-                vaf = support / depth
-                if vaf < min_vaf:
-                    continue
-                # VCF-style: ref = anchor, alt = anchor + inserted bases.
-                indels.append(
-                    {
-                        "contig": contig,
-                        "position": column.reference_pos,
-                        "ref": anchor,
-                        "alt": anchor + ins_seq,
-                        "variant_kind": "indel",
-                        "indel_type": "ins",
-                        "vaf": round(vaf, 3),
-                        "depth": depth,
-                        "alt_count": support,
-                        "source": "bamcp",
-                    }
-                )
+            )
 
     return indels, gap_depth
 
@@ -1290,25 +1333,6 @@ def _detect_indels_if_small(
     )
 
 
-@dataclass
-class ScanResult:
-    """A contig scan's candidates plus what was (and wasn't) scanned.
-
-    ``scanned_start``/``scanned_end`` are internal 0-based half-open; the tool layer
-    renders them 1-based. ``total_candidates`` counts candidates before the
-    ``SCAN_VARIANTS_MAX_RESULTS`` cap, so ``results_capped`` is self-describing.
-    """
-
-    contig: str
-    contig_length: int
-    scanned_start: int
-    scanned_end: int
-    variants: list[dict]
-    total_candidates: int
-    results_capped: bool
-    truncated_by_max_region: bool
-
-
 def _deletion_depth_at(
     samfile: pysam.AlignmentFile, contig: str, positions: list[int], min_mapq: int
 ) -> dict[int, int]:
@@ -1332,116 +1356,3 @@ def _deletion_depth_at(
                 if pread.is_del and read_passes_filters(pread.alignment, min_mapq)
             )
     return counts
-
-
-def scan_contig(
-    bam_path: str,
-    contig: str,
-    reference_path: str,
-    chunk_size: int = 50_000,
-    min_vaf: float = 0.1,
-    min_depth: int = 3,
-    min_mapq: int = 0,
-    min_baseq: int = 0,
-    max_region: int = 250_000_000,
-    index_filename: str | None = None,
-    min_alt_count: int = 1,
-) -> ScanResult:
-    """Scan a contig for SNV candidates using fast coverage-based detection.
-
-    Uses pysam's count_coverage (C implementation) in chunks — no read
-    extraction — so scanning a full human chromosome is feasible. SNV-only: indels
-    need a per-read pileup that is too slow at chromosome scale. Candidate VAF/depth
-    include reads deleted at the site (as get_variants does), and N/IUPAC reference
-    bases are skipped.
-
-    Raises:
-        ValueError: If ``contig`` is not in the alignment header.
-    """
-    from ..constants import SCAN_VARIANTS_MAX_RESULTS
-
-    all_variants: list[dict] = []
-
-    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        header_lengths = _header_lengths(samfile)
-        contig_length = header_lengths.get(contig)
-        if contig_length is None:
-            raise ValueError(contig_not_found_message(contig, header_lengths))
-
-        scan_end = min(contig_length, max_region)
-
-        with open_fasta(reference_path) as fasta:
-            for chunk_start in range(0, scan_end, chunk_size):
-                chunk_end = min(chunk_start + chunk_size, scan_end)
-
-                ref_seq = fasta.fetch(contig, chunk_start, chunk_end)
-
-                cov_A, cov_C, cov_G, cov_T = samfile.count_coverage(
-                    contig,
-                    chunk_start,
-                    chunk_end,
-                    quality_threshold=min_baseq,
-                    read_callback=lambda r: read_passes_filters(r, min_mapq),
-                )
-
-                chunk_variants = detect_variants(
-                    (cov_A, cov_C, cov_G, cov_T),
-                    ref_seq,
-                    contig,
-                    chunk_start,
-                    min_vaf,
-                    min_depth,
-                    min_alt_count=min_alt_count,
-                )
-                if chunk_variants:
-                    gaps = _deletion_depth_at(
-                        samfile, contig, sorted({v["position"] for v in chunk_variants}), min_mapq
-                    )
-                    for v in chunk_variants:
-                        gap = gaps.get(v["position"], 0)
-                        if gap:
-                            v["depth"] += gap
-                            v["vaf"] = round(v["alt_count"] / v["depth"], 3)
-                    # Adding deletion depth only lowers VAF: re-apply the threshold.
-                    chunk_variants = [v for v in chunk_variants if v["vaf"] >= min_vaf]
-                all_variants.extend(chunk_variants)
-
-    # Sort by VAF descending and cap results
-    all_variants.sort(key=lambda v: v["vaf"], reverse=True)
-    return ScanResult(
-        contig=contig,
-        contig_length=contig_length,
-        scanned_start=0,
-        scanned_end=scan_end,
-        variants=all_variants[:SCAN_VARIANTS_MAX_RESULTS],
-        total_candidates=len(all_variants),
-        results_capped=len(all_variants) > SCAN_VARIANTS_MAX_RESULTS,
-        truncated_by_max_region=scan_end < contig_length,
-    )
-
-
-def scan_variants_chunked(
-    bam_path: str,
-    contig: str,
-    reference_path: str,
-    chunk_size: int = 50_000,
-    min_vaf: float = 0.1,
-    min_depth: int = 3,
-    min_mapq: int = 0,
-    min_baseq: int = 0,
-    max_region: int = 250_000_000,
-    index_filename: str | None = None,
-) -> list[dict]:
-    """Candidates from :func:`scan_contig`, sorted by VAF descending, capped at 500."""
-    return scan_contig(
-        bam_path,
-        contig,
-        reference_path,
-        chunk_size,
-        min_vaf,
-        min_depth,
-        min_mapq,
-        min_baseq,
-        max_region,
-        index_filename,
-    ).variants

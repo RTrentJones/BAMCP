@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,7 +10,7 @@ import httpx
 import pytest
 
 from bamcp.config import BAMCPConfig
-from bamcp.core import tools as tools_module
+from bamcp.core import remote as remote_module
 
 _HOST_IPS = {
     "data.example.com": "93.184.216.34",
@@ -49,7 +50,7 @@ class TestIndexRedirects:
 
         out = tmp_path / "x.bai"
         async with _client(handler) as client:
-            result = await tools_module._download_index_streaming(
+            result = await remote_module._download_index_streaming(
                 client, "https://data.example.com/x.bam.bai", str(out), BAMCPConfig()
             )
 
@@ -71,7 +72,7 @@ class TestIndexRedirects:
 
         async with _client(handler) as client:
             with pytest.raises(ValueError, match="private/internal"):
-                await tools_module._download_index_streaming(
+                await remote_module._download_index_streaming(
                     client,
                     "https://data.example.com/x.bam.bai",
                     str(tmp_path / "x.bai"),
@@ -87,7 +88,7 @@ class TestIndexRedirects:
         config = BAMCPConfig(allowed_remote_hosts=["data.example.com"])
         async with _client(handler) as client:
             with pytest.raises(ValueError, match="not in the allowed remote hosts"):
-                await tools_module._download_index_streaming(
+                await remote_module._download_index_streaming(
                     client, "https://data.example.com/x.bam.bai", str(tmp_path / "x.bai"), config
                 )
 
@@ -97,7 +98,7 @@ class TestIndexRedirects:
 
         async with _client(handler) as client:
             with pytest.raises(ValueError, match="Scheme not supported"):
-                await tools_module._download_index_streaming(
+                await remote_module._download_index_streaming(
                     client,
                     "https://data.example.com/x.bam.bai",
                     str(tmp_path / "x.bai"),
@@ -114,17 +115,17 @@ class TestIndexRedirects:
 
         async with _client(handler) as client:
             with pytest.raises(ValueError, match="redirects"):
-                await tools_module._download_index_streaming(
+                await remote_module._download_index_streaming(
                     client,
                     "https://data.example.com/x.bam.bai",
                     str(tmp_path / "x.bai"),
                     BAMCPConfig(),
                 )
-        assert calls == tools_module._INDEX_MAX_REDIRECTS + 1
+        assert calls == remote_module._INDEX_MAX_REDIRECTS + 1
 
     async def test_redirect_without_location_is_a_miss(self, tmp_path):
         async with _client(lambda request: httpx.Response(302)) as client:
-            result = await tools_module._download_index_streaming(
+            result = await remote_module._download_index_streaming(
                 client,
                 "https://data.example.com/x.bam.bai",
                 str(tmp_path / "x.bai"),
@@ -134,7 +135,7 @@ class TestIndexRedirects:
 
     async def test_non_200_is_a_miss(self, tmp_path):
         async with _client(lambda request: httpx.Response(500)) as client:
-            result = await tools_module._download_index_streaming(
+            result = await remote_module._download_index_streaming(
                 client,
                 "https://data.example.com/x.bam.bai",
                 str(tmp_path / "x.bai"),
@@ -155,7 +156,7 @@ class TestTempFileCleanup:
 
         async with _client(handler) as client:
             with pytest.raises(ValueError, match="exceeds configured maximum"):
-                await tools_module._download_index_streaming(
+                await remote_module._download_index_streaming(
                     client,
                     "https://data.example.com/x.bam.bai",
                     str(tmp_path / "x.bai"),
@@ -174,7 +175,7 @@ class TestTempFileCleanup:
 
         async with _client(handler) as client:
             with pytest.raises(httpx.ReadError):
-                await tools_module._download_index_streaming(
+                await remote_module._download_index_streaming(
                     client,
                     "https://data.example.com/x.bam.bai",
                     str(tmp_path / "x.bai"),
@@ -187,7 +188,8 @@ class TestTempFileCleanup:
 @pytest.mark.unit
 class TestEnsureCachedIndex:
     async def test_download_enforces_budget_and_prunes_lock(self, tmp_path, monkeypatch):
-        from bamcp.core.tools import _ensure_cached_index, get_services
+        from bamcp.core.remote import _ensure_cached_index
+        from bamcp.core.services import get_services
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, content=b"BAI\x01")
@@ -198,23 +200,31 @@ class TestEnsureCachedIndex:
             assert kwargs.get("follow_redirects") is False
             return real_client(transport=httpx.MockTransport(handler), **kwargs)
 
-        monkeypatch.setattr(tools_module.httpx, "AsyncClient", client_factory)
+        monkeypatch.setattr(remote_module.httpx, "AsyncClient", client_factory)
         config = BAMCPConfig(cache_dir=str(tmp_path), allow_remote_files=True)
         services = get_services(config)
         budget_calls: list[str | None] = []
-        monkeypatch.setattr(
-            services.cache, "enforce_budget", lambda keep=None: budget_calls.append(keep) or 0
-        )
+        sweep_threads: list[threading.Thread] = []
+
+        def enforce_budget(keep=None):
+            sweep_threads.append(threading.current_thread())
+            budget_calls.append(keep)
+            return 0
+
+        monkeypatch.setattr(services.cache, "enforce_budget", enforce_budget)
 
         result = await _ensure_cached_index("https://data.example.com/S1.CRAM?sig=1", config)
 
         assert result is not None and result.endswith(".crai")
         assert Path(result).read_bytes() == b"BAI\x01"
         assert budget_calls == [result]
+        # The sweep scans the cache dir: it must run off the event loop's thread.
+        assert sweep_threads and threading.main_thread() not in sweep_threads
         assert services.index_download_locks == {}
 
     async def test_failed_download_prunes_lock(self, tmp_path, monkeypatch):
-        from bamcp.core.tools import _ensure_cached_index, get_services
+        from bamcp.core.remote import _ensure_cached_index
+        from bamcp.core.services import get_services
 
         real_client = httpx.AsyncClient
 
@@ -223,7 +233,7 @@ class TestEnsureCachedIndex:
                 transport=httpx.MockTransport(lambda r: httpx.Response(404)), **kwargs
             )
 
-        monkeypatch.setattr(tools_module.httpx, "AsyncClient", client_factory)
+        monkeypatch.setattr(remote_module.httpx, "AsyncClient", client_factory)
         config = BAMCPConfig(cache_dir=str(tmp_path), allow_remote_files=True)
 
         assert await _ensure_cached_index("https://data.example.com/x.bam", config) is None
@@ -255,7 +265,7 @@ class TestSiblingUrl:
         ],
     )
     def test_suffix_lands_on_the_path(self, url, suffix, replace_ext, expected):
-        assert tools_module._sibling_url(url, suffix, replace_ext=replace_ext) == expected
+        assert remote_module._sibling_url(url, suffix, replace_ext=replace_ext) == expected
 
 
 @pytest.mark.unit
@@ -268,7 +278,7 @@ class TestSignedUrlIndexes:
             timeouts.append(kwargs.get("timeout"))
             return real_client(transport=httpx.MockTransport(handler), **kwargs)
 
-        monkeypatch.setattr(tools_module.httpx, "AsyncClient", client_factory)
+        monkeypatch.setattr(remote_module.httpx, "AsyncClient", client_factory)
 
     async def test_bam_index_urls_keep_the_query_string(self, tmp_path, monkeypatch):
         from bamcp.constants import INDEX_DOWNLOAD_TIMEOUT_SECONDS

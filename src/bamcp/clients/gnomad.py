@@ -169,9 +169,10 @@ class GnomadClient:
     dataset: str = "auto"
     timeout: float = 30.0
     genome_build: str = DEFAULT_GENOME_BUILD
-    _cache: BoundedTTLCache[GnomadResult | None] = field(default=None, repr=False)  # type: ignore[arg-type]
-    _semaphore: asyncio.Semaphore = field(default=None, repr=False)  # type: ignore[assignment]
-    _http_client: httpx.AsyncClient = field(default=None, repr=False)  # type: ignore[assignment]
+    # Built in __post_init__, never passed by callers.
+    _cache: BoundedTTLCache[GnomadResult | None] = field(init=False, repr=False)
+    _semaphore: asyncio.Semaphore = field(init=False, repr=False)
+    _http_client: httpx.AsyncClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._semaphore = asyncio.Semaphore(5)

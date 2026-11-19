@@ -119,10 +119,11 @@ class ClinVarClient:
     timeout: float = 30.0
     genome_build: str = DEFAULT_GENOME_BUILD
     rate_limiter: TokenBucketRateLimiter | None = field(default=None, repr=False)
-    _cache: BoundedTTLCache[ClinVarResult | None] = field(default=None, repr=False)  # type: ignore[arg-type]
-    _semaphore: asyncio.Semaphore = field(default=None, repr=False)  # type: ignore[assignment]
-    _rate_limiter: TokenBucketRateLimiter = field(default=None, repr=False)  # type: ignore[assignment]
-    _http_client: httpx.AsyncClient = field(default=None, repr=False)  # type: ignore[assignment]
+    # Built in __post_init__, never passed by callers.
+    _cache: BoundedTTLCache[ClinVarResult | None] = field(init=False, repr=False)
+    _semaphore: asyncio.Semaphore = field(init=False, repr=False)
+    _rate_limiter: TokenBucketRateLimiter = field(init=False, repr=False)
+    _http_client: httpx.AsyncClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         max_concurrent = 10 if self.api_key else 3

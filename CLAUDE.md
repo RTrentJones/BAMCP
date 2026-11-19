@@ -74,7 +74,7 @@ make coverage-strict  # coverage with --cov-fail-under=85 (the CI bar)
 make eval-smoke       # deterministic ground-truth gate (required ship-gate)
 make eval-visual-dry  # visual-vs-text eval hermetic dry run (fixtures, stimuli, leak-lint, grader self-tests) — in ci.yml eval-smoke job
 make giab-benchmark   # real GIAB benchmark — network-gated, not in CI
-make render-viewer    # render the viewer to a PNG (.render-dev/last.png)
+make render-viewer    # render the viewer to a PNG (.render-dev/last.png); finds an installed Chromium if Playwright's default is missing (override: BAMCP_CHROMIUM_EXECUTABLE)
 make docker-build / docker-test / clean
 ```
 
@@ -222,7 +222,12 @@ call it off the event loop (`await asyncio.to_thread(validate_path, ...)`).
 
 At startup `__main__.py` sets `REF_PATH` / `REF_CACHE` (when the operator has not) to a local
 directory under the cache dir, so htslib's CRAM reference-by-M5 lookup never goes to the network;
-an operator value naming a URL is kept and logged with a warning.
+an operator value naming a URL is kept and logged with a warning. A CRAM header's `@SQ UR:` tag
+is the other route: htslib decodes a contig against the file it names when no reference is given,
+or when the given reference lacks that contig. With `BAMCP_ALLOW_LOCAL_FILES=false`,
+`core/tools.py` (`_require_cram_reference`, `_check_cram_header_references`) refuses a CRAM with
+no resolved reference, or one whose `UR:`-tagged contigs the reference does not cover. htslib
+itself refuses a remote `UR:` (pinned by `test_cram_reference_gate.py`).
 
 Input validation: regions against `REGION_PATTERN`, paths ≤2048 chars, regions ≤100 chars,
 only `.bam`/`.cram` for local files, gene symbols against `GENE_SYMBOL_PATTERN` (1–40 of letters,

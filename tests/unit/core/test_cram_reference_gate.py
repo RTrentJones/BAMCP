@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 import pysam
@@ -22,8 +23,11 @@ pytestmark = pytest.mark.unit
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 
 
-def _cram_with_header_ur(tmp_path: Path) -> tuple[Path, Path]:
-    """Write a CRAM whose only @SQ carries ``UR:file://<local fasta>``; return (cram, fasta)."""
+def _cram_with_header_ur(tmp_path: Path, ur: str | None = None) -> tuple[Path, Path]:
+    """Write a CRAM whose only @SQ carries ``UR:`` (default ``file://<local fasta>``).
+
+    Returns ``(cram, fasta)``; the FASTA is the one the reads were encoded against.
+    """
     ref = tmp_path / "header_ref.fa"
     ref.write_text((FIXTURES / "ref.fa").read_text())
     pysam.faidx(str(ref))
@@ -51,6 +55,14 @@ def _cram_with_header_ur(tmp_path: Path) -> tuple[Path, Path]:
             if d["next_ref_name"] not in ("=", "chr1"):
                 d["next_ref_name"] = "*"
             out.write(pysam.AlignedSegment.from_dict(d, out.header))
+    if ur is not None:
+        # htslib rewrites UR: to the encoding reference on write, so set the attacker's
+        # value afterwards, as `samtools reheader` would.
+        with pysam.AlignmentFile(str(cram)) as f:
+            text = str(f.header)
+        header_sam = tmp_path / "header.sam"
+        header_sam.write_text(re.sub(r"UR:[^\t\n]+", f"UR:{ur}", text))
+        pysam.samtools.reheader("-i", str(header_sam), str(cram))
     pysam.index(str(cram))
     return cram, ref
 
@@ -128,10 +140,47 @@ class TestHeaderReferenceFallback:
         data = await _fetch_region_with_timeout(str(cram), "chr1:1-200", str(ref), config)
         assert data.reads
 
-    async def test_local_files_allowed_skips_check(self, tmp_path):
+    async def test_local_files_allowed_permits_local_ur(self, tmp_path):
+        # With local files allowed the caller could name that FASTA directly, so a local
+        # UR: is no escalation and decoding proceeds.
         cram, _ = _cram_with_header_ur(tmp_path)
         other = self._other_ref(tmp_path)
         await _check_cram_header_references(str(cram), str(other), BAMCPConfig())
-        from bamcp.core import tools
 
-        assert not tools._CRAM_HEADER_REF_CHECKS
+
+class TestNetworkHeaderReference:
+    """htslib itself refuses a URL in @SQ UR: ("UR tags pointing to remote files are not
+    supported"), so BAMCP's header gate only needs to handle local paths. Pin that: if a
+    pysam/htslib upgrade starts following remote UR: tags, this fails before any release."""
+
+    @pytest.fixture
+    def listener(self):
+        import http.server
+        import threading
+
+        hits: list[str] = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - stdlib hook name
+                hits.append(self.path)
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        yield server.server_port, hits
+        server.shutdown()
+
+    def test_htslib_never_fetches_a_remote_ur(self, tmp_path, listener, monkeypatch):
+        port, hits = listener
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            monkeypatch.delenv(var, raising=False)  # reach the loopback listener directly
+        monkeypatch.setenv("REF_PATH", str(tmp_path / "refs" / "%s"))  # no M5 hit either
+        cram, _ = _cram_with_header_ur(tmp_path, ur=f"http://127.0.0.1:{port}/internal.fa")
+        with pytest.raises(OSError), pysam.AlignmentFile(str(cram), "rc") as f:
+            for _read in f.fetch(until_eof=True):
+                pass
+        assert hits == []

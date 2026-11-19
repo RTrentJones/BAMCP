@@ -14,14 +14,20 @@ src/bamcp/
   server.py        — FastMCP setup, tool/resource registration, auth wiring
   config.py        — BAMCPConfig dataclass with from_env()
   constants.py     — shared defaults, thresholds, bins
-  tool_specs.py    — JSON-schema specs per tool (get_tool_spec)
+  tool_specs.py    — TOOL_SPECS: each tool's description + JSON schema (the one source of
+                     descriptions; server.py registers from it, the eval router reads it)
   resources.py     — get_viewer_html(): serves the bundled static/dist/viewer.html
   demos.py         — demo datasets + `demo:<NAME>` file_path alias (resolve_demo_alias)
   glossary.py      — plain-language glossary (bamcp://glossary)
   prompts.py       — SERVER_INSTRUCTIONS, bamcp://demos|glossary|guide resources, prompts
   viewer_build.py  — viewer source-hash build stamp (run by make build-viewer)
   core/
-    tools.py         — tool handlers + cache helpers
+    tools.py         — region/variant/contig/gene tool handlers, RegionRequest preamble, probe_site
+    services.py      — per-server runtime: parse pool, services registry, region cache
+    remote.py        — remote index/reference-index download, cold-start warming
+    lookups.py       — lookup_clinvar / lookup_gnomad handlers + status vocabulary
+    scan.py          — scan_variants: time-bounded chunked SNV scan
+    filters.py       — failed/passes_candidate_filters: the one min_vaf/min_depth/min_alt_count predicate
     parsers.py       — fetch_region(): pysam parsing, reads, coverage, variant detection
     validation.py    — region/path/URL validation, SSRF prevention
     serialization.py — serialize_region_data(): RegionData → JSON + evidence
@@ -40,7 +46,8 @@ src/bamcp/
     ttl_cache.py     — BoundedTTLCache (shared LRU + TTL)
   middleware/
     auth.py          — BAMCPAuthProvider (in-memory OAuth 2.0)
-    ratelimit.py     — sliding-window IP rate limiting
+    bodylimit.py     — BodySizeLimitMiddleware: 413 on oversized request bodies
+    ratelimit.py     — sliding-window IP rate limiting (IPv6 keyed by /64)
     security.py      — security response headers
     telemetry.py     — configure_telemetry() (optional OTel)
   eval/              — evaluation harness: truthset (deterministic gate), runner, router,
@@ -114,15 +121,15 @@ Thirteen tools, all registered in `server.py`:
 | `visualize_region` | Reads + UI. Auto-detects compact mode for large regions. |
 | `jump_to` | Jump to a position with a configurable window (UI + data). `contig` is required — never default it. |
 | `get_variants` | `variant_source` (`auto`/`vcf`/`bamcp`) selects the source: `vcf` makes a caller's VCF authoritative and attaches BAMCP read-level evidence per site; `auto` overlays a VCF on local candidates; `bamcp` is local-only. |
-| `scan_variants` | Time-bounded SNV scan of a contig or `region`; a truncated scan returns `next_region` (pass it back as `region` to resume). Output sorted by position. |
+| `scan_variants` | Time-bounded SNV scan of a contig or `region`; a truncated scan returns `next_region` (pass it back as `region` to resume). Output sorted by position. An unknown contig names the file's own spelling (`parsers.contig_not_found_message`). |
 | `get_coverage` | Depth-of-coverage statistics. |
 | `list_contigs` | Contigs + genome build detection + suggested public reference URL. |
 | `get_region_summary` | Text-only summary for LLM reasoning (no UI). |
-| `get_variant_curation_summary` | Curation summary with artifact risk assessment. The *requested* site is probed (`core/tools.probe_site`: min_baseq=0, no VAF/alt floor) when it fails the calling filters, and `filter_check` reports `passes_filters` + `failed_filters`; `classify_variant`'s observation does the same (`status: below_filters`). |
+| `get_variant_curation_summary` | Curation summary with artifact risk assessment. The *requested* site is probed (`core/tools.py:probe_site`: min_baseq=0, no VAF/alt floor) when it fails the calling filters, and `filter_check` reports `passes_filters` + `failed_filters`; `classify_variant`'s observation does the same (`status: below_filters`). |
 | `classify_variant` | ACMG classification via evidence fusion (`analysis/acmg.py`, `fusion.py`). |
 | `lookup_clinvar` / `lookup_gnomad` | Clinical significance / population allele frequency. |
 | `search_gene` | Gene symbol → coordinates. Build-aware: auto-detects from the BAM. |
-| `cleanup_cache` | Clear downloaded index files + region cache. stdio only (no-op on shared HTTP servers); never closes the shared HTTP clients. |
+| `cleanup_cache` | Clear downloaded index files + region cache, and forget which remote inputs are warm. stdio only (no-op on shared HTTP servers); never closes the shared HTTP clients. |
 
 Also registered: the `ui://bamcp/viewer` resource; `bamcp://demos`, `bamcp://glossary`,
 `bamcp://guide` resources; prompts `explore_demo`, `check_variant`, `explain_terms`; and
@@ -155,6 +162,11 @@ revocation). It also accepts a stateless service token (`BAMCP_VERIFY_TOKEN`). D
 registration is a separate opt-in (`BAMCP_ALLOW_DYNAMIC_REGISTRATION=true`, default off); auth
 with neither a token nor registration fails at startup.
 
+Security-relevant settings: `BAMCP_ALLOW_REMOTE_FILES` (default off), `BAMCP_ALLOWED_REMOTE_HOSTS`,
+`BAMCP_ALLOWED_DIRECTORIES`, `BAMCP_ALLOW_LOCAL_FILES` (default on; off rejects every
+caller-supplied local path, the configured `BAMCP_REFERENCE` excepted), `BAMCP_MAX_REQUEST_BYTES`
+(default 1 MiB), `BAMCP_TRUSTED_HOSTS`, `BAMCP_RATE_LIMIT*`.
+
 ## Genome build
 
 `list_contigs` auto-detects GRCh37 vs GRCh38 from chr1 length and suggests a public FASTA URL
@@ -177,14 +189,27 @@ silent and shifts coordinates by ~0.5–2 Mb, which reads as false "benign" evid
 
 HTTP middleware (SSE / streamable-http only), added in `__main__.py`:
 `TrustedHostMiddleware` (DNS rebinding, `BAMCP_TRUSTED_HOSTS`) → `SecurityHeadersMiddleware` →
-`BodySizeLimitMiddleware` (413; `BAMCP_MAX_REQUEST_BYTES`, 64 KiB on OAuth paths) → `RateLimitMiddleware` (default 120 req/min/IP — every MCP JSON-RPC message is a request). Behind
+`BodySizeLimitMiddleware` (413; `BAMCP_MAX_REQUEST_BYTES`, default 1 MiB, 64 KiB on
+`/register`, `/token`, `/revoke`, `/authorize`; checks `Content-Length` and counts streamed bytes) →
+`RateLimitMiddleware` (default 120 req/min/IP — every MCP JSON-RPC message is a request; an IPv6
+client is keyed by its /64). Behind
 the Cloudflare tunnel the client IP comes from `CF-Connecting-IP`, then right-to-left
 `X-Forwarded-For`, trusted only from `BAMCP_RATE_LIMIT_TRUSTED_PROXIES` (loopback).
 
 The prod server is an **open public demo**: dynamic client registration with auto-approve is
 intentional. It is off by default in code; prod turns it on in the wrapper's infra
 (`RTrentJones.dev/infra/bamcp.tf`, `BAMCP_ALLOW_DYNAMIC_REGISTRATION = "true"`). Every in-memory store (OAuth clients/codes/tokens, index cache by bytes, region cache
-by bytes) is therefore bounded — keep any new store bounded too.
+by bytes) is therefore bounded — keep any new store bounded too. Registration also caps each
+client record (`middleware/auth.py:check_client_metadata_size`: 10 `redirect_uris`, 2048 chars
+each, 256-char `client_name`, 16 KiB of metadata).
+
+**One scheme classifier.** Every caller-supplied data source (BAM/CRAM, VCF, reference) goes
+through `core/validation.py:_is_remote_source`. Only an exact `http://` / `https://` prefix is
+remote; any other value that starts like a URI scheme (`http:/` with one slash, `data:`, `ftp:`,
+`file:`, `s3:`, …) is rejected, as is a local path that embeds `://` or `##idx##` — htslib
+opens those itself, outside the SSRF checks. With `BAMCP_ALLOW_LOCAL_FILES=false` every local
+path is rejected before any filesystem access (no existence oracle); the operator's
+`BAMCP_REFERENCE` is exempt. `validate_variant_file_path` requires the VCF/BCF to exist.
 
 `validate_remote_url()` in `core/validation.py` (http/https only, ports 80/443 only) rejects any
 `#` (htslib reads `x.bam##idx##<url>` as a second, unvalidated URL), userinfo, and backslashes;
@@ -195,8 +220,15 @@ htslib/libcurl and DNS rebinding can't be checked per-URL, so **the exact-host a
 real SSRF control** — prod sets one, and startup warns without it. Validation resolves DNS, so
 call it off the event loop (`await asyncio.to_thread(validate_path, ...)`).
 
+At startup `__main__.py` sets `REF_PATH` / `REF_CACHE` (when the operator has not) to a local
+directory under the cache dir, so htslib's CRAM reference-by-M5 lookup never goes to the network;
+an operator value naming a URL is kept and logged with a warning.
+
 Input validation: regions against `REGION_PATTERN`, paths ≤2048 chars, regions ≤100 chars,
-only `.bam`/`.cram` for local files, error messages sanitized (never leak config).
+only `.bam`/`.cram` for local files, gene symbols against `GENE_SYMBOL_PATTERN` (1–40 of letters,
+digits, `.`, `_`, `-`; they go into an Entrez query), error messages sanitized (never leak config).
+Unavailable lookups carry a fixed `reason_code` (`timeout`, `network_error`, `upstream_error`,
+`unsupported_build`) — upstream error text is logged, never returned.
 
 **One error envelope.** Every tool runs through `_run()` in `server.py`, which maps any handler
 exception via `core/errors.py:sanitize_tool_exception` to an `isError=true` result with a
@@ -205,11 +237,21 @@ client-safe message. Handlers raise `ToolInputError` for caller-facing failures 
 error. Argument-schema failures (wrong/missing parameter names) never reach `_run` — FastMCP
 validates first — so `_install_argument_error_mapping` maps them to one short line listing the
 tool's expected parameters instead of a raw pydantic dump.
-`tool_specs.py` must match the server's parameter sets (parity test in `test_tool_specs.py`).
+Tool descriptions live only in `tool_specs.TOOL_SPECS` (`server.py` registers
+`description=TOOL_SPECS[name]["description"]`); its schemas must match the server's parameter
+sets (parity test in `test_tool_specs.py` checks parameters and descriptions).
 
 `mcp>=1.23.0` is a hard floor (CVE-2025-66416 DNS rebinding fix).
 
-Prod compose hardening: `cap_drop: [ALL]`, `no-new-privileges`, `read_only`, `memory: 2g`, non-root.
+Prod compose hardening: `cap_drop: [ALL]`, `no-new-privileges`, `read_only`, `memory: 2g`, non-root,
+port bound to `127.0.0.1`, `BAMCP_ALLOWED_REMOTE_HOSTS` set, `BAMCP_ALLOW_LOCAL_FILES=false`.
+
+**Resource bounds per call** (`constants.py`): `VCF_MAX_RECORDS` (5,000; `vcf_truncated` +
+`vcf_max_records` in `applied_filters`), `VCF_MAX_SAMPLES_DETAIL` (16; GT only for the first 16,
+`samples_truncated` + `sample_count` on the variant), `READ_MAX_MISMATCHES` (1,000 per read;
+`mismatches_truncated`), `READ_PAYLOAD_MAX_BYTES` (64 MiB; sets `reads_truncated`),
+`GET_VARIANTS_MAX_RESULTS` (1,000; `truncated` / `total_candidates` / `max_results` in
+`applied_filters`, VCF records kept first, then most alt reads).
 
 ## Viewer payload
 
@@ -258,7 +300,9 @@ never for calls the app makes itself.
 
 ### Non-obvious viewer behavior
 
-- Regions >500 bp auto-omit sequences (compact mode) to shrink the payload.
+- Regions >`COMPACT_REGION_THRESHOLD_BP` (500 bp) auto-omit sequences (compact mode) to shrink the
+  payload. The server sends the threshold as `compact_threshold_bp` in `ui/init`; the viewer uses
+  it and falls back to `DEFAULT_COMPACT_THRESHOLD_BP` (500) for older payloads.
 - At zoom scale ≥10, `checkAndRequestSequences()` auto-fetches missing sequences via
   `callServerTool('visualize_region')`, with a "Load Detail" button as a 3s fallback.
 
@@ -313,7 +357,10 @@ The container runs on a private OCI subnet with no public IP. External access is
 
 `Dockerfile` (prod, multi-stage slim, multi-arch; CI builds arm64) · `Dockerfile.dev` (adds pytest/playwright/ruff/mypy) ·
 `docker-compose.yml` profiles: `dev` (test + e2e + lint services), `beta`, `preview`, `prod` ·
-`docker/healthcheck.py` (imports bamcp, verifies server creation).
+`docker/healthcheck.py` — the image `HEALTHCHECK` GETs `/__version` on HTTP transports (import
+check for stdio); `docker/entrypoint.sh` runs it with `--preflight` (import/config/server-creation
+check only, the server isn't listening yet). The viewer build's Node version is pinned once, in
+`src/bamcp/static/.nvmrc`; every workflow reads it.
 
 ## Further reading
 

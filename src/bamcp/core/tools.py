@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
+import httpx
 import pysam
 
 from ..analysis.evidence import (
@@ -1722,11 +1723,16 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
         result = await get_gene_client(config).search(symbol, build=effective)
     except GeneLookupError as e:
         # NCBI unreachable / in-band error: the gene's existence is UNKNOWN, not disproven.
+        # The upstream text is logged only; the caller gets a fixed reason, as the lookups do.
         logger.warning("Gene lookup unavailable for %s: %s", symbol, e)
+        reason_code = (
+            "network_error" if isinstance(e.__cause__, httpx.HTTPError) else "upstream_error"
+        )
         return _answer(
             _LOOKUP_UNAVAILABLE,
             error="Gene lookup unavailable (NCBI error); retry later",
-            reason=str(e),
+            reason_code=reason_code,
+            reason=f"NCBI Gene: {_LOOKUP_REASONS[reason_code]}",
             genome_build=effective,
         )
     if result is None:

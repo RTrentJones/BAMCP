@@ -3160,5 +3160,13 @@ async def handle_cleanup_cache(args: dict[str, Any], config: BAMCPConfig) -> dic
         )
     else:
         removed = get_services(config).clear_caches()
+        # The downloaded indexes are gone, so the next open of a remote input is cold again:
+        # forget it was warm so that open gets the cold-start budget, not the parse timeout.
+        # Left alone on purpose: _parse_gates (one semaphore per live loop, bounding in-flight
+        # parses — replacing it while parses hold permits would let a second batch past the
+        # bound) and _services_registry (the live server's services; dropping them would
+        # close HTTP clients under in-flight lookups — clear_caches already empties their
+        # caches).
+        _warm_inputs.clear()
         text = f"Removed {removed} cached index files and cleared the region cache."
     return {"content": [{"type": "text", "text": text}]}

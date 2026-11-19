@@ -332,6 +332,32 @@ class TestDockerCompose:
         """Beta and prod services should expose port 8000."""
         assert '"8000:8000"' in self.content
 
+    @pytest.mark.unit
+    def test_prod_profile_is_locked_down(self):
+        """Prod binds loopback, rejects local paths, and allow-lists remote fetch hosts."""
+        import yaml
+
+        prod = yaml.safe_load(self.content)["services"]["prod"]
+        assert prod["ports"] == ["127.0.0.1:8000:8000"]
+        env = dict(e.split("=", 1) for e in prod["environment"])
+        assert env["BAMCP_ALLOW_REMOTE_FILES"] == "true"
+        assert env["BAMCP_ALLOW_LOCAL_FILES"] == "false"
+        assert env["BAMCP_ALLOWED_REMOTE_HOSTS"], "remote fetch without an allow-list"
+
+    @pytest.mark.unit
+    def test_prod_allow_list_matches_setup_cloudflared(self):
+        """The compose prod allow-list and setup-cloudflared.sh's default must stay in sync."""
+        import yaml
+
+        prod = yaml.safe_load(self.content)["services"]["prod"]
+        env = dict(e.split("=", 1) for e in prod["environment"])
+        script = read_project_file("scripts/setup-cloudflared.sh")
+        match = re.search(r'^DEFAULT_ALLOWED_REMOTE_HOSTS="([^"]+)"', script, re.M)
+        assert match
+        compose_hosts = set(env["BAMCP_ALLOWED_REMOTE_HOSTS"].split(","))
+        assert compose_hosts == set(match.group(1).split(","))
+        assert "ftp.ensembl.org" in compose_hosts
+
 
 # ===========================================================================
 # .dockerignore tests

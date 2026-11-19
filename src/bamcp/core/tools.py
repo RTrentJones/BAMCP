@@ -69,6 +69,7 @@ from .parsers import (
     fetch_region,
     format_region,
     load_vcf_variants,
+    open_fasta,
     parse_region,
     vcf_truncated,
 )
@@ -472,12 +473,16 @@ async def _fetch_region_with_timeout(
     unrelated per-tool bug. Re-raise with the context needed to tell "too slow" from
     "broken", and note that a retry is usually warm enough to succeed.
     """
+    # Every tool's alignment decode funnels through here (scan_variants requires a reference
+    # up front), so this is the one CRAM header-reference gate.
+    _require_cram_reference(file_path, reference, config)
     # Cold start: fetch the index (never under a parse budget), then give a not-yet-seen remote
     # BAM/reference its one-off open under the separate cold budget, so the parse that follows
     # runs warm under the normal BAM_PARSE_TIMEOUT_SECONDS.
     if _is_remote(file_path) or _is_remote(reference):
         index_path = await _ensure_cached_index(file_path, config)
         await _warm_remote_inputs(file_path, reference, index_path, config)
+    await _check_cram_header_references(file_path, reference, config)
     try:
         return await _fetch_region_data(
             file_path,
@@ -838,6 +843,91 @@ async def _resolve_reference_info(
             return ResolvedReference(None, url, REFERENCE_SOURCE_AUTO)
         return ResolvedReference(None, None, REFERENCE_SOURCE_NONE, note)
     return ResolvedReference(None, None, REFERENCE_SOURCE_NONE)
+
+
+CRAM_REFERENCE_REQUIRED_MESSAGE = (
+    "CRAM decoding needs a reference on this server; pass reference=<indexed FASTA URL> "
+    "(list_contigs suggests one for the file's build)"
+)
+
+
+def _require_cram_reference(file_path: str, reference: str | None, config: BAMCPConfig) -> None:
+    """Refuse to decode a CRAM without a resolved reference on a remote-only server.
+
+    With no ``reference_filename``, htslib resolves each contig's reference from the CRAM
+    header itself — the ``@SQ UR:`` tag, a path or URL chosen by whoever wrote the file —
+    and decodes read bases against it. ``REF_PATH``/``REF_CACHE`` (pinned local at startup)
+    only govern the M5 lookup, not ``UR:``, so a caller-supplied CRAM could make the server
+    read a local file (its bytes come back as read sequence) or fetch an arbitrary URL
+    outside the host allow-list. When ``allow_local_files`` is off, require a reference
+    BAMCP resolved itself (caller-supplied and validated, the operator's configured one,
+    or the auto-selected registry FASTA). Header-only reads (list_contigs) never decode
+    a slice and do not go through here. No-op when local files are allowed.
+    """
+    if config.allow_local_files or reference or not is_cram(file_path):
+        return
+    raise ToolInputError(CRAM_REFERENCE_REQUIRED_MESSAGE)
+
+
+# (file_path, reference) -> header contigs htslib would resolve via @SQ UR: instead of the
+# given reference. Bounded LRU: a header verdict is re-checked after eviction, never trusted
+# beyond it. Only populated on remote-only servers.
+_CRAM_HEADER_REF_CHECKS: OrderedDict[tuple[str, str], tuple[str, ...]] = OrderedDict()
+_CRAM_HEADER_REF_CHECKS_MAX = 256
+
+
+def _cram_header_only_refs(
+    file_path: str, reference: str, index_path: str | None
+) -> tuple[str, ...]:
+    """Header contigs that carry a ``UR:`` tag but are absent from ``reference``.
+
+    htslib falls back to a contig's header ``UR:`` path/URL when the given reference FASTA
+    does not contain it (``cram_get_ref``: "Reference file given, but ref '…' not present"),
+    so a resolved reference alone does not keep decoding off caller-chosen files. Reads only
+    the header and the FASTA index — no slice is decoded. Runs in the parse pool.
+    """
+    from .parsers import _open_alignment
+
+    with _open_alignment(file_path, reference, index_path) as samfile:
+        sq = samfile.header.to_dict().get("SQ", [])
+    with open_fasta(reference) as fasta:
+        served = set(fasta.references)
+    return tuple(str(s["SN"]) for s in sq if s.get("UR") and s.get("SN") not in served)
+
+
+async def _check_cram_header_references(
+    file_path: str, reference: str | None, config: BAMCPConfig
+) -> None:
+    """On a remote-only server, refuse a CRAM whose header could redirect decoding.
+
+    Complements :func:`_require_cram_reference`: with a reference resolved, any header contig
+    the reference lacks but whose ``@SQ`` names a ``UR:`` would still be decoded against that
+    caller-chosen path or URL. No-op when local files are allowed or for BAM input.
+    """
+    if config.allow_local_files or not reference or not is_cram(file_path):
+        return
+    key = (file_path, reference)
+    unserved = _CRAM_HEADER_REF_CHECKS.get(key)
+    if unserved is None:
+        index_path = await _ensure_cached_index(file_path, config)
+        unserved = await asyncio.wait_for(
+            _run_in_parse_pool(_cram_header_only_refs, file_path, reference, index_path),
+            timeout=BAM_PARSE_TIMEOUT_SECONDS,
+        )
+        _CRAM_HEADER_REF_CHECKS[key] = unserved
+        while len(_CRAM_HEADER_REF_CHECKS) > _CRAM_HEADER_REF_CHECKS_MAX:
+            _CRAM_HEADER_REF_CHECKS.popitem(last=False)
+    else:
+        _CRAM_HEADER_REF_CHECKS.move_to_end(key)
+    if unserved:
+        shown = ", ".join(unserved[:3]) + (
+            f" (+{len(unserved) - 3} more)" if len(unserved) > 3 else ""
+        )
+        raise ToolInputError(
+            f"This CRAM's header points contigs the reference does not contain ({shown}) at "
+            "an external reference (@SQ UR:), which this server does not follow; pass a "
+            "reference FASTA that covers every contig in the header"
+        )
 
 
 async def _resolve_reference(

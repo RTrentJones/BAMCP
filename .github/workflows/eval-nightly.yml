@@ -32,6 +32,9 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: src/bamcp/static/.nvmrc
       - run: make install
       - run: pip install -e ".[eval]"
       - run: python tests/create_fixtures.py
@@ -75,6 +78,9 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: src/bamcp/static/.nvmrc
       - name: Check the selected provider is runnable
         id: key
         env:

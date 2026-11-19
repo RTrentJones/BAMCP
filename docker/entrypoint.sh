@@ -17,7 +17,9 @@ fi
 # If the command is the default server, run a quick pre-flight check.
 if [ "$1" = "python" ] && [ "$2" = "-m" ] && [ "$3" = "bamcp" ]; then
     echo "Running pre-flight health check..." >&2
-    python /app/docker/healthcheck.py || {
+    # --preflight: import/config check only — the server isn't listening yet, so the HTTP
+    # /__version probe (what the Dockerfile HEALTHCHECK runs) can't apply here.
+    python /app/docker/healthcheck.py --preflight || {
         echo "Health check failed, aborting." >&2
         exit 1
     }

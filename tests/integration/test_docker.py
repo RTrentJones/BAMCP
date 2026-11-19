@@ -5,10 +5,14 @@ a Docker daemon — they parse and verify Dockerfile syntax, compose config,
 .dockerignore coverage, health check behavior, and entrypoint logic.
 """
 
+import http.server
+import importlib.util
 import os
 import re
+import socket
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -328,6 +332,32 @@ class TestDockerCompose:
         """Beta and prod services should expose port 8000."""
         assert '"8000:8000"' in self.content
 
+    @pytest.mark.unit
+    def test_prod_profile_is_locked_down(self):
+        """Prod binds loopback, rejects local paths, and allow-lists remote fetch hosts."""
+        import yaml
+
+        prod = yaml.safe_load(self.content)["services"]["prod"]
+        assert prod["ports"] == ["127.0.0.1:8000:8000"]
+        env = dict(e.split("=", 1) for e in prod["environment"])
+        assert env["BAMCP_ALLOW_REMOTE_FILES"] == "true"
+        assert env["BAMCP_ALLOW_LOCAL_FILES"] == "false"
+        assert env["BAMCP_ALLOWED_REMOTE_HOSTS"], "remote fetch without an allow-list"
+
+    @pytest.mark.unit
+    def test_prod_allow_list_matches_setup_cloudflared(self):
+        """The compose prod allow-list and setup-cloudflared.sh's default must stay in sync."""
+        import yaml
+
+        prod = yaml.safe_load(self.content)["services"]["prod"]
+        env = dict(e.split("=", 1) for e in prod["environment"])
+        script = read_project_file("scripts/setup-cloudflared.sh")
+        match = re.search(r'^DEFAULT_ALLOWED_REMOTE_HOSTS="([^"]+)"', script, re.M)
+        assert match
+        compose_hosts = set(env["BAMCP_ALLOWED_REMOTE_HOSTS"].split(","))
+        assert compose_hosts == set(match.group(1).split(","))
+        assert "ftp.ensembl.org" in compose_hosts
+
 
 # ===========================================================================
 # .dockerignore tests
@@ -427,37 +457,159 @@ class TestHealthCheck:
 
     @pytest.mark.integration
     def test_health_check_passes(self):
-        """Running the health check should succeed in the test environment."""
+        """Running the health check (stdio transport) should succeed in the test environment."""
+        env = {**os.environ, "BAMCP_TRANSPORT": "stdio"}
         result = subprocess.run(  # noqa: S603
             [sys.executable, os.path.join(PROJECT_ROOT, "docker", "healthcheck.py")],
             capture_output=True,
             text=True,
             timeout=10,
+            env=env,
         )
         assert result.returncode == 0, f"Health check failed: {result.stderr}"
 
     @pytest.mark.integration
-    def test_health_check_verifies_version(self):
-        """Health check should verify the package version is set."""
-        sys.path.insert(0, os.path.join(PROJECT_ROOT, "docker"))
-        try:
-            from healthcheck import check_health  # type: ignore[import-not-found]
-
-            assert check_health() is True
-        finally:
-            sys.path.pop(0)
+    def test_preflight_ignores_http_transport(self):
+        """--preflight (the entrypoint's mode) runs before the server listens: import check only."""
+        env = {**os.environ, "BAMCP_TRANSPORT": "sse", "BAMCP_PORT": str(_free_port())}
+        result = subprocess.run(  # noqa: S603
+            [sys.executable, os.path.join(PROJECT_ROOT, "docker", "healthcheck.py"), "--preflight"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode == 0, f"Preflight failed: {result.stderr}"
 
     @pytest.mark.integration
-    def test_health_check_verifies_server(self):
-        """Health check should instantiate the server."""
-        sys.path.insert(0, os.path.join(PROJECT_ROOT, "docker"))
-        try:
-            from healthcheck import check_health  # type: ignore[import-not-found]
+    def test_health_check_verifies_server(self, monkeypatch):
+        """The stdio health check should import bamcp and instantiate the server."""
+        monkeypatch.setenv("BAMCP_TRANSPORT", "stdio")
+        assert _load_healthcheck().check_health() is True
 
-            result = check_health()
-            assert result is True
-        finally:
-            sys.path.pop(0)
+
+def _load_healthcheck():
+    """Import docker/healthcheck.py by path (docker/ is not a package)."""
+    spec = importlib.util.spec_from_file_location(
+        "bamcp_docker_healthcheck", os.path.join(PROJECT_ROOT, "docker", "healthcheck.py")
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class _ProbeHandler(http.server.BaseHTTPRequestHandler):
+    status = 200
+    seen: list[tuple[str, str | None]] = []
+
+    def do_GET(self):  # noqa: N802
+        type(self).seen.append((self.path, self.headers.get("Host")))
+        self.send_response(type(self).status)
+        self.end_headers()
+        self.wfile.write(b'{"sha": null}')
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def probe_server():
+    """A loopback HTTP server standing in for BAMCP; yields (port, handler class)."""
+
+    class Handler(_ProbeHandler):
+        status = 200
+        seen = []
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1], Handler
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class TestHealthCheckHttpProbe:
+    """The runtime probe (Dockerfile HEALTHCHECK) for HTTP transports hits GET /__version."""
+
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        for var in ("BAMCP_PORT", "PORT", "BAMCP_TRUSTED_HOSTS"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("BAMCP_TRANSPORT", "sse")
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("transport", ["sse", "streamable-http"])
+    def test_http_transport_probes_version(self, monkeypatch, probe_server, transport):
+        port, handler = probe_server
+        monkeypatch.setenv("BAMCP_TRANSPORT", transport)
+        monkeypatch.setenv("BAMCP_PORT", str(port))
+        hc = _load_healthcheck()
+        monkeypatch.setattr(hc, "_check_imports", lambda: pytest.fail("stdio path used"))
+        assert hc.check_health() is True
+        assert handler.seen[0][0] == "/__version"
+
+    @pytest.mark.unit
+    def test_non_200_is_unhealthy(self, monkeypatch, probe_server):
+        port, handler = probe_server
+        handler.status = 503
+        monkeypatch.setenv("BAMCP_PORT", str(port))
+        assert _load_healthcheck().check_health() is False
+
+    @pytest.mark.unit
+    def test_nothing_listening_is_unhealthy(self, monkeypatch):
+        monkeypatch.setenv("BAMCP_PORT", str(_free_port()))
+        assert _load_healthcheck().check_health() is False
+
+    @pytest.mark.unit
+    def test_cloud_port_used_when_bamcp_port_unset(self, monkeypatch, probe_server):
+        """Mirrors entrypoint.sh: PORT applies only when BAMCP_PORT is unset."""
+        port, _ = probe_server
+        monkeypatch.setenv("PORT", str(port))
+        assert _load_healthcheck().check_health() is True
+
+    @pytest.mark.unit
+    def test_bamcp_port_wins_over_cloud_port(self, monkeypatch, probe_server):
+        port, _ = probe_server
+        monkeypatch.setenv("PORT", str(_free_port()))
+        monkeypatch.setenv("BAMCP_PORT", str(port))
+        assert _load_healthcheck().check_health() is True
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("trusted", "expected"),
+        [
+            ("bamcp.example.com,other", "bamcp.example.com"),
+            ("*.example.com", "healthcheck.example.com"),
+        ],
+    )
+    def test_sends_a_trusted_host_header(self, monkeypatch, probe_server, trusted, expected):
+        """TrustedHostMiddleware would 400 a bare 127.0.0.1 Host when BAMCP_TRUSTED_HOSTS is set."""
+        port, handler = probe_server
+        monkeypatch.setenv("BAMCP_PORT", str(port))
+        monkeypatch.setenv("BAMCP_TRUSTED_HOSTS", trusted)
+        assert _load_healthcheck().check_health() is True
+        assert handler.seen[0][1] == expected
+
+    @pytest.mark.unit
+    def test_stdio_uses_import_check(self, monkeypatch):
+        monkeypatch.setenv("BAMCP_TRANSPORT", "stdio")
+        hc = _load_healthcheck()
+        monkeypatch.setattr(hc, "_check_imports", lambda: True)
+        monkeypatch.setattr(hc, "_check_http", lambda: pytest.fail("HTTP probed for stdio"))
+        assert hc.check_health() is True
+
+    @pytest.mark.unit
+    def test_entrypoint_runs_preflight_mode(self):
+        assert "healthcheck.py --preflight" in read_project_file("docker/entrypoint.sh")
 
 
 # ===========================================================================

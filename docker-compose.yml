@@ -123,7 +123,9 @@ services:
       dockerfile: Dockerfile
     profiles: ["prod"]
     ports:
-      - "8000:8000"
+      # Loopback only: prod is reached through the Cloudflare tunnel / a reverse proxy, never a
+      # port published on every interface.
+      - "127.0.0.1:8000:8000"
     volumes:
       - bamcp-data:/data:ro
     environment:
@@ -143,6 +145,14 @@ services:
       - BAMCP_ISSUER_URL=http://localhost:8000
       - BAMCP_RESOURCE_SERVER_URL=http://localhost:8000
       - BAMCP_ALLOW_REMOTE_FILES=true
+      # Exact-host allow-list for remote BAM/CRAM/index/reference URLs — the real SSRF control
+      # (htslib redirects and DNS rebinding can't be checked per-URL). Keep in sync with prod's
+      # BAMCP_ALLOWED_REMOTE_HOSTS in RTrentJones.dev infra/bamcp.tf and
+      # scripts/setup-cloudflared.sh's DEFAULT_ALLOWED_REMOTE_HOSTS.
+      - BAMCP_ALLOWED_REMOTE_HOSTS=hgdownload.soe.ucsc.edu,ftp.ncbi.nlm.nih.gov,ftp-trace.ncbi.nlm.nih.gov,ftp.1000genomes.ebi.ac.uk,1000genomes.s3.amazonaws.com,ftp.ensembl.org
+      # Public-facing server: reject non-URL file paths so callers can't probe the container's
+      # filesystem; only allow-listed remote URLs (and demo: aliases) are served.
+      - BAMCP_ALLOW_LOCAL_FILES=false
       - BAMCP_RATE_LIMIT=120
       # read_only root fs: BAMCPConfig.from_env() mkdirs the index cache at start-up (default
       # ~/.cache/bamcp), which would crash with EROFS. Point it at the tmpfs below instead.

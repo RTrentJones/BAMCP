@@ -80,6 +80,35 @@ async def test_scan_variants_without_contig_scans_first_contig():
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ({"chrom": "chr1", "pos": 100, "ref": "A", "alt": "Z"}, "Invalid alternate allele"),
+        ({"chrom": "chrZZ", "pos": 100, "ref": "A", "alt": "T"}, "chrZZ"),
+    ],
+)
+async def test_curation_failures_are_error_results(args, expected):
+    """Invalid input / unknown contig are isError results, never a successful error payload."""
+    result = await _call(
+        BAMCPConfig(reference=REF),
+        "get_variant_curation_summary",
+        {"file_path": SMALL_BAM, **args},
+    )
+    assert result.isError
+    assert expected in _text(result)
+    assert "KeyError" not in _text(result)
+
+
+@pytest.mark.integration
+async def test_scan_variants_unknown_contig_suggests_spelling():
+    result = await _call(
+        BAMCPConfig(reference=REF), "scan_variants", {"file_path": SMALL_BAM, "contig": "1"}
+    )
+    assert result.isError
+    assert "retry with 'chr1'" in _text(result)
+
+
+@pytest.mark.integration
 async def test_curation_summary_exposes_include_clinical(monkeypatch):
     seen: dict = {}
 

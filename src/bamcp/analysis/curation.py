@@ -380,23 +380,23 @@ def _format_clinical_context(context: dict) -> str:
     return "\n".join(lines)
 
 
-def _error_response(
-    message: str, output_format: str, applied_filters: dict[str, Any] | None = None
-) -> dict:
-    """Wrap an error message in the same envelope shape both formats produce.
+def _not_found_response(message: str, output_format: str, applied_filters: dict[str, Any]) -> dict:
+    """The "probed and not found" ANSWER, in the same envelope shape both formats produce.
 
-    ``applied_filters`` is echoed when the error is a not-found, so a variant dropped
-    by min_vaf/min_depth stays distinguishable from a true absence.
+    This is the only non-success outcome returned as a result: failures (invalid input,
+    timeouts, unreadable files, unknown contigs) raise, and the server's ``_run`` maps them to
+    an ``isError`` result. ``applied_filters`` is echoed so a variant dropped by
+    min_vaf/min_depth stays distinguishable from a true absence.
     """
     if output_format == "rubric":
-        body: dict[str, Any] = {"error": message, "rubric_version": RUBRIC_VERSION}
-        if applied_filters is not None:
-            body["applied_filters"] = applied_filters
+        body: dict[str, Any] = {
+            "error": message,
+            "rubric_version": RUBRIC_VERSION,
+            "applied_filters": applied_filters,
+        }
         return {"content": [{"type": "text", "text": json.dumps(body)}]}
-    if applied_filters is not None:
-        filters = ", ".join(f"{k}={v}" for k, v in applied_filters.items())
-        message = f"{message}\nApplied filters: {filters}"
-    return {"content": [{"type": "text", "text": message}]}
+    filters = ", ".join(f"{k}={v}" for k, v in applied_filters.items())
+    return {"content": [{"type": "text", "text": f"{message}\nApplied filters: {filters}"}]}
 
 
 @telemetry_wrapper("get_variant_curation_summary")
@@ -429,6 +429,11 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     ref = args["ref"]
     alt = args["alt"]
     window = args.get("window", 50)
+    # Invalid input is a tool error (isError via the server envelope), not an answer — and is
+    # checked before reference resolution, which can read a remote BAM header.
+    validation_error = validate_variant_input(chrom, pos, ref, alt)
+    if validation_error:
+        raise ToolInputError(validation_error)
     # Same resolution as every other tool: a caller-supplied reference is validated (the
     # untrusted SSRF vector), then the operator default, then the public FASTA matching the
     # BAM's build and contig style — so a bare demo/remote BAM still gets SNV evidence.
@@ -439,10 +444,6 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
         output_format = "text"
     include_clinical = bool(args.get("include_clinical", False))
 
-    # Validate inputs
-    validation_error = validate_variant_input(chrom, pos, ref, alt)
-    if validation_error:
-        return _error_response(validation_error, output_format)
     # Validation accepts lowercase alleles; detected variants carry uppercase.
     ref = ref.upper()
     alt = alt.upper()
@@ -451,24 +452,9 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     # variant near the contig start never builds a negative/zero (invalid) region.
     region = f"{chrom}:{max(1, pos - window)}-{pos + window}"
 
-    try:
-        data = await _fetch_region_with_timeout(file_path, region, reference, config)
-    except (asyncio.TimeoutError, TimeoutError):
-        # _fetch_region_with_timeout re-raises the builtin TimeoutError, which is NOT
-        # asyncio.TimeoutError on Python 3.10 — catch both.
-        return _error_response("Timeout fetching region data", output_format)
-    except (KeyError, ValueError) as e:
-        # pysam raises KeyError/ValueError for a contig absent from the BAM or a bad
-        # region; report it as a tool error rather than crashing the call.
-        logger.warning("Curation region fetch failed: %s", e)
-        return _error_response(
-            f"Could not read {chrom}:{pos} from the alignment file (contig not present "
-            "in the BAM, or invalid region).",
-            output_format,
-        )
-    except OSError as e:
-        logger.warning("Curation region fetch failed: %s", e)
-        return _error_response("Could not read the alignment file.", output_format)
+    # Failures (timeout, unknown contig, bad region, unreadable file) propagate: the server's
+    # _run maps each to a sanitized isError result (sanitize_tool_exception).
+    data = await _fetch_region_with_timeout(file_path, region, reference, config)
 
     # `pos` arrives 1-based (VCF/dbSNP convention — the same coordinate
     # get_variants / lookup_clinvar / lookup_gnomad speak), but data.variants
@@ -505,19 +491,16 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     else:
         # The requested site fails the calling filters (or wasn't called at all): evaluate it
         # anyway — hiding a low-BQ one-strand artifact behind "not found" defeats curation.
-        try:
-            probed = await probe_site(file_path, data, pos - 1, ref, alt, reference, config)
-        except (asyncio.TimeoutError, TimeoutError):
-            return _error_response("Timeout fetching region data", output_format)
-        except ToolInputError as e:  # e.g. REF doesn't match the reference base
-            return _error_response(str(e), output_format, applied_filters=applied_filters)
+        # A timeout or a ToolInputError (e.g. REF doesn't match the reference base) propagates.
+        probed = await probe_site(file_path, data, pos - 1, ref, alt, reference, config)
         if probed is None:
-            return _error_response(
+            # Probed and genuinely absent: an answer, not an error.
+            return _not_found_response(
                 f"Variant {chrom}:{pos} {ref}>{alt} not found in region: no read supports the alt "
                 "allele at this position, even with min_baseq=0 and no VAF/alt-read floor. "
                 f"Variants called in the window: {len(data.variants)}.",
                 output_format,
-                applied_filters=applied_filters,
+                applied_filters,
             )
         target_variant = probed["variant"]
         evidence = probed["evidence"]

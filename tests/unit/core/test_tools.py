@@ -1939,18 +1939,17 @@ class TestHandleGetVariantCurationSummary:
     async def test_invalid_chromosome_rejected(self, small_bam_path, config):
         from bamcp.analysis.curation import handle_get_variant_curation_summary
 
-        result = await handle_get_variant_curation_summary(
-            {
-                "file_path": small_bam_path,
-                "chrom": "invalid_chr",
-                "pos": 100,
-                "ref": "A",
-                "alt": "T",
-            },
-            config,
-        )
-        text = result["content"][0]["text"]
-        assert "Invalid" in text
+        with pytest.raises(ToolInputError, match="Invalid"):
+            await handle_get_variant_curation_summary(
+                {
+                    "file_path": small_bam_path,
+                    "chrom": "invalid_chr",
+                    "pos": 100,
+                    "ref": "A",
+                    "alt": "T",
+                },
+                config,
+            )
 
 
 class TestHandleScanVariants:

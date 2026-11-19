@@ -34,6 +34,10 @@ def _serialize_reads_columnar(reads: list[AlignedRead], include_sequence: bool) 
         "mismatches": [r.mismatches for r in reads],
     }
 
+    if any(r.mismatches_truncated for r in reads):
+        # Per-read marker: that read's ``mismatches`` stops at READ_MAX_MISMATCHES.
+        cols["mismatches_truncated"] = [r.mismatches_truncated for r in reads]
+
     if include_sequence:
         cols["sequence"] = [r.sequence for r in reads]
         # Base qualities ride along with the sequence — only useful at base-level

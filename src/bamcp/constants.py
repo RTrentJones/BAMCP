@@ -59,6 +59,21 @@ REGION_CACHE_MAX_BYTES = 512 * 1024 * 1024
 # this pool and cannot starve the event loop's default executor.
 PARSE_MAX_CONCURRENCY = 8
 
+# Per-call VCF bounds. A 1000 Genomes per-chromosome VCF (2,504 samples) costs ~1 MB of Python
+# objects per record when every FORMAT field of every sample is materialized, so a 1 Mb window
+# could exceed a 2 GB container. At most VCF_MAX_RECORDS records are read per call (the rest are
+# reported as ``vcf_truncated`` in applied_filters); a record with more than
+# VCF_MAX_SAMPLES_DETAIL samples keeps only the GT of its first VCF_MAX_SAMPLES_DETAIL samples
+# (``samples_truncated`` + the full ``sample_count`` on the variant).
+VCF_MAX_RECORDS = 5_000
+VCF_MAX_SAMPLES_DETAIL = 16
+# Per-read payload bounds for fetch_region. max_reads caps the read count, not each read's size:
+# a long or noisy read could carry thousands of mismatches, so each read keeps at most
+# READ_MAX_MISMATCHES (``mismatches_truncated`` marks the read), and read extraction stops (the
+# existing ``reads_truncated`` flag) once the estimated read payload passes READ_PAYLOAD_MAX_BYTES.
+READ_MAX_MISMATCHES = 1_000
+READ_PAYLOAD_MAX_BYTES = 64 * 1024 * 1024
+
 # Auth and integrations
 DEFAULT_TOKEN_EXPIRY_SECONDS = 3_600
 # When auth is enabled with no explicit BAMCP_REQUIRED_SCOPES, require this scope so tokens
@@ -129,6 +144,9 @@ SCAN_VARIANTS_MIN_CHUNK_SIZE = 1_000
 SCAN_VARIANTS_CHUNK_TARGET_SECONDS = 2.0
 SCAN_VARIANTS_MAX_REGION = 250_000_000
 SCAN_VARIANTS_MAX_RESULTS = 500
+# get_variants returns at most this many variants (``truncated`` + ``total_candidates`` in
+# applied_filters); get_region_summary lists at most this many variant lines.
+GET_VARIANTS_MAX_RESULTS = 1_000
 
 # UI constants
 VIEWER_RESOURCE_URI = "ui://bamcp/viewer"

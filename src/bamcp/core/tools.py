@@ -2097,6 +2097,7 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     warning on any mismatch against the BAM.
     """
     from .reference import normalize_build_name
+    from .validation import validate_gene_symbol
 
     def _err(msg: str, **extra: Any) -> dict:
         return {"content": [{"type": "text", "text": json.dumps({"error": msg, **extra})}]}
@@ -2104,6 +2105,7 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     symbol = args.get("symbol", "")
     if not symbol:
         raise ToolInputError("search_gene requires 'symbol'")
+    validate_gene_symbol(symbol)  # Entrez query-term injection guard
 
     file_path = args.get("file_path")
     requested = normalize_build_name(args["build"]) if args.get("build") else None

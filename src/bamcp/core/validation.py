@@ -48,6 +48,56 @@ ALLOWED_REFERENCE_EXTENSIONS = (".fa", ".fasta", ".fa.gz", ".fasta.gz", ".fna", 
 ALLOWED_REMOTE_PORTS = (80, 443)
 _REMOTE_SCHEMES = tuple(s.split("://", 1)[0] for s in REMOTE_FILE_SCHEMES)
 
+# Anything that *starts* like a URI scheme ("name:") is a URL to htslib, not a local path.
+# htslib's own scheme sniffing (hfile.c) accepts letters, digits, '+', '-' and '.' before
+# the ':', so match that superset: ``http:/127.0.0.1:40409/x.vcf.gz`` (single slash) has no
+# "://" but htslib still fetches it over HTTP, and data:/ftp:/file:/s3:/gs: reach other
+# handlers. Only the exact ``http://`` / ``https://`` prefixes are routed to the SSRF-checked
+# remote branch; every other scheme-looking value is rejected.
+_URI_SCHEME_RE = re.compile(r"^[A-Za-z0-9+.-]+:")
+
+LOCAL_FILES_DISABLED_MESSAGE = "Local files are disabled on this server"
+
+
+def _is_remote_source(path: str, config: BAMCPConfig, what: str) -> bool:
+    """Classify a caller-supplied data source as remote (True) or local (False).
+
+    Raises ValueError for any scheme other than exact ``http://``/``https://``, for a local
+    path that embeds a URL or htslib's ``##idx##`` index syntax, and — before any filesystem
+    access, so there is no file-existence oracle — for any local path when the operator has
+    disabled local files (``BAMCP_ALLOW_LOCAL_FILES=false``).
+    """
+    if _URI_SCHEME_RE.match(path):
+        if not path.startswith(REMOTE_FILE_SCHEMES):
+            raise ValueError(
+                f"Scheme not supported for {what}: only http:// and https:// URLs are allowed"
+            )
+        if not config.allow_remote_files:
+            raise ValueError("Remote files are disabled")
+        return True
+    if "://" in path or "##idx##" in path:
+        raise ValueError(f"Scheme not supported for {what}: embedded URLs are not allowed")
+    if not config.allow_local_files:
+        raise ValueError(LOCAL_FILES_DISABLED_MESSAGE)
+    return False
+
+
+def _check_allowed_dirs(path: str, config: BAMCPConfig, label: str) -> None:
+    """Enforce ``allowed_directories`` (when configured) on a resolved local path."""
+    if not config.allowed_directories:
+        return
+    try:
+        abs_path = Path(path).resolve()
+    except OSError as e:
+        raise ValueError(f"Invalid {label.lower()}: {path}") from e
+    for d in config.allowed_directories:
+        try:
+            if abs_path.is_relative_to(Path(d).resolve()):
+                return
+        except OSError:
+            continue
+    raise ValueError(f"{label} is not in allowed directories")
+
 
 def _ext_target(path_or_url: str) -> str:
     """Lower-cased string to run the file-extension check against.
@@ -239,14 +289,7 @@ def validate_path(file_path: str, config: BAMCPConfig) -> None:
     if len(file_path) > MAX_FILE_PATH_LENGTH:
         raise ValueError(f"File path too long (max {MAX_FILE_PATH_LENGTH} characters)")
 
-    # Check for remote URLs
-    if "://" in file_path:
-        if not config.allow_remote_files:
-            raise ValueError("Remote files are disabled")
-
-        if not file_path.startswith(REMOTE_FILE_SCHEMES):
-            raise ValueError(f"Scheme not supported for remote file: {file_path}")
-
+    if _is_remote_source(file_path, config, "remote file"):
         # Same extension policy as local files, judged on the URL *path* so a signed
         # URL's query string neither defeats nor breaks the check.
         if not any(_ext_target(file_path).endswith(ext) for ext in ALLOWED_FILE_EXTENSIONS):
@@ -263,25 +306,7 @@ def validate_path(file_path: str, config: BAMCPConfig) -> None:
     if not any(lower_path.endswith(ext) for ext in ALLOWED_FILE_EXTENSIONS):
         raise ValueError(f"Unsupported file type. Allowed extensions: {ALLOWED_FILE_EXTENSIONS}")
 
-    # Check local files if restrictions are configured
-    if config.allowed_directories:
-        try:
-            abs_path = Path(file_path).resolve()
-        except OSError as e:
-            raise ValueError(f"Invalid path: {file_path}") from e
-
-        allowed = False
-        for d in config.allowed_directories:
-            try:
-                allowed_dir = Path(d).resolve()
-                if abs_path.is_relative_to(allowed_dir):
-                    allowed = True
-                    break
-            except OSError:
-                continue
-
-        if not allowed:
-            raise ValueError("Path is not in allowed directories")
+    _check_allowed_dirs(file_path, config, "Path")
 
     # Surface a clean error for a missing local file instead of a cryptic pysam
     # failure deeper in the call stack. Checked last so allow-list violations take
@@ -296,11 +321,7 @@ def validate_variant_file_path(file_path: str, config: BAMCPConfig) -> None:
         raise ValueError(f"File path too long (max {MAX_FILE_PATH_LENGTH} characters)")
 
     ext_target = _ext_target(file_path)
-    if "://" in file_path:
-        if not config.allow_remote_files:
-            raise ValueError("Remote files are disabled")
-        if not file_path.startswith(REMOTE_FILE_SCHEMES):
-            raise ValueError(f"Scheme not supported for remote file: {file_path}")
+    if _is_remote_source(file_path, config, "remote file"):
         if not any(ext_target.endswith(ext) for ext in ALLOWED_VARIANT_FILE_EXTENSIONS):
             raise ValueError(
                 "Unsupported variant file type. "
@@ -314,14 +335,12 @@ def validate_variant_file_path(file_path: str, config: BAMCPConfig) -> None:
             f"Unsupported variant file type. Allowed extensions: {ALLOWED_VARIANT_FILE_EXTENSIONS}"
         )
 
-    if config.allowed_directories:
-        try:
-            abs_path = Path(file_path).resolve()
-        except OSError as e:
-            raise ValueError(f"Invalid path: {file_path}") from e
+    _check_allowed_dirs(file_path, config, "Path")
 
-        if not any(abs_path.is_relative_to(Path(d).resolve()) for d in config.allowed_directories):
-            raise ValueError("Path is not in allowed directories")
+    # Checked after the allow-list (no existence oracle outside allowed directories). Also
+    # guarantees the value names a real local file, so nothing else reaches htslib's opener.
+    if not Path(file_path).is_file():
+        raise FileNotFoundError(f"Variant file not found: {file_path}")
 
 
 def validate_reference_path(reference_path: str, config: BAMCPConfig) -> None:
@@ -339,11 +358,13 @@ def validate_reference_path(reference_path: str, config: BAMCPConfig) -> None:
         raise ValueError(f"Reference path too long (max {MAX_FILE_PATH_LENGTH} characters)")
 
     ext_target = _ext_target(reference_path)
-    if "://" in reference_path:
-        if not config.allow_remote_files:
-            raise ValueError("Remote files are disabled")
-        if not reference_path.startswith(REMOTE_FILE_SCHEMES):
-            raise ValueError(f"Scheme not supported for remote reference: {reference_path}")
+    # The operator's own BAMCP_REFERENCE is trusted configuration, not a caller-chosen path:
+    # naming it explicitly must keep working when caller-supplied local files are disabled.
+    if config.reference and reference_path == config.reference:
+        if not Path(reference_path).is_file():
+            raise FileNotFoundError("The server's configured reference file was not found")
+        return
+    if _is_remote_source(reference_path, config, "remote reference"):
         if not any(ext_target.endswith(ext) for ext in ALLOWED_REFERENCE_EXTENSIONS):
             raise ValueError(
                 "Unsupported reference file type. "
@@ -357,13 +378,7 @@ def validate_reference_path(reference_path: str, config: BAMCPConfig) -> None:
             f"Unsupported reference file type. Allowed extensions: {ALLOWED_REFERENCE_EXTENSIONS}"
         )
 
-    if config.allowed_directories:
-        try:
-            abs_path = Path(reference_path).resolve()
-        except OSError as e:
-            raise ValueError(f"Invalid reference path: {reference_path}") from e
-        if not any(abs_path.is_relative_to(Path(d).resolve()) for d in config.allowed_directories):
-            raise ValueError("Reference path is not in allowed directories")
+    _check_allowed_dirs(reference_path, config, "Reference path")
 
     if not Path(reference_path).is_file():
         raise FileNotFoundError(f"Reference file not found: {reference_path}")
@@ -387,6 +402,20 @@ def validate_data_sources(
         validate_reference_path(reference, config)
     if vcf_path:
         validate_variant_file_path(vcf_path, config)
+
+
+# Gene symbols are interpolated into an NCBI Entrez ``term`` query; restrict them to the
+# HGNC-style alphabet so a caller cannot inject Entrez query syntax ([field], AND/OR, quotes).
+GENE_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}\Z")
+
+
+def validate_gene_symbol(symbol: str) -> None:
+    """Reject a gene symbol that is not 1-40 chars of letters/digits/'.'/'_'/'-'."""
+    if not isinstance(symbol, str) or not GENE_SYMBOL_PATTERN.match(symbol):
+        raise ValueError(
+            "Invalid gene symbol: expected 1-40 letters, digits, '.', '_' or '-' "
+            "(e.g. BRCA1, HLA-A, C4orf3)"
+        )
 
 
 def validate_variant_input(chrom: str, pos: int, ref: str, alt: str) -> str | None:

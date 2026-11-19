@@ -974,7 +974,9 @@ class BAMCPViewer {
                 altCell = `<span style="color:${baseColor(v.alt, '#333')};font-weight:bold">${escapeHtml(v.alt)}</span>`;
             }
             // A multi-sample VCF gets a small sample-count marker on the position cell.
-            const sampleCount = Array.isArray(v.sample_names) ? v.sample_names.length : 0;
+            const sampleCount = typeof v.sample_count === 'number'
+                ? v.sample_count
+                : (Array.isArray(v.sample_names) ? v.sample_names.length : 0);
             const sampleMarker = sampleCount > 1
                 ? ` <span class="sample-count" title="${sampleCount} samples genotyped">×${sampleCount}</span>`
                 : '';
@@ -1183,6 +1185,10 @@ class BAMCPViewer {
 
         const genotypes = formatGenotypes(variant.samples);
         if (genotypes.length) {
+            const hidden = variant.samples_truncated && typeof variant.sample_count === 'number'
+                ? variant.sample_count - genotypes.length
+                : 0;
+            if (hidden > 0) genotypes.push(`…and ${hidden.toLocaleString()} more samples (not shown)`);
             const items = genotypes.map(g => `<li>${escapeHtml(g)}</li>`).join('');
             rows.push(`<span class="detail-key">Genotypes</span><ul class="genotype-list">${items}</ul>`);
         }

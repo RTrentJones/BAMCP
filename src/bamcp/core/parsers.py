@@ -9,6 +9,12 @@ from typing import Any
 import numpy as np
 import pysam
 
+from ..constants import (
+    READ_MAX_MISMATCHES,
+    READ_PAYLOAD_MAX_BYTES,
+    VCF_MAX_RECORDS,
+    VCF_MAX_SAMPLES_DETAIL,
+)
 from .validation import is_cram
 
 
@@ -36,6 +42,9 @@ class AlignedRead:
     is_reverse: bool
     mismatches: list[dict] = field(default_factory=list)
     soft_clips: list[SoftClip] = field(default_factory=list)
+    # True when the read carried more than READ_MAX_MISMATCHES in-region mismatches and
+    # ``mismatches`` keeps only the first READ_MAX_MISMATCHES (by reference position).
+    mismatches_truncated: bool = False
 
     # Paired-end fields
     mate_position: int | None = None
@@ -61,6 +70,9 @@ class RegionData:
     # prefix of the region's reads, so read-derived evidence is incomplete (coverage
     # and candidate VAF/depth come from uncapped passes and are unaffected).
     reads_truncated: bool = False
+    # True when the VCF overlay hit VCF_MAX_RECORDS: ``variants`` then holds only the VCF
+    # records up to the cap (in file order), so a VCF site's absence past it is not a call.
+    vcf_truncated: bool = False
     # The base-quality floor the region was fetched with, for read-derived evidence that
     # must apply the same filter as the candidate counts.
     min_baseq: int = 0
@@ -80,6 +92,13 @@ PILEUP_MAX_DEPTH = 1_000_000_000
 # within this many bases are grouped into one pileup interval — small enough to skip the
 # empty coverage between sparse sites, wide enough that clustered sites share a pass.
 SNV_PILEUP_MERGE_GAP = 1000
+
+# Approximate in-memory cost of one AlignedRead (CPython overheads included): fixed
+# overhead, per base (sequence char + quality-list slot), per mismatch dict. Shared by
+# fetch_region's READ_PAYLOAD_MAX_BYTES budget and the region cache's size estimate.
+READ_FIXED_BYTES = 600
+READ_BYTES_PER_BASE = 9
+MISMATCH_BYTES = 200
 
 # CIGAR operation codes
 CIGAR_SOFT_CLIP = 4  # S operation
@@ -519,8 +538,57 @@ def _sample_support(record: Any, idx: int) -> tuple[int, int] | None:
     return depth, alt_count
 
 
+def _record_samples(record: Any) -> tuple[dict[str, dict[str, Any]], int, bool]:
+    """``(samples, sample_count, samples_truncated)`` for one VCF record.
+
+    Up to VCF_MAX_SAMPLES_DETAIL samples keep every FORMAT field. A cohort VCF (1000
+    Genomes: 2,504 samples) would cost ~1 MB of Python objects per record that way, so above
+    the cap only the first VCF_MAX_SAMPLES_DETAIL samples are kept, with their GT alone; the
+    full count is reported so the reduction is never silent.
+    """
+    rec_samples = record.samples
+    count = len(rec_samples)
+    if count <= VCF_MAX_SAMPLES_DETAIL:
+        samples = {
+            sample_name: {
+                key: list(value) if isinstance(value, tuple) else value
+                for key, value in sample_data.items()
+            }
+            for sample_name, sample_data in rec_samples.items()
+        }
+        return samples, count, False
+    has_gt = "GT" in record.format
+    samples = {}
+    for i in range(VCF_MAX_SAMPLES_DETAIL):
+        sample = rec_samples[i]
+        gt = sample.get("GT") if has_gt else None
+        samples[sample.name] = {"GT": list(gt) if isinstance(gt, tuple) else gt}
+    return samples, count, True
+
+
+class VcfVariants(list):
+    """The variants :func:`load_vcf_variants` returns: a plain list plus ``truncated``.
+
+    ``truncated`` is True when the region held more than VCF_MAX_RECORDS records and only
+    the first VCF_MAX_RECORDS (file order) were read; callers surface it as
+    ``vcf_truncated`` (see :func:`vcf_truncated`).
+    """
+
+    truncated: bool = False
+
+
+def vcf_truncated(variants: Sequence[dict]) -> bool:
+    """Whether a :func:`load_vcf_variants` result stopped at VCF_MAX_RECORDS."""
+    return bool(getattr(variants, "truncated", False))
+
+
 def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
     """Load VCF/BCF records for a region as internal 0-based candidate variants.
+
+    At most VCF_MAX_RECORDS in-region records are read (file order); the result is a
+    :class:`VcfVariants` whose ``truncated`` says whether more remained. Per-record sample
+    detail is bounded by :func:`_record_samples` (``sample_count`` / ``samples_truncated``
+    on each variant).
 
     One variant per ALT allele, each trimmed to its minimal representation and
     classified as snv / mnp / indel / sv. Spanning-deletion ``*`` alleles are not
@@ -533,7 +601,8 @@ def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
         ValueError: For a VCF that cannot be region-queried (plain/unindexed .vcf).
     """
     contig, start, end = parse_region(region)
-    variants: list[dict] = []
+    variants = VcfVariants()
+    n_records = 0
     with pysam.VariantFile(vcf_path) as vcf:
         try:
             records = vcf.fetch(contig, start, end)
@@ -547,6 +616,10 @@ def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
             pos0 = int(record.pos) - 1
             if pos0 < start or pos0 >= end:
                 continue
+            if n_records >= VCF_MAX_RECORDS:
+                variants.truncated = True
+                break
+            n_records += 1
             info_dp = _info_value(record, "DP", 0) or 0
             af_value = _info_value(record, "AF", 0.0)
             af_values = af_value if isinstance(af_value, tuple) else (af_value,)
@@ -560,13 +633,7 @@ def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
                 else None
             )
             sv_len = _info_value(record, "SVLEN")
-            samples = {
-                sample_name: {
-                    key: list(value) if isinstance(value, tuple) else value
-                    for key, value in sample_data.items()
-                }
-                for sample_name, sample_data in record.samples.items()
-            }
+            samples, sample_count, samples_truncated = _record_samples(record)
             for idx, alt in enumerate(record.alts or []):
                 alt = str(alt)
                 if alt == "*":
@@ -603,6 +670,8 @@ def load_vcf_variants(vcf_path: str, region: str) -> list[dict]:
                         "source": "vcf",
                         "samples": samples,
                         "sample_names": list(samples.keys()),
+                        "sample_count": sample_count,
+                        "samples_truncated": samples_truncated,
                         "sv_type": sv_type,
                         "sv_end": sv_end,
                         # SVLEN is Number=A (one value per ALT); pick this ALT's.
@@ -805,16 +874,20 @@ def fetch_region(
 
         read_count = 0
         reads_truncated = False
+        # Estimated bytes of kept read payload (same per-read model as the region-cache
+        # budget): max_reads bounds the count, this bounds the size (long/noisy reads).
+        payload_bytes = 0
         for read in samfile.fetch(contig, start, end):
             if not read_passes_filters(read, min_mapq):
                 continue
 
             read_count += 1
-            if read_count > max_reads:
+            if read_count > max_reads or payload_bytes > READ_PAYLOAD_MAX_BYTES:
                 reads_truncated = True
                 break
 
             mismatches: list[dict] = []
+            mismatches_truncated = False
             if ref_seq and read.query_sequence:
                 try:
                     aligned_pairs = read.get_aligned_pairs(with_seq=True)
@@ -835,6 +908,9 @@ def fetch_region(
                     if start <= rpos < end:
                         query_base = read.query_sequence[qpos]
                         if ref_base and query_base != ref_base.upper():
+                            if len(mismatches) >= READ_MAX_MISMATCHES:
+                                mismatches_truncated = True
+                                break
                             mismatches.append(
                                 {
                                     "pos": rpos,
@@ -861,6 +937,11 @@ def fetch_region(
 
             # Extract soft clips from CIGAR
             soft_clips = extract_soft_clips(read)
+            payload_bytes += (
+                READ_FIXED_BYTES
+                + READ_BYTES_PER_BASE * (read.query_length or 0)
+                + MISMATCH_BYTES * len(mismatches)
+            )
 
             reads.append(
                 AlignedRead(
@@ -878,6 +959,7 @@ def fetch_region(
                     is_reverse=read.is_reverse,
                     mismatches=mismatches,
                     soft_clips=soft_clips,
+                    mismatches_truncated=mismatches_truncated,
                     mate_position=mate_position,
                     mate_contig=mate_contig,
                     insert_size=insert_size,

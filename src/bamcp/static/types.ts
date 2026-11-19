@@ -69,6 +69,10 @@ export interface Variant {
     depth: number;
     samples?: Record<string, Record<string, unknown>>;
     sample_names?: string[];
+    // Total samples in the VCF record; `samples`/`sample_names` hold at most the first 16
+    // (GT only) when `samples_truncated` is set.
+    sample_count?: number;
+    samples_truncated?: boolean;
     sv_type?: string | null;
     sv_end?: number | null;
     // Normalized to this ALT's SVLEN by the backend (load_vcf_variants), so a scalar.

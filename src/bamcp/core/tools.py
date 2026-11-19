@@ -41,6 +41,7 @@ from ..constants import (
     BAM_PARSE_TIMEOUT_SECONDS,
     COLD_START_TIMEOUT_SECONDS,
     DEFAULT_CACHE_TTL_SECONDS,
+    GET_VARIANTS_MAX_RESULTS,
     INDEL_DETECTION_MAX_REGION,
     INDEX_DOWNLOAD_TIMEOUT_SECONDS,
     PARSE_MAX_CONCURRENCY,
@@ -54,6 +55,7 @@ from ..constants import (
     SCAN_VARIANTS_MAX_RESULTS,
     SCAN_VARIANTS_MIN_CHUNK_SIZE,
     SCAN_VARIANTS_TIMEOUT_SECONDS,
+    VCF_MAX_RECORDS,
     VIEWER_RESOURCE_URI,
     WARM_INPUTS_MAX_ENTRIES,
 )
@@ -63,7 +65,10 @@ from .errors import ReferenceUnavailableError, ToolInputError
 from .parsers import (
     EXCLUDED_READ_FLAGS,
     MAX_REGION_SIZE,
+    MISMATCH_BYTES,
     OVERLAPPING_MATES_POLICY,
+    READ_BYTES_PER_BASE,
+    READ_FIXED_BYTES,
     RegionData,
     annotate_vcf_snv_support,
     fetch_candidate_variants_only,
@@ -75,6 +80,7 @@ from .parsers import (
     open_fasta,
     parse_region,
     register_reference_index,
+    vcf_truncated,
 )
 from .serialization import build_enhanced_variants, serialize_region_data
 from .validation import (
@@ -555,6 +561,16 @@ def _applied_filters(
     return filters
 
 
+def _vcf_truncation_filters(data: RegionData) -> dict[str, Any]:
+    """applied_filters entries for a VCF overlay that stopped at VCF_MAX_RECORDS (else empty).
+
+    Past the cap the VCF was not read, so a VCF site's absence there is not a call.
+    """
+    if not data.vcf_truncated:
+        return {}
+    return {"vcf_truncated": True, "vcf_max_records": VCF_MAX_RECORDS}
+
+
 def _format_filters_line(filters: dict[str, Any]) -> str:
     """Compact human-readable rendering of :func:`_applied_filters` for text summaries."""
     parts = [
@@ -572,6 +588,11 @@ def _format_filters_line(filters: dict[str, Any]) -> str:
     if filters.get("reads_truncated"):
         parts.append(
             "read list TRUNCATED at max_reads (SNV evidence from pileup; indel evidence incomplete)"
+        )
+    if filters.get("vcf_truncated"):
+        parts.append(
+            f"VCF TRUNCATED at {filters.get('vcf_max_records')} records "
+            "(later VCF sites not read; narrow the region)"
         )
     if "excluded_reads" in filters:
         parts.append(f"excluded reads: {'/'.join(filters['excluded_reads'])}")
@@ -633,14 +654,27 @@ def _approx_region_bytes(data: Any) -> int:
     Entry *count* alone does not bound memory: a full-mode 1 Mb region with max_reads reads can
     weigh tens of MB, so 128 of them would blow far past a 2 GB container. Estimates per read
     ~600 B of fixed overhead plus ~9 B/base (sequence char + quality-list slot), ~16 B per
-    coverage position, ~1 KB per variant dict, plus the reference string.
+    coverage position, ~1 KB per variant dict, plus the reference string. A VCF variant's
+    per-sample entries (``samples``: one dict per sample, ~200 B + ~100 B per FORMAT field,
+    plus the ``sample_names`` slot) are counted once per record — ALTs of one record share
+    the same ``samples`` dict.
     """
     total = 1024
     for read in getattr(data, "reads", None) or ():
-        total += 600 + 9 * len(getattr(read, "sequence", "") or "")
-        total += 200 * len(getattr(read, "mismatches", ()) or ())
+        total += READ_FIXED_BYTES + READ_BYTES_PER_BASE * len(getattr(read, "sequence", "") or "")
+        total += MISMATCH_BYTES * len(getattr(read, "mismatches", ()) or ())
     total += 16 * len(getattr(data, "coverage", None) or ())
-    total += 1024 * len(getattr(data, "variants", None) or ())
+    variants = getattr(data, "variants", None) or ()
+    total += 1024 * len(variants)
+    seen_samples: set[int] = set()
+    for v in variants:
+        samples = v.get("samples") if isinstance(v, dict) else None
+        if not samples or id(samples) in seen_samples:
+            continue
+        seen_samples.add(id(samples))
+        for sample_data in samples.values():
+            fields = len(sample_data) if isinstance(sample_data, dict) else 1
+            total += 200 + 100 * fields + 64
     total += len(getattr(data, "reference_sequence", None) or "")
     return total
 
@@ -1316,6 +1350,7 @@ async def _fetch_region_data(
                 coverage=[],
                 variants=vcf_variants,
                 reference_sequence=ref_seq,
+                vcf_truncated=vcf_truncated(vcf_variants),
             ),
             ttl,
         )
@@ -1340,6 +1375,7 @@ async def _fetch_region_data(
             _run_in_parse_pool(load_vcf_variants, vcf_path, region),
             timeout=BAM_PARSE_TIMEOUT_SECONDS,
         )
+        data.vcf_truncated = vcf_truncated(vcf_variants)
         if vcf_primary:
             # VCF is the authoritative variant set — drop BAMCP's local candidates,
             # but keep the reads/coverage so BAMCP can show evidence at each site.
@@ -1931,6 +1967,64 @@ async def probe_site(
     }
 
 
+def _cap_variants(variants: list[dict[str, Any]], cap: int) -> list[dict[str, Any]]:
+    """At most ``cap`` variants, chosen by a deterministic priority, in their input order.
+
+    Priority: VCF records first (the caller's authoritative calls), then BAMCP candidates by
+    descending alt-read count, then descending VAF, then ascending (position, ref, alt). The
+    kept variants stay in input order, so a list at or under the cap is returned unchanged.
+    """
+    if len(variants) <= cap:
+        return variants
+    ranked = sorted(
+        range(len(variants)),
+        key=lambda i: (
+            variants[i].get("source") != "vcf",
+            -(variants[i].get("alt_count") or 0),
+            -(variants[i].get("vaf") or 0.0),
+            variants[i]["position"],
+            str(variants[i].get("ref", "")),
+            str(variants[i].get("alt", "")),
+        ),
+    )
+    keep = sorted(ranked[:cap])
+    return [variants[i] for i in keep]
+
+
+def _select_get_variants(
+    data: RegionData, min_vaf: float, min_depth: int, min_alt_count: int
+) -> tuple[list[dict[str, Any]], int]:
+    """Filter, cap (GET_VARIANTS_MAX_RESULTS) and VCF-enhance get_variants' candidates.
+
+    Returns ``(private copies of the kept variants, total candidates passing the filters)``.
+    VCF records always pass the filters and keep their annotated read support, so capping
+    before :func:`enhance_vcf_variants` gives the same records as enhancing first.
+    """
+    passing = [
+        v for v in data.variants if _passes_candidate_filters(v, min_vaf, min_depth, min_alt_count)
+    ]
+    capped = _cap_variants(passing, GET_VARIANTS_MAX_RESULTS)
+    detected = enhance_vcf_variants(capped, data.reference_sequence, data.start)
+    return [dict(v) for v in detected], len(passing)
+
+
+def _finish_get_variants(scored: list[dict[str, Any]], payload: dict[str, Any]) -> str:
+    """Interpret, sort by position and JSON-encode get_variants' output (CPU-bound)."""
+    variants = sorted(
+        (annotate_interpretation(_one_based(v)) for v in scored),
+        key=lambda v: (v["position"], v["ref"], v["alt"]),
+    )
+    payload = {"variants": variants, "count": len(variants), **payload}
+    return json.dumps(payload)
+
+
+_RESULTS_TRUNCATION_NOTE = (
+    f"More than {GET_VARIANTS_MAX_RESULTS} variants passed the filters; only "
+    f"{GET_VARIANTS_MAX_RESULTS} are listed (VCF records first, then BAMCP candidates with the "
+    "most alt reads). Narrow the region or tighten min_vaf/min_depth/min_alt_count to see the rest."
+)
+
+
 @telemetry_wrapper("get_variants")
 async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Return variants without UI. Positions are 1-based (VCF/dbSNP convention).
@@ -1945,6 +2039,10 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
 
     Every variant carries ``artifact_risk``, ``confidence``, ``concerns`` and a plain-language
     ``interpretation`` (with a zygosity hint).
+
+    At most GET_VARIANTS_MAX_RESULTS variants are returned (see :func:`_cap_variants` for which
+    are kept); applied_filters then says ``truncated`` with ``total_candidates`` and the cap.
+    The filter/score/encode work runs off the event loop.
     """
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
@@ -1976,16 +2074,11 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     # VCF SNVs get the viewer's confidence/artifact contract from their annotated support;
     # BAMCP candidates are then scored per site (bounded) by _score_candidates. Copies only:
     # the fetched variant dicts live in the region cache.
-    detected = enhance_vcf_variants(data.variants, data.reference_sequence, data.start)
-    kept = [
-        dict(v) for v in detected if _passes_candidate_filters(v, min_vaf, min_depth, min_alt_count)
-    ]
+    kept, total_candidates = await asyncio.to_thread(
+        _select_get_variants, data, min_vaf, min_depth, min_alt_count
+    )
     scored, evidence_summary = await _score_candidates(
         file_path, region, reference, kept, data, config
-    )
-    variants = sorted(
-        (annotate_interpretation(_one_based(v)) for v in scored),
-        key=lambda v: (v["position"], v["ref"], v["alt"]),
     )
 
     filters = _applied_filters(
@@ -1997,11 +2090,15 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         reference_source=resolved.source,
     )
     filters["per_site_evidence"] = evidence_summary
+    filters.update(_vcf_truncation_filters(data))
+    filters["max_results"] = GET_VARIANTS_MAX_RESULTS
+    filters["truncated"] = total_candidates > GET_VARIANTS_MAX_RESULTS
+    filters["total_candidates"] = total_candidates
+    if filters["truncated"]:
+        filters["truncation_note"] = _RESULTS_TRUNCATION_NOTE
     if resolved.note:
         filters["reference_note"] = resolved.note
     payload: dict[str, Any] = {
-        "variants": variants,
-        "count": len(variants),
         "variant_source": variant_source,
         "coordinate_system": _LLM_COORDINATE_SYSTEM,
         "variant_type": "candidate",
@@ -2009,8 +2106,8 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
         "filter_note": _FILTER_ABSENCE_NOTE,
         "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
     }
-
-    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+    text = await asyncio.to_thread(_finish_get_variants, scored, payload)
+    return {"content": [{"type": "text", "text": text}]}
 
 
 @telemetry_wrapper("get_coverage")
@@ -2439,6 +2536,7 @@ async def _viewer_response(
         min_alt_count=config.min_alt_count,
         reference_source=resolved.source,
     )
+    filters.update(_vcf_truncation_filters(data))
     if resolved.note:
         filters["reference_note"] = resolved.note
     payload = serialize_region_data(data)
@@ -2538,7 +2636,9 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     """Handle get_region_summary tool call.
 
     Text-only summary for LLM reasoning — no UI metadata. Each variant line is followed by
-    its plain-language interpretation (zygosity hint, artifact risk, confidence).
+    its plain-language interpretation (zygosity hint, artifact risk, confidence). At most
+    GET_VARIANTS_MAX_RESULTS variants are listed (chosen as in get_variants, see
+    :func:`_cap_variants`); a truncated listing says so in its filters line.
     """
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
@@ -2568,12 +2668,27 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
         min_alt_count=min_alt_count,
         reference_source=resolved.source,
     )
+    filters.update(_vcf_truncation_filters(data))
+    total_variants = len(data.variants)
+    listed = data
+    if total_variants > GET_VARIANTS_MAX_RESULTS:
+        listed = replace(data, variants=_cap_variants(data.variants, GET_VARIANTS_MAX_RESULTS))
+        filters["variants_listed"] = GET_VARIANTS_MAX_RESULTS
     summary_lines = [
         f"Region: {format_region(data.contig, data.start, data.end)}",
         f"Reads: {len(data.reads)}",
         f"Coverage: mean={mean_cov}x, max={max_cov}x",
         f"Candidate variants detected: {len(data.variants)}",
         f"Filters applied: {_format_filters_line(filters)}",
+        *(
+            [
+                f"Variant listing TRUNCATED: {GET_VARIANTS_MAX_RESULTS} of {total_variants} "
+                "listed below (VCF records first, then the candidates with the most alt reads); "
+                "narrow the region to see the rest."
+            ]
+            if listed is not data
+            else []
+        ),
         _FILTER_ABSENCE_NOTE,
         f"Coordinate system: {_LLM_COORDINATE_SYSTEM}",
         _CANDIDATE_VARIANT_DISCLAIMER,
@@ -2581,14 +2696,20 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
     if resolved.note:
         summary_lines.insert(5, f"Reference: {resolved.note}")
 
+    summary_lines.extend(await asyncio.to_thread(_summary_variant_lines, listed))
+    return {"content": [{"type": "text", "text": "\n".join(summary_lines)}]}
+
+
+def _summary_variant_lines(data: RegionData) -> list[str]:
+    """get_region_summary's per-variant lines (evidence scoring is CPU-bound: run off-loop)."""
+    lines: list[str] = []
     enhanced, _ = build_enhanced_variants(data)
     for v in enhanced:
         # 1-based position (VCF/dbSNP convention); SV type/span + per-sample genotypes
         # surfaced by _format_variant_line(), then the plain-language reading.
-        summary_lines.append(_format_variant_line(v))
-        summary_lines.append("    " + annotate_interpretation(v, one_based=False)["interpretation"])
-
-    return {"content": [{"type": "text", "text": "\n".join(summary_lines)}]}
+        lines.append(_format_variant_line(v))
+        lines.append("    " + annotate_interpretation(v, one_based=False)["interpretation"])
+    return lines
 
 
 @telemetry_wrapper("lookup_clinvar")

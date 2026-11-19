@@ -285,26 +285,21 @@ def _schedule_services_close(services: BAMCPServices) -> None:
 def get_services(config: BAMCPConfig) -> BAMCPServices:
     """Return the :class:`BAMCPServices` for ``config``, creating it on first use.
 
-    Keyed by ``id(config)`` with an **identity guard**: a cached entry is reused only if it
-    still belongs to *this* config object, so a reused ``id()`` (after an old config was
-    collected — its strong ref here having been dropped by :func:`close_external_clients` or
-    LRU eviction) can never alias the wrong services. The registry is a bounded LRU; an evicted or
-    stale-overwritten services has its HTTP clients closed (scheduled on the loop) so it does not
-    leak connections. Call :func:`close_external_clients` for prompt, clean teardown.
+    Keyed by ``id(config)``. That key cannot alias another config: every entry holds a strong
+    reference to its own config (``services.config``), so a registered config is never
+    collected and its ``id()`` never reused while the entry exists. An entry leaves only via
+    :func:`close_external_clients` or LRU eviction (which closes its HTTP clients, scheduled on
+    the loop, so it does not leak connections). Call :func:`close_external_clients` for prompt,
+    clean teardown.
     """
     key = id(config)
     services = _services_registry.get(key)
-    if services is not None and services.config is config:
+    if services is not None:
         _services_registry.move_to_end(key)
         return services
 
-    # Stale entry for a reused id() (belonged to a now-dead config) — close it before replacing.
-    if services is not None:
-        _schedule_services_close(services)
-
     services = BAMCPServices.from_config(config)
     _services_registry[key] = services
-    _services_registry.move_to_end(key)
     while len(_services_registry) > _SERVICES_REGISTRY_MAX:
         _, evicted = _services_registry.popitem(last=False)
         _schedule_services_close(evicted)
@@ -333,12 +328,10 @@ def get_gene_client(config: BAMCPConfig) -> GeneClient:
 
 async def close_external_clients(config: BAMCPConfig) -> None:
     """Close this server's external HTTP clients, clear caches, and drop the registry entry."""
-    key = id(config)
-    services = _services_registry.get(key)
-    if services is not None and services.config is config:
-        await services.aclose()
+    services = _services_registry.pop(id(config), None)
+    if services is not None:
         # Explicit lifecycle removal so a closed server leaves nothing behind.
-        _services_registry.pop(key, None)
+        await services.aclose()
 
 
 _CLINVAR_DISCLAIMER = (
@@ -977,7 +970,7 @@ async def _warm_remote_inputs(
     file_path: str,
     reference: str | None,
     index_path: str | None,
-    config: BAMCPConfig | None = None,
+    config: BAMCPConfig,
 ) -> None:
     """Give a cold remote BAM/CRAM or reference its one-off open under the cold-start budget.
 
@@ -986,8 +979,7 @@ async def _warm_remote_inputs(
     ``TimeoutError``; any other failure is left for the real parse to report with its own
     message (the input simply stays cold).
     """
-    if config is not None:
-        await _ensure_reference_indexes(reference, config)
+    await _ensure_reference_indexes(reference, config)
     cold_file = file_path if _is_remote(file_path) and file_path not in _warm_inputs else None
     cold_ref = reference if _is_remote(reference) and reference not in _warm_inputs else None
     if not cold_file and not cold_ref:
@@ -2308,8 +2300,10 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     from .reference import normalize_build_name
     from .validation import validate_gene_symbol
 
-    def _err(msg: str, **extra: Any) -> dict:
-        return {"content": [{"type": "text", "text": json.dumps({"error": msg, **extra})}]}
+    def _answer(status: str, **fields: Any) -> dict:
+        # Not-found / unavailable are ANSWERS (no isError), shaped like the lookup tools':
+        # not_found carries found=false + message; unavailable carries an error string.
+        return {"content": [{"type": "text", "text": json.dumps({**fields, "status": status})}]}
 
     symbol = args.get("symbol", "")
     if not symbol:
@@ -2334,10 +2328,10 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
             raise ToolInputError(f"Invalid file_path: {e}") from e
         except Exception as e:  # noqa: BLE001 — unreadable header: reconciliation impossible
             if requested is None:
-                return _err(
-                    f"could not read the BAM header to detect its build ({type(e).__name__}); "
-                    "pass 'build' explicitly (confirm it with list_contigs)",
-                    status=_LOOKUP_UNAVAILABLE,
+                return _answer(
+                    _LOOKUP_UNAVAILABLE,
+                    error=f"could not read the BAM header to detect its build "
+                    f"({type(e).__name__}); pass 'build' explicitly (confirm it with list_contigs)",
                 )
             info = {}
             warnings.append(
@@ -2377,14 +2371,19 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     except GeneLookupError as e:
         # NCBI unreachable / in-band error: the gene's existence is UNKNOWN, not disproven.
         logger.warning("Gene lookup unavailable for %s: %s", symbol, e)
-        return _err(
-            "Gene lookup unavailable (NCBI error); retry later",
-            status=_LOOKUP_UNAVAILABLE,
+        return _answer(
+            _LOOKUP_UNAVAILABLE,
+            error="Gene lookup unavailable (NCBI error); retry later",
             reason=str(e),
             genome_build=effective,
         )
     if result is None:
-        return _err(f"Gene {symbol!r} not found", status=_LOOKUP_NOT_FOUND, genome_build=effective)
+        return _answer(
+            _LOOKUP_NOT_FOUND,
+            found=False,
+            message=f"Gene {symbol!r} not found ({effective})",
+            genome_build=effective,
+        )
 
     # NCBI may not carry the requested assembly → result.build is what we actually got.
     if result.build == "unknown":
@@ -2678,21 +2677,20 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
         f"Coverage: mean={mean_cov}x, max={max_cov}x",
         f"Candidate variants detected: {len(data.variants)}",
         f"Filters applied: {_format_filters_line(filters)}",
-        *(
-            [
-                f"Variant listing TRUNCATED: {GET_VARIANTS_MAX_RESULTS} of {total_variants} "
-                "listed below (VCF records first, then the candidates with the most alt reads); "
-                "narrow the region to see the rest."
-            ]
-            if listed is not data
-            else []
-        ),
+    ]
+    if resolved.note:
+        summary_lines.append(f"Reference: {resolved.note}")
+    if listed is not data:
+        summary_lines.append(
+            f"Variant listing TRUNCATED: {GET_VARIANTS_MAX_RESULTS} of {total_variants} "
+            "listed below (VCF records first, then the candidates with the most alt reads); "
+            "narrow the region to see the rest."
+        )
+    summary_lines += [
         _FILTER_ABSENCE_NOTE,
         f"Coordinate system: {_LLM_COORDINATE_SYSTEM}",
         _CANDIDATE_VARIANT_DISCLAIMER,
     ]
-    if resolved.note:
-        summary_lines.insert(5, f"Reference: {resolved.note}")
 
     summary_lines.extend(await asyncio.to_thread(_summary_variant_lines, listed))
     return {"content": [{"type": "text", "text": "\n".join(summary_lines)}]}

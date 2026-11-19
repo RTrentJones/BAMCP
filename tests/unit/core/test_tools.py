@@ -2639,18 +2639,23 @@ class TestMediumRoadmapCoverage:
         assert id(cfg) not in _services_registry
 
     @pytest.mark.unit
-    def test_get_services_identity_guard_rebuilds_on_stale_entry(self):
-        """If an id() is reused, the guard rebuilds rather than aliasing stale services."""
+    def test_registry_keys_cannot_alias_a_dead_config(self):
+        """Every entry keeps its own config alive, so its id() key is never reused."""
+        import gc
+        import weakref
+
         from bamcp.core.tools import _services_registry, get_services
 
         cfg = BAMCPConfig()
-        stale_cfg = BAMCPConfig()
-        stale_services = get_services(stale_cfg)
-        # Simulate id() reuse: a stale services object parked under cfg's id.
-        _services_registry[id(cfg)] = stale_services
-        rebuilt = get_services(cfg)
-        assert rebuilt is not stale_services  # guard rejected the stale entry
-        assert rebuilt.config is cfg
+        ref = weakref.ref(cfg)
+        services = get_services(cfg)
+        del cfg
+        gc.collect()
+        assert ref() is not None  # held by the registry entry, not collected
+        assert services.config is ref()
+        for key, entry in _services_registry.items():
+            assert key == id(entry.config)
+        assert get_services(ref()) is services
 
 
 class TestSearchGeneBuildResolution:
@@ -3288,8 +3293,14 @@ class TestSearchGeneHonesty:
 
         self._client(monkeypatch, None)
         r = await handle_search_gene({"symbol": "NOPE1", "build": "GRCh38"}, BAMCPConfig())
+        assert not r.get("isError")
         p = json.loads(r["content"][0]["text"])
+        # Same not-found shape as lookup_clinvar / lookup_gnomad: an answer, not an error.
         assert p["status"] == "not_found"
+        assert p["found"] is False
+        assert "NOPE1" in p["message"]
+        assert "error" not in p
+        assert p["genome_build"] == "GRCh38"
 
     @pytest.mark.unit
     @pytest.mark.asyncio

@@ -347,7 +347,7 @@ def _open_alignment(
 
 
 # Locally cached .fai/.gzi for remote reference FASTAs (url -> (fai, gzi)), registered by
-# core.tools._ensure_reference_indexes. Without them every FastaFile open of a remote bgzip FASTA
+# core.remote._ensure_reference_indexes. Without them every FastaFile open of a remote bgzip FASTA
 # re-downloads its .fai and .gzi (seconds per call on the public 1000 Genomes server). Bounded LRU.
 _REFERENCE_INDEXES: OrderedDict[str, tuple[str, str | None]] = OrderedDict()
 _REFERENCE_INDEXES_MAX = 32
@@ -1045,7 +1045,7 @@ def detect_variants(
             ``sum(A,C,G,T)`` denominator understates depth and inflates VAF. Adding
             gap_depth restores the true spanning depth.
         min_alt_count: Minimum alt-supporting reads (1 = no floor). The tool layer applies
-            the configured floor itself; the contig scanner (``core.tools._scan_chunk``)
+            the configured floor itself; the contig scanner (``core.scan._scan_chunk``)
             passes it here so floor-failing noise never reaches its deletion pileup.
 
     Returns:

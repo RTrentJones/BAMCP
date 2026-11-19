@@ -7,6 +7,7 @@ import time
 import pytest
 
 from bamcp.config import BAMCPConfig
+from bamcp.core import scan as scan_mod
 from bamcp.core import tools
 from bamcp.core.errors import ToolInputError, sanitize_tool_exception
 
@@ -53,9 +54,9 @@ async def test_full_scan_matches_scan_contig(small_bam_path, ref_fasta_path, ref
 
 async def test_deadline_returns_partial_results(small_bam_path, ref_config, monkeypatch):
     """A slow chunk past the soft deadline yields truncated:true + what was scanned."""
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_CHUNK_SIZE", 100)
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_DEADLINE_SECONDS", 0.15)
-    real_chunk = tools._scan_chunk
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_CHUNK_SIZE", 100)
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_DEADLINE_SECONDS", 0.15)
+    real_chunk = scan_mod._scan_chunk
     calls = []
 
     def slow_chunk(*args, **kwargs):
@@ -63,7 +64,7 @@ async def test_deadline_returns_partial_results(small_bam_path, ref_config, monk
         time.sleep(0.06)
         return real_chunk(*args, **kwargs)
 
-    monkeypatch.setattr(tools, "_scan_chunk", slow_chunk)
+    monkeypatch.setattr(scan_mod, "_scan_chunk", slow_chunk)
     payload = _payload(
         await tools.handle_scan_variants(
             {"file_path": small_bam_path, "contig": "chr1"}, ref_config
@@ -133,17 +134,17 @@ async def test_region_and_contig_must_agree(small_bam_path, ref_config):
 
 async def test_hard_timeout_returns_partial_results(small_bam_path, ref_config, monkeypatch):
     """A single chunk hung past the hard timeout still answers with the completed chunks."""
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_CHUNK_SIZE", 100)
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_DEADLINE_SECONDS", 30.0)
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_TIMEOUT_SECONDS", 0.2)
-    real_chunk = tools._scan_chunk
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_CHUNK_SIZE", 100)
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_DEADLINE_SECONDS", 30.0)
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_TIMEOUT_SECONDS", 0.2)
+    real_chunk = scan_mod._scan_chunk
 
     def hang_second(*args, **kwargs):
         if args[3] >= 100:
             time.sleep(0.4)
         return real_chunk(*args, **kwargs)
 
-    monkeypatch.setattr(tools, "_scan_chunk", hang_second)
+    monkeypatch.setattr(scan_mod, "_scan_chunk", hang_second)
     payload = _payload(
         await tools.handle_scan_variants(
             {"file_path": small_bam_path, "contig": "chr1"}, ref_config
@@ -157,12 +158,12 @@ async def test_hard_timeout_returns_partial_results(small_bam_path, ref_config, 
 
 async def test_nothing_scanned_is_an_error(small_bam_path, ref_config, monkeypatch):
     """No header read at all → no partial answer to give → an error, not an empty result."""
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_TIMEOUT_SECONDS", 0.05)
 
     def stuck(*args, **kwargs):
         time.sleep(0.2)
 
-    monkeypatch.setattr(tools, "_scan_contig_progressive", stuck)
+    monkeypatch.setattr(scan_mod, "_scan_contig_progressive", stuck)
     with pytest.raises(ToolInputError, match="before any data"):
         await tools.handle_scan_variants(
             {"file_path": small_bam_path, "contig": "chr1"}, ref_config
@@ -217,12 +218,12 @@ async def test_other_value_errors_are_sanitized_not_echoed(small_bam_path, monke
     def boom(*_a, **_kw):
         raise ValueError(f"could not open {secret_ref}")
 
-    monkeypatch.setattr(tools, "_scan_contig_progressive", boom)
+    monkeypatch.setattr(scan_mod, "_scan_contig_progressive", boom)
 
     async def _noop(*_a, **_kw):
         return None
 
-    monkeypatch.setattr(tools, "_warm_remote_inputs", _noop)
+    monkeypatch.setattr(scan_mod, "_warm_remote_inputs", _noop)
     with pytest.raises(ValueError) as exc:
         await tools.handle_scan_variants({"file_path": small_bam_path, "contig": "chr1"}, config)
     assert not isinstance(exc.value, ToolInputError)
@@ -234,7 +235,7 @@ async def test_max_region_cap_is_reported_with_continuation(
 ):
     """A scan capped by SCAN_VARIANTS_MAX_REGION is truncated, with a next_region through the
     caller's requested stop — never truncated:false over an unscanned remainder."""
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_MAX_REGION", 300)
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_MAX_REGION", 300)
     payload = _payload(
         await tools.handle_scan_variants(
             {"file_path": small_bam_path, "contig": "chr1"}, ref_config
@@ -311,7 +312,7 @@ async def test_capped_scan_keeps_highest_vaf(small_bam_path, ref_fasta_path, mon
     ).variants  # fmt: skip
     if len({v["vaf"] for v in every}) < 2:
         pytest.skip("fixture has too few distinct VAFs to exercise the cap")
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_MAX_RESULTS", 1)
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_MAX_RESULTS", 1)
     payload = _payload(
         await tools.handle_scan_variants({"file_path": small_bam_path, "contig": "chr1"}, cfg)
     )

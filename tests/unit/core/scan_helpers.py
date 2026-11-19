@@ -1,4 +1,4 @@
-"""Run the production contig scanner (``tools._scan_contig_progressive``) synchronously.
+"""Run the production contig scanner (``core.scan._scan_contig_progressive``) synchronously.
 
 The scan used to have a second, test-only implementation in ``parsers``; tests now drive the
 code path ``scan_variants`` actually runs, with no deadline.
@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 
 from bamcp.constants import SCAN_VARIANTS_CHUNK_SIZE, SCAN_VARIANTS_MAX_REGION
-from bamcp.core import tools
+from bamcp.core import scan as scan_mod
 
 
 def scan(
@@ -25,10 +25,10 @@ def scan(
     max_region: int = SCAN_VARIANTS_MAX_REGION,
     min_alt_count: int | None = None,
     index_filename: str | None = None,
-) -> tools._ScanProgress:
+) -> scan_mod._ScanProgress:
     """Scan ``contig`` to completion; returns the filled-in progress record."""
-    progress = tools._ScanProgress()
-    tools._scan_contig_progressive(
+    progress = scan_mod._ScanProgress()
+    scan_mod._scan_contig_progressive(
         bam_path,
         contig,
         reference_path,

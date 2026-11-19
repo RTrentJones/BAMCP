@@ -2395,7 +2395,7 @@ class TestMediumRoadmapCoverage:
                 assert url == "https://example.com/sample.bam.bai"
                 return StreamContext()
 
-        monkeypatch.setattr(tools_module, "validate_remote_url", mock_validate_remote_url)
+        monkeypatch.setattr("bamcp.core.remote.validate_remote_url", mock_validate_remote_url)
         index_path = tmp_path / "sample.bai"
 
         result = await tools_module._download_index_streaming(
@@ -2435,7 +2435,7 @@ class TestMediumRoadmapCoverage:
             def stream(self, method, url):
                 return StreamContext()
 
-        monkeypatch.setattr(tools_module, "validate_remote_url", lambda url, cfg: None)
+        monkeypatch.setattr("bamcp.core.remote.validate_remote_url", lambda url, cfg: None)
 
         with pytest.raises(ValueError, match="exceeds configured maximum"):
             await tools_module._download_index_streaming(
@@ -2503,7 +2503,7 @@ class TestMediumRoadmapCoverage:
 
         from bamcp.core.tools import _get_cached_region, _set_cached_region
 
-        monkeypatch.setattr("bamcp.core.tools.REGION_CACHE_MAX_ENTRIES", 3)
+        monkeypatch.setattr("bamcp.core.services.REGION_CACHE_MAX_ENTRIES", 3)
         cache: OrderedDict = OrderedDict()
         for i in range(3):
             _set_cached_region(cache, (f"k{i}",), object(), ttl=3600)
@@ -2537,11 +2537,12 @@ class TestMediumRoadmapCoverage:
         import asyncio
         import threading
 
+        import bamcp.core.services as services_mod
         import bamcp.core.tools as tm
 
         # Cap concurrency at 2 for the test.
         gate = asyncio.Semaphore(2)
-        monkeypatch.setattr(tm, "_get_parse_gate", lambda: gate)
+        monkeypatch.setattr(services_mod, "_get_parse_gate", lambda: gate)  # looked up there
         running = []
         release = threading.Event()
 
@@ -2584,7 +2585,7 @@ class TestMediumRoadmapCoverage:
 
         import bamcp.core.tools as tm
 
-        monkeypatch.setattr(tm, "_SERVICES_REGISTRY_MAX", 2)
+        monkeypatch.setattr("bamcp.core.services._SERVICES_REGISTRY_MAX", 2)
         cfg_a = BAMCPConfig()
         svc_a = tm.get_services(cfg_a)
         svc_a._clinvar = AsyncMock()  # a client that aclose() must release
@@ -2608,7 +2609,7 @@ class TestMediumRoadmapCoverage:
         """Sync embedded churn (no loop) must still close evicted services' clients."""
         import bamcp.core.tools as tm
 
-        monkeypatch.setattr(tm, "_SERVICES_REGISTRY_MAX", 2)
+        monkeypatch.setattr("bamcp.core.services._SERVICES_REGISTRY_MAX", 2)
         cfg_a = BAMCPConfig()
         svc_a = tm.get_services(cfg_a)
 
@@ -2952,13 +2953,14 @@ class TestFetchRegionTimeoutMessage:
     @pytest.mark.unit
     async def test_warm_reference_small_region_gets_no_cold_hint(self, monkeypatch):
         import bamcp.core.tools as tools_mod
+        from bamcp.core import remote
 
         async def _boom(*args, **kwargs):
             raise asyncio.TimeoutError()
 
         ref = "https://example.com/warm.fa.gz"
         monkeypatch.setattr(tools_mod, "_fetch_region_data", _boom)
-        monkeypatch.setitem(tools_mod._warm_inputs, ref, None)
+        monkeypatch.setitem(remote._warm_inputs, ref, None)
         with pytest.raises(TimeoutError) as exc_info:
             await tools_mod._fetch_region_with_timeout("/x.bam", "chr1:1-100", ref, BAMCPConfig())
         assert "retrying" not in str(exc_info.value)

@@ -3,25 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import functools
 import json
 import logging
-import os
 import re
-import tempfile
-import threading
-import time
-import weakref
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field, replace
-from pathlib import Path
-from typing import Any, TypeVar
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from typing import Any
 
-import httpx
 import pysam
 
 from ..analysis.evidence import (
@@ -32,44 +21,46 @@ from ..analysis.evidence import (
     compute_confidence,
     enhance_vcf_variants,
 )
-from ..clients.clinvar import ClinVarClient
-from ..clients.genes import GeneClient, GeneLookupError
-from ..clients.gnomad import GnomadBuildError, GnomadClient, GnomadQueryError
-from ..clients.ncbi import NCBIUnavailableError, TokenBucketRateLimiter, ncbi_rate_limiter
+from ..clients.genes import GeneLookupError
 from ..config import BAMCPConfig
 from ..constants import (
     BAM_PARSE_TIMEOUT_SECONDS,
-    COLD_START_TIMEOUT_SECONDS,
     DEFAULT_CACHE_TTL_SECONDS,
     GET_VARIANTS_MAX_RESULTS,
     INDEL_DETECTION_MAX_REGION,
-    INDEX_DOWNLOAD_TIMEOUT_SECONDS,
-    PARSE_MAX_CONCURRENCY,
-    REGION_CACHE_MAX_BYTES,
-    REGION_CACHE_MAX_ENTRIES,
     REGION_TILE_SIZE,
-    SCAN_VARIANTS_CHUNK_SIZE,
-    SCAN_VARIANTS_CHUNK_TARGET_SECONDS,
-    SCAN_VARIANTS_DEADLINE_SECONDS,
-    SCAN_VARIANTS_MAX_REGION,
-    SCAN_VARIANTS_MAX_RESULTS,
-    SCAN_VARIANTS_MIN_CHUNK_SIZE,
-    SCAN_VARIANTS_TIMEOUT_SECONDS,
     VCF_MAX_RECORDS,
     VIEWER_RESOURCE_URI,
-    WARM_INPUTS_MAX_ENTRIES,
 )
 from ..middleware.telemetry import telemetry_wrapper
-from .cache import BAMIndexCache
+from . import remote as _remote
 from .errors import ReferenceUnavailableError, ToolInputError
 from .filters import failed_candidate_filters, passes_candidate_filters
+
+# Re-exports: the handlers moved to sibling modules stay importable (and patchable for
+# code that still looks them up here) as ``bamcp.core.tools.<name>``. A test that patches a
+# name must patch the module that looks it up at call time — see each module's docstring.
+from .lookups import (  # noqa: F401
+    _CLINVAR_DISCLAIMER,
+    _GNOMAD_DISCLAIMER,
+    _LOOKUP_DISABLED,
+    _LOOKUP_FOUND,
+    _LOOKUP_NOT_FOUND,
+    _LOOKUP_REASONS,
+    _LOOKUP_UNAVAILABLE,
+    _lookup_build,
+    _lookup_disabled,
+    _lookup_failure,
+    _lookup_not_found,
+    _lookup_result,
+    _validate_lookup_input,
+    handle_lookup_clinvar,
+    handle_lookup_gnomad,
+)
 from .parsers import (
     EXCLUDED_READ_FLAGS,
     MAX_REGION_SIZE,
-    MISMATCH_BYTES,
     OVERLAPPING_MATES_POLICY,
-    READ_BYTES_PER_BASE,
-    READ_FIXED_BYTES,
     RegionData,
     annotate_vcf_snv_support,
     fetch_candidate_variants_only,
@@ -78,383 +69,63 @@ from .parsers import (
     fetch_region,
     format_region,
     load_vcf_variants,
-    open_fasta,
     parse_region,
-    register_reference_index,
     vcf_truncated,
 )
+from .remote import (  # noqa: F401
+    _clear_warm_inputs,
+    _download_index_streaming,
+    _ensure_cached_index,
+    _ensure_reference_indexes,
+    _index_download_lock,
+    _index_http_client,
+    _is_remote,
+    _mark_warm,
+    _open_remote_inputs_sync,
+    _sibling_url,
+    _stream_index_to_file,
+    _try_download_index,
+    _warm_remote_inputs,
+)
+from .scan import (  # noqa: F401
+    _scan_chunk,
+    _scan_contig_progressive,
+    _ScanProgress,
+    handle_scan_variants,
+)
 from .serialization import build_enhanced_variants, serialize_region_data
+from .services import (  # noqa: F401
+    _PARSE_EXECUTOR,
+    _SERVICES_REGISTRY_MAX,
+    BAMCPServices,
+    _approx_region_bytes,
+    _cache_key,
+    _get_cached_region,
+    _get_parse_gate,
+    _local_fingerprint,
+    _parse_gates,
+    _pending_service_closes,
+    _RegionCacheEntry,
+    _run_in_parse_pool,
+    _schedule_services_close,
+    _services_registry,
+    _set_cached_region,
+    close_external_clients,
+    get_cache,
+    get_clinvar_client,
+    get_gene_client,
+    get_gnomad_client,
+    get_services,
+)
 from .validation import (
     is_cram,
     validate_path,
     validate_reference_path,
     validate_region,
-    validate_remote_url,
     validate_variant_file_path,
-    validate_variant_input,
 )
 
 logger = logging.getLogger(__name__)
-
-_T = TypeVar("_T")
-
-# All blocking pysam parses run in this dedicated, bounded pool rather than the event loop's
-# default executor, so a hung parse (wait_for abandons the await but can't cancel the C call)
-# can't starve unrelated async work. A truly cancellable parse would need a killable worker
-# *process*; that is a deliberate follow-up.
-_PARSE_EXECUTOR = ThreadPoolExecutor(
-    max_workers=PARSE_MAX_CONCURRENCY, thread_name_prefix="bamcp-parse"
-)
-# Submission gate: a plain ThreadPoolExecutor has an UNBOUNDED work queue, so gating on the pool
-# alone isn't real backpressure — a burst of parses (or hung workers) would let submissions pile
-# up in that queue and grow memory. This semaphore bounds in-flight submissions to the worker
-# count, so the executor queue never grows; excess requests wait here (bounded by the async
-# request count) instead. A permit is held until the underlying thread truly finishes (released
-# via a done-callback, and the future is shielded from await-cancellation), so a hung parse keeps
-# occupying its slot rather than freeing it for a submission that would then queue behind it.
-#
-# asyncio primitives bind to the first loop that contends on them, so a single module-level
-# Semaphore breaks ("bound to a different event loop") once a second loop uses it — repeated
-# asyncio.run() in embedded/sync callers, or test suites. Keep one gate per running loop. In a
-# server there is exactly one loop, so the bound is unchanged.
-_parse_gates: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
-    weakref.WeakKeyDictionary()
-)
-
-
-def _get_parse_gate() -> asyncio.Semaphore:
-    """The submission gate for the running event loop (created on first use)."""
-    loop = asyncio.get_running_loop()
-    gate = _parse_gates.get(loop)
-    if gate is None:
-        gate = _parse_gates[loop] = asyncio.Semaphore(PARSE_MAX_CONCURRENCY)
-    return gate
-
-
-async def _run_in_parse_pool(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
-    """Run blocking parse work in the dedicated pool under the submission gate.
-
-    Drop-in awaitable for ``asyncio.to_thread`` (callers wrap it in their own ``wait_for``).
-    run_in_executor takes no kwargs, so bind them with partial to keep the call sites unchanged.
-    """
-    call = functools.partial(fn, **kwargs) if kwargs else fn
-    gate = _get_parse_gate()
-    await gate.acquire()
-    fut = asyncio.get_running_loop().run_in_executor(_PARSE_EXECUTOR, call, *args)
-    # Release only when the thread actually completes — not when an outer wait_for cancels the
-    # await — so hung parses keep holding their slot (real backpressure, bounded executor queue).
-    fut.add_done_callback(lambda _f: gate.release())
-    return await asyncio.shield(fut)
-
-
-_RegionCacheEntry = tuple[float, RegionData, int]
-
-
-@dataclass
-class BAMCPServices:
-    """Per-server runtime services: the index cache, external API clients, the
-    region cache, and per-index download locks.
-
-    These were previously module-level singletons, which meant two servers built
-    from different :class:`BAMCPConfig` instances in one process (tests, embedded
-    deployments) would silently share a cache directory, NCBI API key, or gnomAD
-    dataset — whichever config constructed them first. Bundling them here and
-    keying by config identity (see :func:`get_services`) keeps each server
-    isolated while preserving connection reuse within a server.
-    """
-
-    config: BAMCPConfig
-    cache: BAMIndexCache
-    # LRU-ordered (newest at the end); bounded by entry count AND approximate bytes in
-    # _set_cached_region. Values are (created_monotonic, data, approx_bytes).
-    region_cache: OrderedDict[tuple, _RegionCacheEntry] = field(default_factory=OrderedDict)
-    index_download_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
-    # Parsed BAM/CRAM headers (contig name/length lists), LRU-bounded by entry count
-    # (_HEADER_CACHE_MAX). Keyed by (file_path, local fingerprint) so a replaced local file
-    # is re-read. Feeds build/style detection for auto-reference and search_gene.
-    header_cache: OrderedDict[tuple, list[dict]] = field(default_factory=OrderedDict)
-    _clinvar: ClinVarClient | None = field(default=None, repr=False)
-    _gnomad: GnomadClient | None = field(default=None, repr=False)
-    _genes: GeneClient | None = field(default=None, repr=False)
-    # ONE token bucket for every NCBI E-utilities caller (ClinVar + Gene): NCBI's
-    # 3 req/s (10 with a key) limit is per caller, not per database.
-    _ncbi_limiter: TokenBucketRateLimiter | None = field(default=None, repr=False)
-
-    @classmethod
-    def from_config(cls, config: BAMCPConfig) -> BAMCPServices:
-        cache = BAMIndexCache(
-            config.cache_dir, config.cache_ttl, max_total_bytes=config.max_index_cache_bytes
-        )
-        # Sweep index dirs left behind by expired sessions (e.g. a crashed process whose
-        # atexit cleanup never ran) so the shared cache dir can't accumulate forever.
-        cache.cleanup_expired_sessions()
-        return cls(config=config, cache=cache)
-
-    def ncbi_rate_limiter(self) -> TokenBucketRateLimiter:
-        if self._ncbi_limiter is None:
-            self._ncbi_limiter = ncbi_rate_limiter(self.config.ncbi_api_key)
-        return self._ncbi_limiter
-
-    def clinvar(self) -> ClinVarClient:
-        if self._clinvar is None:
-            self._clinvar = ClinVarClient(
-                api_key=self.config.ncbi_api_key,
-                genome_build=self.config.genome_build,
-                rate_limiter=self.ncbi_rate_limiter(),
-            )
-        return self._clinvar
-
-    def gnomad(self) -> GnomadClient:
-        if self._gnomad is None:
-            self._gnomad = GnomadClient(
-                dataset=self.config.gnomad_dataset, genome_build=self.config.genome_build
-            )
-        return self._gnomad
-
-    def genes(self) -> GeneClient:
-        if self._genes is None:
-            self._genes = GeneClient(
-                api_key=self.config.ncbi_api_key,
-                genome_build=self.config.genome_build,
-                rate_limiter=self.ncbi_rate_limiter(),
-            )
-        return self._genes
-
-    async def aclose(self) -> None:
-        """Close external HTTP clients and drop per-process caches.
-
-        Keeps the index cache instance (and its session id) so callers can reuse
-        the session; only the network clients and transient caches are released.
-        """
-        clients = (self._clinvar, self._gnomad, self._genes)
-        await asyncio.gather(
-            *(client.close() for client in clients if client is not None),
-            return_exceptions=True,
-        )
-        self._clinvar = None
-        self._gnomad = None
-        self._genes = None
-        self._ncbi_limiter = None
-        self.region_cache.clear()
-        self.index_download_locks.clear()
-        self.header_cache.clear()
-
-    def clear_caches(self) -> int:
-        """Drop downloaded index files and the region cache; return index files removed.
-
-        Deliberately leaves the shared HTTP clients open: closing them here would make any
-        in-flight ClinVar/gnomAD/gene lookup fail with ``RuntimeError`` (closed client).
-        """
-        removed = self.cache.cleanup_session()
-        self.region_cache.clear()
-        self.header_cache.clear()
-        return removed
-
-
-# Services keyed by config identity so distinct server instances stay isolated. LRU-ordered and
-# bounded so it cannot grow without limit across many short-lived configs (tests, embedded use);
-# in the common case a server has exactly one config, so this holds a single entry.
-_services_registry: OrderedDict[int, BAMCPServices] = OrderedDict()
-_SERVICES_REGISTRY_MAX = 64
-# Strong refs to in-flight eviction-close tasks so they aren't GC'd before completing.
-_pending_service_closes: set[asyncio.Task] = set()
-
-
-def _schedule_services_close(services: BAMCPServices) -> None:
-    """Close an evicted/replaced services' HTTP clients so they don't leak.
-
-    ``get_services`` is synchronous but ``aclose`` is async. When called from within a running
-    loop (the normal request path) schedule it as a task; when called from sync embedded code
-    with no loop, close it synchronously with ``asyncio.run`` — a sync caller can still have
-    lazily created ``httpx.AsyncClient``s (they don't require a loop to construct), so we must
-    not silently skip the close there.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        try:
-            asyncio.run(services.aclose())
-        except Exception:  # noqa: BLE001 — cleanup must never break eviction
-            logger.debug("failed to close evicted services synchronously", exc_info=True)
-        return
-    task = loop.create_task(services.aclose())
-    _pending_service_closes.add(task)
-    task.add_done_callback(_pending_service_closes.discard)
-
-
-def get_services(config: BAMCPConfig) -> BAMCPServices:
-    """Return the :class:`BAMCPServices` for ``config``, creating it on first use.
-
-    Keyed by ``id(config)``. That key cannot alias another config: every entry holds a strong
-    reference to its own config (``services.config``), so a registered config is never
-    collected and its ``id()`` never reused while the entry exists. An entry leaves only via
-    :func:`close_external_clients` or LRU eviction (which closes its HTTP clients, scheduled on
-    the loop, so it does not leak connections). Call :func:`close_external_clients` for prompt,
-    clean teardown.
-    """
-    key = id(config)
-    services = _services_registry.get(key)
-    if services is not None:
-        _services_registry.move_to_end(key)
-        return services
-
-    services = BAMCPServices.from_config(config)
-    _services_registry[key] = services
-    while len(_services_registry) > _SERVICES_REGISTRY_MAX:
-        _, evicted = _services_registry.popitem(last=False)
-        _schedule_services_close(evicted)
-    return services
-
-
-def get_cache(config: BAMCPConfig) -> BAMIndexCache:
-    """Get or create the session index cache for this server's config."""
-    return get_services(config).cache
-
-
-def get_clinvar_client(config: BAMCPConfig) -> ClinVarClient:
-    """Get or create this server's ClinVar client."""
-    return get_services(config).clinvar()
-
-
-def get_gnomad_client(config: BAMCPConfig) -> GnomadClient:
-    """Get or create this server's gnomAD client."""
-    return get_services(config).gnomad()
-
-
-def get_gene_client(config: BAMCPConfig) -> GeneClient:
-    """Get or create this server's gene client."""
-    return get_services(config).genes()
-
-
-async def close_external_clients(config: BAMCPConfig) -> None:
-    """Close this server's external HTTP clients, clear caches, and drop the registry entry."""
-    services = _services_registry.pop(id(config), None)
-    if services is not None:
-        # Explicit lifecycle removal so a closed server leaves nothing behind.
-        await services.aclose()
-
-
-_CLINVAR_DISCLAIMER = (
-    "Note: This is research-grade information from ClinVar and is not intended "
-    "for clinical diagnostic use."
-)
-
-_GNOMAD_DISCLAIMER = (
-    "Note: This is research-grade population frequency data from gnomAD and is "
-    "not intended for clinical diagnostic use."
-)
-
-# Lookup outcome vocabulary for the external-database tools. The load-bearing distinction
-# is not_found (genuine absence — the variant is truly not in the database) vs. unavailable
-# (the lookup errored/timed out — absence is UNKNOWN and must NOT be read as "rare/benign").
-# Collapsing the two is the circular trap that turns an empty gnomAD result into false
-# rarity (PM2) evidence; the explicit status keeps callers honest.
-_LOOKUP_FOUND = "found"
-_LOOKUP_NOT_FOUND = "not_found"
-_LOOKUP_UNAVAILABLE = "unavailable"
-_LOOKUP_DISABLED = "disabled"
-
-
-def _lookup_result(
-    payload: dict[str, Any], *, status: str, disclaimer: str, build_info: dict[str, Any]
-) -> dict:
-    """Wrap an external-database lookup payload with an explicit ``status`` field so a
-    caller can tell a genuine not-found from a failed lookup (see the vocabulary above).
-
-    Every outcome — found, not_found, unavailable, disabled — carries ``build_info`` (the
-    assembly the lookup would be / was made in), so a caller never has to guess it.
-    """
-    payload = {**payload, **build_info, "status": status}
-    payload.setdefault("disclaimer", disclaimer)
-    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
-
-
-# Fixed, caller-safe reasons for an unavailable lookup. Upstream (NCBI / gnomAD) error text is
-# logged server-side only — it is unbounded third-party content and never echoed to callers.
-_LOOKUP_REASONS: dict[str, str] = {
-    "timeout": "the upstream service did not answer in time; absence is not established",
-    "network_error": "the upstream service could not be reached or returned an HTTP error; "
-    "absence is not established",
-    "upstream_error": "the upstream service returned an error or an incomplete/unparseable "
-    "result; absence is not established",
-    "unsupported_build": "the upstream service has no dataset for this genome build",
-}
-
-
-def _lookup_failure(
-    source: str,
-    reason_code: str,
-    *,
-    error: str,
-    disclaimer: str,
-    build_info: dict[str, Any],
-) -> dict:
-    """An ``unavailable`` lookup outcome with a fixed reason code + short message."""
-    return _lookup_result(
-        {
-            "error": error,
-            "reason_code": reason_code,
-            "reason": f"{source}: {_LOOKUP_REASONS[reason_code]}",
-        },
-        status=_LOOKUP_UNAVAILABLE,
-        disclaimer=disclaimer,
-        build_info=build_info,
-    )
-
-
-def _lookup_disabled(source: str, *, disclaimer: str, build_info: dict[str, Any]) -> dict:
-    return _lookup_result(
-        {"error": f"{source} lookup is disabled"},
-        status=_LOOKUP_DISABLED,
-        disclaimer=disclaimer,
-        build_info=build_info,
-    )
-
-
-def _lookup_not_found(
-    source: str, args: dict[str, Any], *, disclaimer: str, build_info: dict[str, Any]
-) -> dict:
-    variant = f"{args['chrom']}:{args['pos']} {args['ref']}>{args['alt']}"
-    return _lookup_result(
-        {
-            "found": False,
-            "message": f"No {source} entry found for {variant} ({build_info['genome_build']})",
-        },
-        status=_LOOKUP_NOT_FOUND,
-        disclaimer=disclaimer,
-        build_info=build_info,
-    )
-
-
-def _lookup_build(args: dict[str, Any], config: BAMCPConfig) -> tuple[str | None, str]:
-    """Resolve a lookup's genome build: explicit ``build`` arg, else the server default.
-
-    Returns ``(canonical_build, source)``; ``canonical_build`` is None for an unrecognized
-    explicit build (the caller reports invalid input rather than querying the wrong assembly).
-    """
-    from ..constants import normalize_genome_build
-
-    if args.get("build"):
-        return normalize_genome_build(args["build"]), "explicit"
-    return normalize_genome_build(config.genome_build), "server-default"
-
-
-def _validate_lookup_input(args: dict[str, Any], config: BAMCPConfig) -> tuple[str, str]:
-    """Validate a variant lookup's chrom/pos/ref/alt/build; raise ToolInputError if invalid.
-
-    Returns the resolved ``(build, build_source)``.
-    """
-    error = validate_variant_input(args["chrom"], args["pos"], args["ref"], args["alt"])
-    if error:
-        raise ToolInputError(error)
-    build, build_source = _lookup_build(args, config)
-    if build is None:
-        raise ToolInputError(
-            f"Unrecognized build {args.get('build')!r}; use GRCh37/hg19 or GRCh38/hg38"
-        )
-    return build, build_source
-
-
 _CANDIDATE_VARIANT_DISCLAIMER = (
     "Note: BAMCP reports research-grade candidate variants from read-level evidence; "
     "confirm with validated variant-calling and clinical workflows before use."
@@ -596,418 +267,6 @@ def _format_filters_line(filters: dict[str, Any]) -> str:
     if filters.get("indel_detection") is False:
         parts.append(f"indel detection {filters.get('indel_detection_note', 'off')}")
     return ", ".join(parts)
-
-
-def _local_fingerprint(path: str | None) -> tuple[int, int] | None:
-    """``(mtime_ns, size)`` of a local file, so a replaced file never serves stale cache hits.
-
-    Remote URLs (and unreadable paths) return None — remote objects carry no cheap identity
-    here, and an unreadable path fails in the parser anyway.
-    """
-    if not path or "://" in path:
-        return None
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None
-    return (st.st_mtime_ns, st.st_size)
-
-
-def _cache_key(
-    file_path: str,
-    region: str,
-    reference: str | None,
-    config: BAMCPConfig,
-    mode: str,
-    min_vaf: float | None,
-    min_depth: int | None,
-    vcf_path: str | None,
-    vcf_primary: bool = False,
-) -> tuple:
-    return (
-        mode,
-        file_path,
-        _local_fingerprint(file_path),
-        region,
-        reference,
-        _local_fingerprint(reference),
-        vcf_path,
-        _local_fingerprint(vcf_path),
-        vcf_primary,
-        config.max_reads,
-        config.min_mapq,
-        config.min_baseq,
-        min_vaf if min_vaf is not None else config.min_vaf,
-        min_depth if min_depth is not None else config.min_depth,
-    )
-
-
-def _approx_region_bytes(data: Any) -> int:
-    """Rough in-memory size of a cached RegionData (CPython object overheads included).
-
-    Entry *count* alone does not bound memory: a full-mode 1 Mb region with max_reads reads can
-    weigh tens of MB, so 128 of them would blow far past a 2 GB container. Estimates per read
-    ~600 B of fixed overhead plus ~9 B/base (sequence char + quality-list slot), ~16 B per
-    coverage position, ~1 KB per variant dict, plus the reference string. A VCF variant's
-    per-sample entries (``samples``: one dict per sample, ~200 B + ~100 B per FORMAT field,
-    plus the ``sample_names`` slot) are counted once per record — ALTs of one record share
-    the same ``samples`` dict.
-    """
-    total = 1024
-    for read in getattr(data, "reads", None) or ():
-        total += READ_FIXED_BYTES + READ_BYTES_PER_BASE * len(getattr(read, "sequence", "") or "")
-        total += MISMATCH_BYTES * len(getattr(read, "mismatches", ()) or ())
-    total += 16 * len(getattr(data, "coverage", None) or ())
-    variants = getattr(data, "variants", None) or ()
-    total += 1024 * len(variants)
-    seen_samples: set[int] = set()
-    for v in variants:
-        samples = v.get("samples") if isinstance(v, dict) else None
-        if not samples or id(samples) in seen_samples:
-            continue
-        seen_samples.add(id(samples))
-        for sample_data in samples.values():
-            fields = len(sample_data) if isinstance(sample_data, dict) else 1
-            total += 200 + 100 * fields + 64
-    total += len(getattr(data, "reference_sequence", None) or "")
-    return total
-
-
-def _get_cached_region(
-    region_cache: OrderedDict[tuple, _RegionCacheEntry], key: tuple, ttl: int
-) -> RegionData | None:
-    if ttl <= 0:
-        return None
-    cached = region_cache.get(key)
-    if cached is None:
-        return None
-    created, data, _ = cached
-    if (time.monotonic() - created) > ttl:
-        region_cache.pop(key, None)
-        return None
-    region_cache.move_to_end(key)  # mark most-recently-used
-    return data
-
-
-def _set_cached_region(
-    region_cache: OrderedDict[tuple, _RegionCacheEntry],
-    key: tuple,
-    data: RegionData,
-    ttl: int,
-) -> RegionData:
-    if ttl <= 0:
-        return data
-    size = _approx_region_bytes(data)
-    # One entry may take at most a quarter of the budget; bigger ones are served uncached
-    # rather than evicting most of the cache for a single payload.
-    if size > REGION_CACHE_MAX_BYTES // 4:
-        region_cache.pop(key, None)
-        return data
-    region_cache[key] = (time.monotonic(), data, size)
-    region_cache.move_to_end(key)
-    # Bound memory: evict least-recently-used entries beyond the count cap or byte budget.
-    total = sum(entry[2] for entry in region_cache.values())
-    while region_cache and (
-        len(region_cache) > REGION_CACHE_MAX_ENTRIES or total > REGION_CACHE_MAX_BYTES
-    ):
-        _, evicted = region_cache.popitem(last=False)
-        total -= evicted[2]
-    return data
-
-
-# Redirects for index downloads are followed by hand so every hop is re-validated
-# (httpx's follow_redirects would only validate the first URL).
-_INDEX_MAX_REDIRECTS = 5
-_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
-
-
-async def _download_index_streaming(
-    client: httpx.AsyncClient,
-    index_url: str,
-    index_path: str,
-    config: BAMCPConfig,
-) -> str | None:
-    """Download an index with SSRF revalidation, streaming, and a size cap.
-
-    Redirects are followed manually (at most ``_INDEX_MAX_REDIRECTS`` hops) and
-    every ``Location`` is re-run through :func:`validate_remote_url`, so an allowed
-    host cannot bounce the download to an internal address. The DNS-resolving
-    validation runs in a worker thread to keep the event loop responsive. A
-    partially written temp file is always removed on failure.
-    """
-    url = index_url
-    for _hop in range(_INDEX_MAX_REDIRECTS + 1):
-        await asyncio.to_thread(validate_remote_url, url, config)
-        async with client.stream("GET", url) as resp:
-            if resp.status_code in _REDIRECT_STATUSES:
-                location = resp.headers.get("location")
-                if not location:
-                    logger.warning("Index redirect without Location: %s", url)
-                    return None
-                url = urljoin(url, location)
-                continue
-            if resp.status_code == 404:
-                return None
-            if resp.status_code != 200:
-                logger.warning("Index download failed (%d): %s", resp.status_code, url)
-                return None
-            return await _stream_index_to_file(resp, index_path, config)
-    raise ValueError(f"Index download exceeded {_INDEX_MAX_REDIRECTS} redirects")
-
-
-async def _stream_index_to_file(resp: httpx.Response, index_path: str, config: BAMCPConfig) -> str:
-    """Stream ``resp`` into ``index_path`` atomically, enforcing the size cap."""
-    content_length = resp.headers.get("content-length")
-    if content_length and int(content_length) > config.max_remote_index_bytes:
-        raise ValueError("Remote index exceeds configured maximum size")
-
-    Path(index_path).parent.mkdir(parents=True, exist_ok=True)
-    total = 0
-    tmp_path = ""
-    try:
-        with tempfile.NamedTemporaryFile(
-            dir=str(Path(index_path).parent),
-            prefix=".index-",
-            suffix=".tmp",
-            delete=False,
-        ) as tmp:
-            tmp_path = tmp.name
-            async for chunk in resp.aiter_bytes():
-                total += len(chunk)
-                if total > config.max_remote_index_bytes:
-                    raise ValueError("Remote index exceeds configured maximum size")
-                tmp.write(chunk)
-        Path(tmp_path).replace(index_path)
-    except BaseException:
-        # Oversized body, network error mid-stream, cancellation, failed rename:
-        # never leave a ``.index-XXXX.tmp`` behind in the cache directory.
-        if tmp_path:
-            Path(tmp_path).unlink(missing_ok=True)
-        raise
-
-    logger.info("Cached index (%d bytes): %s", total, index_path)
-    return index_path
-
-
-def _sibling_url(url: str, suffix: str, *, replace_ext: bool = False) -> str:
-    """The URL of a file next to ``url`` (its index): edit only the URL *path*.
-
-    ``suffix`` is appended to the path (``x.bam`` → ``x.bam.bai``); with ``replace_ext`` the
-    final path segment's extension is replaced instead (``x.bam`` → ``x.bai``). The query
-    string is kept, so a signed URL (``x.bam?X-Amz-Signature=…``) yields ``x.bam.bai?…``
-    rather than a suffix appended inside the query. Fragments are dropped (``validate_remote_url``
-    rejects ``#`` anyway).
-    """
-    parts = urlsplit(url)
-    path = parts.path
-    if replace_ext:
-        head, _, segment = path.rpartition("/")
-        if "." in segment:
-            segment = segment.rsplit(".", 1)[0]
-        path = f"{head}/{segment}" if head or path.startswith("/") else segment
-    return urlunsplit((parts.scheme, parts.netloc, path + suffix, parts.query, ""))
-
-
-@contextlib.asynccontextmanager
-async def _index_download_lock(services: BAMCPServices, key: str) -> AsyncIterator[None]:
-    """Serialize downloads of one cached index across concurrent callers.
-
-    The per-key lock is dropped once nobody holds it so the dict can't grow one entry per
-    URL forever. A waiter already woken keeps its reference; at worst a racing new caller
-    creates a fresh lock and repeats an (atomic, idempotent) download.
-    """
-    locks = services.index_download_locks
-    lock = locks.setdefault(key, asyncio.Lock())
-    try:
-        async with lock:
-            yield
-    finally:
-        if not lock.locked() and locks.get(key) is lock:
-            del locks[key]
-
-
-def _index_http_client() -> httpx.AsyncClient:
-    # Redirects are followed by hand in _download_index_streaming (each hop re-validated).
-    return httpx.AsyncClient(timeout=INDEX_DOWNLOAD_TIMEOUT_SECONDS, follow_redirects=False)
-
-
-async def _try_download_index(
-    client: httpx.AsyncClient, url: str, path: str, config: BAMCPConfig, what: str
-) -> str | None:
-    """Download one index into the cache; None (logged) on a miss or a failure."""
-    try:
-        got = await _download_index_streaming(client, url, path, config)
-    except (httpx.RequestError, OSError, ValueError) as e:
-        logger.warning("%s download error for %s: %s", what, url, e)
-        return None
-    if got:
-        # The budget sweep lists and stats the whole cache dir: keep it off the event loop.
-        await asyncio.to_thread(get_services(config).cache.enforce_budget, keep=got)
-    return got
-
-
-async def _ensure_cached_index(file_path: str, config: BAMCPConfig) -> str | None:
-    """Download and cache the BAM/CRAM index file if not already cached.
-
-    For remote files, attempts to download the index (.bai/.crai) and store
-    it in the session cache directory. This avoids repeated downloads within
-    a session and allows pysam to use the local index.
-
-    Args:
-        file_path: Path or URL to the BAM/CRAM file.
-        config: Server configuration.
-
-    Returns:
-        Path to cached index file, or None if:
-        - File is local (no caching needed)
-        - Download failed (pysam will try its own resolution)
-    """
-    services = get_services(config)
-    cache = services.cache
-    index_path = cache.get_index_path(file_path)
-
-    # Local file - no caching needed
-    if index_path is None:
-        return None
-
-    # Already cached and valid
-    if await asyncio.to_thread(cache.is_valid, index_path):
-        logger.debug("Using cached index: %s", index_path)
-        return index_path
-
-    # Determine index URL - try common extensions (on the URL path, never inside a query).
-    if is_cram(file_path):
-        index_urls = [_sibling_url(file_path, ".crai")]
-    else:
-        # BAM files: try .bam.bai first, then .bai
-        index_urls = [
-            _sibling_url(file_path, ".bai"),
-            _sibling_url(file_path, ".bai", replace_ext=True),
-        ]
-
-    async with _index_download_lock(services, index_path):
-        if await asyncio.to_thread(cache.is_valid, index_path):
-            logger.debug("Using cached index after waiting for download lock: %s", index_path)
-            return index_path
-
-        logger.info("Downloading index for remote BAM: %s", file_path)
-        async with _index_http_client() as client:
-            for index_url in index_urls:
-                downloaded = await _try_download_index(
-                    client, index_url, index_path, config, "Index"
-                )
-                if downloaded:
-                    return downloaded
-                logger.debug("Index not found at %s, trying next", index_url)
-
-    # All attempts failed - let pysam try its own resolution
-    logger.warning("Could not download index for %s, falling back to pysam", file_path)
-    return None
-
-
-# Remote inputs (BAM/CRAM URLs, reference FASTA URLs) that have been opened successfully at
-# least once in this process. The first open of a remote input fetches its header (and, for a
-# FASTA, the .fai/.gzi) and is the slow, cold part of a call; it runs under the larger
-# COLD_START_TIMEOUT_SECONDS budget so it can't eat the normal parse budget. Bounded LRU.
-_warm_inputs: OrderedDict[str, None] = OrderedDict()
-
-
-def _is_remote(path: str | None) -> bool:
-    return bool(path) and "://" in str(path)
-
-
-def _mark_warm(url: str) -> None:
-    _warm_inputs[url] = None
-    _warm_inputs.move_to_end(url)
-    while len(_warm_inputs) > WARM_INPUTS_MAX_ENTRIES:
-        _warm_inputs.popitem(last=False)
-
-
-def _open_remote_inputs_sync(
-    file_path: str | None, reference: str | None, index_path: str | None
-) -> None:
-    """Open (and immediately close) remote inputs so their headers/indexes are fetched.
-
-    Runs in the parse pool. ``file_path``/``reference`` are only passed when cold. Touching
-    the FASTA's first contig forces htslib to load the .fai (and .gzi for bgzip).
-    """
-    from .parsers import _open_alignment
-
-    if reference:
-        with open_fasta(reference) as fasta:
-            if fasta.references:
-                fasta.fetch(fasta.references[0], 0, 1)
-    if file_path:
-        with _open_alignment(file_path, reference, index_path) as samfile:
-            _ = samfile.references
-
-
-async def _ensure_reference_indexes(reference: str | None, config: BAMCPConfig) -> None:
-    """Cache a remote reference FASTA's .fai (+ .gzi for bgzip) and register them for open_fasta.
-
-    Best effort: a failed download leaves htslib to fetch the index remotely as before.
-    """
-    if reference is None or not _is_remote(reference) or not config.allow_remote_files:
-        return
-    services = get_services(config)
-    paths = services.cache.get_reference_index_paths(reference)
-    if paths is None:
-        return
-    fai, gzi = paths
-    wanted = [(fai, _sibling_url(reference, ".fai"))]
-    if gzi:
-        wanted.append((gzi, _sibling_url(reference, ".gzi")))
-    async with _index_download_lock(services, fai):
-        missing = [
-            (p, u) for p, u in wanted if not await asyncio.to_thread(services.cache.is_valid, p)
-        ]
-        if missing:
-            async with _index_http_client() as client:
-                for path, url in missing:
-                    if not await _try_download_index(client, url, path, config, "Reference index"):
-                        return
-        register_reference_index(reference, fai, gzi)
-
-
-async def _warm_remote_inputs(
-    file_path: str,
-    reference: str | None,
-    index_path: str | None,
-    config: BAMCPConfig,
-) -> None:
-    """Give a cold remote BAM/CRAM or reference its one-off open under the cold-start budget.
-
-    No-op for local inputs and for inputs already warm, so only the first call to a not-yet-seen
-    URL pays (and is allowed) the cold cost. A cold-open timeout raises a diagnosable
-    ``TimeoutError``; any other failure is left for the real parse to report with its own
-    message (the input simply stays cold).
-    """
-    await _ensure_reference_indexes(reference, config)
-    cold_file = file_path if _is_remote(file_path) and file_path not in _warm_inputs else None
-    cold_ref = reference if _is_remote(reference) and reference not in _warm_inputs else None
-    if not cold_file and not cold_ref:
-        return
-    try:
-        await asyncio.wait_for(
-            _run_in_parse_pool(_open_remote_inputs_sync, cold_file, cold_ref, index_path),
-            timeout=COLD_START_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError as e:
-        what = " and ".join(
-            name
-            for name, cold in (("alignment file", cold_file), ("reference FASTA", cold_ref))
-            if cold
-        )
-        raise TimeoutError(
-            f"Timed out after {COLD_START_TIMEOUT_SECONDS:g}s opening the remote {what} on "
-            "first use (fetching its header/index); retrying usually succeeds once it is warm."
-        ) from e
-    except Exception as e:  # noqa: BLE001 — the real parse reports the actual error
-        logger.debug("Cold open of remote inputs failed (left cold): %s", e)
-        return
-    for url in (cold_file, cold_ref):
-        if url:
-            _mark_warm(url)
 
 
 def _tile_bounds(start: int, end: int, tile: int) -> tuple[int, int]:
@@ -1258,7 +517,7 @@ def _timeout_hint(region: str, reference: str | None) -> str:
             f"; the region spans {end - start:,} bp — request a smaller window (≤200 bp for "
             "visualize_region/get_variants), or use get_coverage for a gene-scale region"
         )
-    if _is_remote(reference) and reference not in _warm_inputs:
+    if _is_remote(reference) and reference not in _remote._warm_inputs:
         return (
             "; the remote reference FASTA's index is fetched on first use and is often "
             "the slow part — retrying usually succeeds once it is warm"
@@ -2711,442 +1970,6 @@ def _summary_variant_lines(data: RegionData) -> list[str]:
     return lines
 
 
-@telemetry_wrapper("lookup_clinvar")
-async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> dict:
-    """Look up a variant in ClinVar via NCBI E-utilities.
-
-    Returns clinical significance, review status, and associated conditions.
-    """
-    chrom, pos, ref, alt = args["chrom"], args["pos"], args["ref"], args["alt"]
-
-    # Invalid input is a tool ERROR (isError), not an answer; not_found/unavailable/disabled
-    # stay answers. Validate before the enabled check so bad input fails the same either way.
-    build, build_source = _validate_lookup_input(args, config)
-    build_info = {"genome_build": build, "build_source": build_source}
-    common: dict[str, Any] = {"disclaimer": _CLINVAR_DISCLAIMER, "build_info": build_info}
-
-    if not config.clinvar_enabled:
-        return _lookup_disabled("ClinVar", **common)
-
-    client = get_clinvar_client(config)
-    variant = f"{chrom}:{pos} {ref}>{alt}"
-    try:
-        result = await client.lookup(chrom, pos, ref, alt, build=build)
-    # TimeoutError first: on 3.11+ asyncio.TimeoutError IS the builtin TimeoutError, an
-    # OSError subclass, so the network clause below would otherwise swallow it.
-    except (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException):
-        logger.warning("ClinVar lookup timed out for %s", variant)
-        return _lookup_failure("ClinVar", "timeout", error="ClinVar lookup timed out", **common)
-    except NCBIUnavailableError as e:
-        # In-band NCBI error, truncated search, unsupported build: absence NOT established.
-        logger.warning("ClinVar lookup unavailable for %s: %s", variant, e)
-        return _lookup_failure(
-            "ClinVar", "upstream_error", error="ClinVar lookup unavailable", **common
-        )
-    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
-        # Network/HTTP failure — the lookup is UNAVAILABLE, not an authoritative not-found.
-        logger.warning("ClinVar lookup failed for %s: %s", variant, e)
-        return _lookup_failure("ClinVar", "network_error", error="ClinVar lookup failed", **common)
-    except ValueError as e:
-        # An unparseable body.
-        logger.warning("ClinVar lookup failed for %s: %s", variant, e)
-        return _lookup_failure("ClinVar", "upstream_error", error="ClinVar lookup failed", **common)
-
-    if result is None:
-        return _lookup_not_found("ClinVar", args, **common)
-    return _lookup_result(asdict(result), status=_LOOKUP_FOUND, **common)
-
-
-@telemetry_wrapper("lookup_gnomad")
-async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dict:
-    """Look up a variant in gnomAD for population allele frequency data.
-
-    Returns global and per-population allele frequencies.
-    """
-    chrom, pos, ref, alt = args["chrom"], args["pos"], args["ref"], args["alt"]
-
-    # Invalid input is a tool ERROR (isError), not an answer; not_found/unavailable/disabled
-    # stay answers. Validate before the enabled check so bad input fails the same either way.
-    build, build_source = _validate_lookup_input(args, config)
-    build_info = {"genome_build": build, "build_source": build_source}
-    common: dict[str, Any] = {"disclaimer": _GNOMAD_DISCLAIMER, "build_info": build_info}
-
-    if not config.gnomad_enabled:
-        return _lookup_disabled("gnomAD", **common)
-
-    client = get_gnomad_client(config)
-    variant = f"{chrom}:{pos} {ref}>{alt}"
-    try:
-        result = await client.lookup(chrom, pos, ref, alt, build=build)
-    # TimeoutError first: on 3.11+ asyncio.TimeoutError IS the builtin TimeoutError, an
-    # OSError subclass, so the network clause below would otherwise swallow it.
-    except (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException):
-        logger.warning("gnomAD lookup timed out for %s", variant)
-        return _lookup_failure("gnomAD", "timeout", error="gnomAD lookup timed out", **common)
-    except GnomadBuildError as e:
-        # No gnomAD dataset for this build: unavailable, never a not-found.
-        logger.warning("gnomAD build refused for %s: %s", variant, e)
-        return _lookup_failure(
-            "gnomAD", "unsupported_build", error="gnomAD lookup failed", **common
-        )
-    except GnomadQueryError as e:
-        # Transient GraphQL error — the client propagates it (rather than returning None) so we
-        # report "unavailable" here instead of a misleading "not found in gnomAD".
-        logger.warning("gnomAD query error for %s: %s", variant, e)
-        return _lookup_failure("gnomAD", "upstream_error", error="gnomAD lookup failed", **common)
-    except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
-        # Network/HTTP failure — the lookup is UNAVAILABLE, not an authoritative not-found.
-        logger.warning("gnomAD lookup failed for %s: %s", variant, e)
-        return _lookup_failure("gnomAD", "network_error", error="gnomAD lookup failed", **common)
-    except ValueError as e:
-        logger.warning("gnomAD lookup failed for %s: %s", variant, e)
-        return _lookup_failure("gnomAD", "upstream_error", error="gnomAD lookup failed", **common)
-
-    if result is None:
-        return _lookup_not_found("gnomAD", args, **common)
-    return _lookup_result(asdict(result), status=_LOOKUP_FOUND, **common)
-
-
-@dataclass
-class _ScanProgress:
-    """Shared, lock-guarded state of a progressive contig scan (worker thread → handler).
-
-    Coordinates are internal 0-based half-open. ``scanned_end`` advances only after a chunk's
-    candidates are appended, so ``[0, scanned_end)`` is exactly what ``variants`` covers.
-    """
-
-    variants: list[dict] = field(default_factory=list)
-    scan_start: int = 0
-    scanned_end: int = 0
-    scan_end: int = 0
-    # Where the caller asked the scan to stop (contig end or region end) — scan_end may be
-    # earlier when max_region caps it; the gap is reported as truncation, never as "clean".
-    requested_end: int = 0
-    contig_length: int | None = None
-    deadline_hit: bool = False
-    stop: threading.Event = field(default_factory=threading.Event)
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-
-def _scan_chunk(
-    samfile: pysam.AlignmentFile,
-    fasta: pysam.FastaFile,
-    contig: str,
-    chunk_start: int,
-    chunk_end: int,
-    min_vaf: float,
-    min_depth: int,
-    min_mapq: int,
-    min_baseq: int,
-    min_alt_count: int | None,
-) -> list[dict]:
-    """SNV candidates in one chunk of a contig scan (count_coverage + deletion-depth fix)."""
-    from .parsers import _deletion_depth_at, detect_variants, read_passes_filters
-
-    ref_seq = fasta.fetch(contig, chunk_start, chunk_end)
-    counts = samfile.count_coverage(
-        contig,
-        chunk_start,
-        chunk_end,
-        quality_threshold=min_baseq,
-        read_callback=lambda r: read_passes_filters(r, min_mapq),
-    )
-    # Apply the alt-read floor up front: one- and two-read noise would otherwise each cost a
-    # Python deletion pileup below before being discarded, eating the scan's time budget.
-    variants = detect_variants(
-        counts, ref_seq, contig, chunk_start, min_vaf, min_depth, min_alt_count=min_alt_count or 1
-    )
-    if variants:
-        gaps = _deletion_depth_at(
-            samfile, contig, sorted({v["position"] for v in variants}), min_mapq
-        )
-        for v in variants:
-            gap = gaps.get(v["position"], 0)
-            if gap:
-                v["depth"] += gap
-                v["vaf"] = round(v["alt_count"] / v["depth"], 3)
-    # Adding deletion depth only lowers VAF: re-apply the floors (the shared predicate).
-    return [
-        v
-        for v in variants
-        if passes_candidate_filters(
-            v, min_vaf=min_vaf, min_depth=min_depth, min_alt_count=min_alt_count
-        )
-    ]
-
-
-def _scan_contig_progressive(
-    bam_path: str,
-    contig: str,
-    reference_path: str,
-    progress: _ScanProgress,
-    deadline: float,
-    *,
-    chunk_size: int,
-    min_vaf: float,
-    min_depth: int,
-    min_mapq: int,
-    min_baseq: int,
-    max_region: int,
-    index_filename: str | None,
-    min_alt_count: int | None = None,
-    scan_start: int = 0,
-    scan_stop: int | None = None,
-) -> None:
-    """Scan ``contig`` chunk by chunk into ``progress``, stopping at ``deadline`` (monotonic).
-
-    ``[scan_start, scan_stop)`` (0-based half-open; stop defaults to the contig end) bounds the
-    scan, capped at ``max_region`` bases.
-
-    Runs in the parse pool. Checks the deadline (and the handler's ``stop`` flag, set when the
-    hard timeout abandons it) before every chunk, so a slow remote scan ends cleanly with the
-    chunks done so far rather than holding a worker until the whole contig is read.
-
-    Raises:
-        ToolInputError: If ``contig`` is not in the alignment header (the message suggests the
-            file's own spelling, e.g. ``13`` for ``chr13``).
-        ValueError: If the region starts past the contig end (sanitized by the server's
-            ``_run``, like any other non-caller-facing failure).
-    """
-    from .parsers import _header_lengths, _open_alignment, contig_not_found_message
-
-    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        lengths = _header_lengths(samfile)
-        contig_length = lengths.get(contig)
-        if contig_length is None:
-            # Unknown contig: an error, never a silent empty "no variants" result.
-            raise ToolInputError(contig_not_found_message(contig, lengths))
-        stop = contig_length if scan_stop is None else min(scan_stop, contig_length)
-        if scan_start >= stop:
-            # A start past the contig end would scan nothing and read as "no variants".
-            raise ValueError(
-                f"Region start {scan_start + 1:,} is beyond the end of {contig} "
-                f"(length {contig_length:,} bp)"
-            )
-        scan_end = min(stop, scan_start + max_region)
-        with progress.lock:
-            progress.contig_length = contig_length
-            progress.scan_start = scan_start
-            progress.scanned_end = scan_start
-            progress.scan_end = scan_end
-            progress.requested_end = stop
-        # Adaptive chunking: start small, double while chunks are fast, halve when slow.
-        size = min(SCAN_VARIANTS_MIN_CHUNK_SIZE, chunk_size)
-        chunk_start = scan_start
-        with open_fasta(reference_path) as fasta:
-            while chunk_start < scan_end:
-                if progress.stop.is_set() or time.monotonic() >= deadline:
-                    with progress.lock:
-                        progress.deadline_hit = True
-                    return
-                chunk_end = min(chunk_start + size, scan_end)
-                started = time.monotonic()
-                found = _scan_chunk(
-                    samfile,
-                    fasta,
-                    contig,
-                    chunk_start,
-                    chunk_end,
-                    min_vaf,
-                    min_depth,
-                    min_mapq,
-                    min_baseq,
-                    min_alt_count,
-                )
-                with progress.lock:
-                    progress.variants.extend(found)
-                    progress.scanned_end = chunk_end
-                chunk_start = chunk_end
-                if time.monotonic() - started < SCAN_VARIANTS_CHUNK_TARGET_SECONDS:
-                    size = min(size * 2, chunk_size)
-                else:
-                    size = max(size // 2, min(SCAN_VARIANTS_MIN_CHUNK_SIZE, chunk_size))
-
-
-@telemetry_wrapper("scan_variants")
-async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dict:
-    """Scan an entire contig for variants using fast coverage-based detection.
-
-    The scan runs chunk by chunk against ``SCAN_VARIANTS_DEADLINE_SECONDS``; when the deadline
-    (or the hard ``SCAN_VARIANTS_TIMEOUT_SECONDS`` backstop) hits, the candidates found so far
-    are returned with ``truncated: true``, the 1-based ``scanned_region`` and a
-    ``truncation_reason`` — a partial answer, never a bare timeout. Failures (no reference,
-    unknown contig, nothing scanned at all) raise :class:`ToolInputError` so they reach the
-    client as an MCP error result. With no ``contig``, the BAM's first contig is scanned.
-
-    ``region`` (1-based ``contig:start-end``, no size cap) scans just that stretch — how a
-    truncated scan is resumed: the truncation text and ``next_region`` give the exact remainder.
-    Output is sorted by position (when capped, the highest-VAF candidates are the ones kept).
-    """
-    file_path = args["file_path"]
-    await asyncio.to_thread(validate_path, file_path, config)
-    resolved = await _resolve_reference_info(args, config)
-    reference = resolved.effective
-    min_vaf = args.get("min_vaf", config.min_vaf)
-    min_depth = args.get("min_depth", config.min_depth)
-    min_alt_count = args.get("min_alt_count", config.min_alt_count)
-
-    if not reference:
-        raise ToolInputError(
-            "Reference genome required for variant scanning. "
-            "Use list_contigs to detect genome build and get a reference URL."
-        )
-
-    index_path = await _ensure_cached_index(file_path, config)
-    # Cold remote inputs get their one-off open under the cold budget, not the scan deadline.
-    await _warm_remote_inputs(file_path, reference, index_path, config)
-    scan_start, scan_stop = 0, None
-    if args.get("region"):
-        validate_region(args["region"])
-        region_contig, scan_start, scan_stop = parse_region(args["region"], max_size=None)
-        if args.get("contig") and args["contig"] != region_contig:
-            raise ToolInputError(
-                f"contig '{args['contig']}' does not match region '{args['region']}'; "
-                "pass one or the other."
-            )
-        contig = region_contig
-    else:
-        contig = args.get("contig") or await _first_contig(file_path, reference, config)
-
-    progress = _ScanProgress()
-    deadline = time.monotonic() + SCAN_VARIANTS_DEADLINE_SECONDS
-    hard_timeout = False
-    try:
-        await asyncio.wait_for(
-            _run_in_parse_pool(
-                _scan_contig_progressive,
-                file_path,
-                contig,
-                reference,
-                progress,
-                deadline,
-                chunk_size=SCAN_VARIANTS_CHUNK_SIZE,
-                min_vaf=min_vaf,
-                min_depth=min_depth,
-                min_mapq=config.min_mapq,
-                min_baseq=config.min_baseq,
-                max_region=SCAN_VARIANTS_MAX_REGION,
-                index_filename=index_path,
-                min_alt_count=min_alt_count,
-                scan_start=scan_start,
-                scan_stop=scan_stop,
-            ),
-            timeout=SCAN_VARIANTS_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        # A single chunk hung past the soft deadline: tell the worker to stop at its next
-        # check and answer with what is already complete.
-        progress.stop.set()
-        hard_timeout = True
-    # Any other failure (pysam/OS text, a ValueError) propagates to the server's _run, which
-    # sanitizes it; the unknown-contig case already raised a caller-safe ToolInputError.
-
-    with progress.lock:
-        all_variants = list(progress.variants)
-        scan_start = progress.scan_start
-        scanned_end = progress.scanned_end
-        scan_end = progress.scan_end
-        requested_end = progress.requested_end
-        contig_length = progress.contig_length
-        deadline_hit = progress.deadline_hit
-
-    if contig_length is None:
-        # Never got as far as the header: there is no partial result to give.
-        raise ToolInputError(
-            f"Scan of {contig} timed out after {SCAN_VARIANTS_TIMEOUT_SECONDS:g}s before any "
-            "data was read; retry (the first call to a remote file is the slowest) or use "
-            "get_variants on a narrower region."
-        )
-
-    truncated_by_deadline = hard_timeout or deadline_hit or scanned_end < scan_end
-    # max_region caps a single call; the uncapped remainder is unscanned, not variant-free.
-    truncated_by_max_region = scan_end < requested_end
-    truncated = truncated_by_deadline or truncated_by_max_region
-    truncation_reason = None
-    # The exact unscanned remainder (1-based inclusive) through the caller's requested stop.
-    next_region = (
-        format_region(contig, scanned_end, requested_end) if scanned_end < requested_end else None
-    )
-    if truncated:
-        if truncated_by_deadline:
-            budget = (
-                SCAN_VARIANTS_TIMEOUT_SECONDS if hard_timeout else SCAN_VARIANTS_DEADLINE_SECONDS
-            )
-            cause = (
-                f"time budget of {budget:g}s reached after scanning {scanned_end - scan_start:,} "
-                f"of {requested_end - scan_start:,} bp"
-            )
-        else:
-            cause = (
-                f"one call scans at most {SCAN_VARIANTS_MAX_REGION:,} bp; scanned "
-                f"{scanned_end - scan_start:,} of {requested_end - scan_start:,} bp"
-            )
-        truncation_reason = f"{cause}; candidates beyond scanned_region were NOT " + (
-            f"examined — call scan_variants again with region='{next_region}' to scan the remainder"
-            if next_region
-            else "examined"
-        )
-
-    # When capped, keep the highest-VAF candidates; report them in genomic order.
-    all_variants.sort(key=lambda v: v["vaf"], reverse=True)
-    variants = sorted(all_variants[:SCAN_VARIANTS_MAX_RESULTS], key=lambda v: v["position"])
-    # 1-based inclusive; None when not a single chunk completed.
-    scanned_region = (
-        format_region(contig, scan_start, scanned_end) if scanned_end > scan_start else None
-    )
-
-    filters = _applied_filters(
-        config,
-        args,
-        include_max_reads=False,
-        min_alt_count=min_alt_count,
-        reference_source=resolved.source,
-    )
-    # Self-describing scope: what was scanned, and what this scan cannot see.
-    filters.update(
-        {
-            "snv_detection": "enabled",
-            "indel_detection": False,
-            "indel_detection_note": "scan_variants is SNV-only; use get_variants on a "
-            "smaller region to detect indels",
-            "scanned_region": scanned_region,
-            "contig_length": contig_length,
-            "truncated_by_max_region": truncated_by_max_region,
-            "per_site_evidence": "not computed by scan_variants (coverage-based scan); run "
-            "get_variants on a small window around a candidate for artifact_risk/confidence",
-            "max_region": SCAN_VARIANTS_MAX_REGION,
-            "truncated_by_deadline": truncated_by_deadline,
-            "total_candidates": len(all_variants),
-            "results_capped": len(all_variants) > SCAN_VARIANTS_MAX_RESULTS,
-            "max_results": SCAN_VARIANTS_MAX_RESULTS,
-        }
-    )
-    if min_alt_count is not None:
-        filters.setdefault("min_alt_count", min_alt_count)
-
-    payload: dict[str, Any] = {
-        "contig": contig,
-        "variants": [annotate_interpretation(_one_based(v)) for v in variants],
-        "count": len(variants),
-        "truncated": truncated,
-        "scanned_region": scanned_region,
-    }
-    if truncation_reason:
-        payload["truncation_reason"] = truncation_reason
-    if truncated and next_region:
-        payload["next_region"] = next_region
-    payload.update(
-        {
-            "coordinate_system": _LLM_COORDINATE_SYSTEM,
-            "variant_type": "candidate",
-            "applied_filters": filters,
-            "filter_note": _FILTER_ABSENCE_NOTE,
-            "disclaimer": _CANDIDATE_VARIANT_DISCLAIMER,
-        }
-    )
-    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
-
-
 @telemetry_wrapper("cleanup_cache")
 async def handle_cleanup_cache(args: dict[str, Any], config: BAMCPConfig) -> dict:
     """Clear downloaded index files and the region cache — single-client (stdio) servers only.
@@ -3170,6 +1993,6 @@ async def handle_cleanup_cache(args: dict[str, Any], config: BAMCPConfig) -> dic
         # bound) and _services_registry (the live server's services; dropping them would
         # close HTTP clients under in-flight lookups — clear_caches already empties their
         # caches).
-        _warm_inputs.clear()
+        _clear_warm_inputs()
         text = f"Removed {removed} cached index files and cleared the region cache."
     return {"content": [{"type": "text", "text": text}]}

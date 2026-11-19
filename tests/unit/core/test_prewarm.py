@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from bamcp.config import BAMCPConfig
-from bamcp.core import prewarm, tools
+from bamcp.core import prewarm, remote, tools
 from bamcp.core.parsers import RegionData
 
 pytestmark = pytest.mark.unit
@@ -22,7 +22,7 @@ REF = "https://example.org/ref.fa"
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
     """Fresh warm set; no network for index downloads."""
-    monkeypatch.setattr(tools, "_warm_inputs", type(tools._warm_inputs)())
+    monkeypatch.setattr(remote, "_warm_inputs", type(remote._warm_inputs)())
 
     async def no_index(file_path, config):
         return None
@@ -32,7 +32,7 @@ def _isolate(monkeypatch):
     async def no_ref_index(reference, config):
         return None
 
-    monkeypatch.setattr(tools, "_ensure_reference_indexes", no_ref_index)
+    monkeypatch.setattr(remote, "_ensure_reference_indexes", no_ref_index)
 
 
 @pytest.fixture
@@ -42,7 +42,7 @@ def opened(monkeypatch):
     def fake_open(file_path, reference, index_path):
         calls.append((file_path, reference))
 
-    monkeypatch.setattr(tools, "_open_remote_inputs_sync", fake_open)
+    monkeypatch.setattr(remote, "_open_remote_inputs_sync", fake_open)
     return calls
 
 
@@ -83,19 +83,19 @@ async def test_only_the_cold_input_is_reopened(opened, fake_fetch):
 async def test_cold_budget_is_separate_from_parse_budget(monkeypatch, fake_fetch):
     """A cold open slower than the parse budget succeeds under the larger cold budget."""
     monkeypatch.setattr(tools, "BAM_PARSE_TIMEOUT_SECONDS", 0.01)
-    monkeypatch.setattr(tools, "COLD_START_TIMEOUT_SECONDS", 2.0)
-    monkeypatch.setattr(tools, "_open_remote_inputs_sync", lambda *a: time.sleep(0.1))
+    monkeypatch.setattr(remote, "COLD_START_TIMEOUT_SECONDS", 2.0)
+    monkeypatch.setattr(remote, "_open_remote_inputs_sync", lambda *a: time.sleep(0.1))
     await tools._fetch_region_with_timeout(BAM, "chr1:1-10", REF, BAMCPConfig())
-    assert BAM in tools._warm_inputs and REF in tools._warm_inputs
+    assert BAM in remote._warm_inputs and REF in remote._warm_inputs
 
 
 async def test_cold_timeout_is_diagnosable_and_stays_cold(monkeypatch, fake_fetch):
-    monkeypatch.setattr(tools, "COLD_START_TIMEOUT_SECONDS", 0.05)
-    monkeypatch.setattr(tools, "_open_remote_inputs_sync", lambda *a: time.sleep(0.3))
+    monkeypatch.setattr(remote, "COLD_START_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(remote, "_open_remote_inputs_sync", lambda *a: time.sleep(0.3))
     with pytest.raises(TimeoutError, match="first use") as exc:
         await tools._fetch_region_with_timeout(BAM, "chr1:1-10", REF, BAMCPConfig())
     assert "reference FASTA" in str(exc.value) and "retrying" in str(exc.value)
-    assert BAM not in tools._warm_inputs
+    assert BAM not in remote._warm_inputs
     await asyncio.sleep(0.3)
 
 
@@ -103,9 +103,9 @@ async def test_cold_open_error_is_left_to_the_real_parse(monkeypatch, fake_fetch
     def boom(*a):
         raise OSError("error when opening file")
 
-    monkeypatch.setattr(tools, "_open_remote_inputs_sync", boom)
+    monkeypatch.setattr(remote, "_open_remote_inputs_sync", boom)
     await tools._fetch_region_with_timeout(BAM, "chr1:1-10", REF, BAMCPConfig())
-    assert BAM not in tools._warm_inputs
+    assert BAM not in remote._warm_inputs
 
 
 async def test_local_inputs_are_never_cold_opened(opened, fake_fetch, small_bam_path):
@@ -114,15 +114,15 @@ async def test_local_inputs_are_never_cold_opened(opened, fake_fetch, small_bam_
 
 
 def test_warm_set_is_bounded(monkeypatch):
-    monkeypatch.setattr(tools, "WARM_INPUTS_MAX_ENTRIES", 2)
+    monkeypatch.setattr(remote, "WARM_INPUTS_MAX_ENTRIES", 2)
     for i in range(5):
-        tools._mark_warm(f"https://example.org/{i}.bam")
-    assert list(tools._warm_inputs) == ["https://example.org/3.bam", "https://example.org/4.bam"]
+        remote._mark_warm(f"https://example.org/{i}.bam")
+    assert list(remote._warm_inputs) == ["https://example.org/3.bam", "https://example.org/4.bam"]
 
 
 def test_open_remote_inputs_sync_opens_local_files(small_bam_path, ref_fasta_path):
     """The real opener works against local inputs (the same pysam calls as remote)."""
-    tools._open_remote_inputs_sync(small_bam_path, ref_fasta_path, None)
+    remote._open_remote_inputs_sync(small_bam_path, ref_fasta_path, None)
 
 
 # --- prewarm -----------------------------------------------------------------------------
@@ -155,7 +155,7 @@ async def test_prewarm_warms_each_demo(demos, opened):
     demos({"HG002": _demo(BAM, REF), "B": _demo("https://example.org/b.bam", None)})
     assert await prewarm.prewarm_demos(BAMCPConfig(transport="sse")) == 2
     assert opened == [(BAM, REF), ("https://example.org/b.bam", None)]
-    assert BAM in tools._warm_inputs and REF in tools._warm_inputs
+    assert BAM in remote._warm_inputs and REF in remote._warm_inputs
 
 
 async def test_prewarm_failures_are_logged_and_swallowed(demos, opened, monkeypatch, caplog):
@@ -292,11 +292,11 @@ async def test_reference_indexes_are_cached_once_and_registered(monkeypatch, tmp
             fh.write("x")
         return path
 
-    monkeypatch.setattr(tools, "_download_index_streaming", fake_download)
+    monkeypatch.setattr(remote, "_download_index_streaming", fake_download)
     config = BAMCPConfig(cache_dir=str(tmp_path), allow_remote_files=True)
     ref = "https://example.org/genome.fa.gz"
-    await tools._ensure_reference_indexes(ref, config)
-    await tools._ensure_reference_indexes(ref, config)
+    await remote._ensure_reference_indexes(ref, config)
+    await remote._ensure_reference_indexes(ref, config)
     assert fetched == [ref + ".fai", ref + ".gzi"]  # second call is a cache hit
     fai, gzi = parsers._REFERENCE_INDEXES[ref]
     assert fai.endswith(".fai") and gzi is not None and gzi.endswith(".gzi")
@@ -308,9 +308,9 @@ async def test_reference_indexes_skipped_for_local_or_disabled(monkeypatch, tmp_
     async def boom(*a, **k):
         raise AssertionError("must not download")
 
-    monkeypatch.setattr(tools, "_download_index_streaming", boom)
-    await tools._ensure_reference_indexes("/data/ref.fa", BAMCPConfig(allow_remote_files=True))
-    await tools._ensure_reference_indexes("https://example.org/r.fa", BAMCPConfig())
+    monkeypatch.setattr(remote, "_download_index_streaming", boom)
+    await remote._ensure_reference_indexes("/data/ref.fa", BAMCPConfig(allow_remote_files=True))
+    await remote._ensure_reference_indexes("https://example.org/r.fa", BAMCPConfig())
 
 
 def test_open_fasta_uses_registered_local_index(monkeypatch, comprehensive_ref_fasta_path):

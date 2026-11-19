@@ -104,3 +104,6 @@ shortfall), so the size rule did not apply. Frozen manifest
   inside this environment's two-hour job limit, so `select-r4` gained `--reference` (60ff177)
   and the scans and the draw used a local copy of chr15–22 written from the same remote
   analysis-set FASTA (contig lengths identical; 12 random 500 bp slices byte-identical).
+- **2026-11-19 (documentation; no effect on items or analysis).** The commit cited above as
+  `60ff177` is on the PR #74 branch, which was squash-merged, so `git log` on `main` does not list
+  it. It remains on GitHub at https://github.com/RTrentJones/BAMCP/commit/60ff177.

@@ -117,3 +117,14 @@ raw mpileup. A 0.70 text baseline exists only for long-homopolymer indel genotyp
   `homopolymer_indel`), as did the stratum's one default-knob error. Read "all 4 errors called a
   true insertion stutter". No result changes.
 
+## Corrections (2026-11-19)
+
+- Section *What this means*: the `Tjson` (0.82–0.93), `V` (0.87–0.89) and summary-panel
+  (0.98–0.99) ranges are round 3's two tiers, not rounds 1–3 (round 1: `Traw` 0.949, `Tjson`
+  0.859, `V` 0.821; iteration 2: `V` 0.910; see [`visual-results.md`](visual-results.md)).
+  Read "the headroom seen in round 3". No result changes.
+- Commits cited here by short hash (`16f7540`, `179b604`) are on the PR branches, which were
+  squash-merged, so `git log` on `main` does not list them. They remain on GitHub:
+  [`16f7540`](https://github.com/RTrentJones/BAMCP/commit/16f7540) (PR #70);
+  [`179b604`](https://github.com/RTrentJones/BAMCP/commit/179b604) (PR #70).
+

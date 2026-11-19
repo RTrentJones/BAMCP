@@ -8,7 +8,8 @@ All notable changes to BAMCP are documented here. The format is based on
 
 Response to an external engineering review — a phased hardening of the security boundary,
 evaluation credibility, and frontend quality. See `docs/engineering-review-response.md` for the
-plan and `docs/ENGINEERING_RETROSPECTIVE.md` for the write-up.
+plan and `docs/ENGINEERING_RETROSPECTIVE.md` for the write-up. Entries that cite a PR number
+landed after that review.
 
 ### Security
 
@@ -17,12 +18,33 @@ plan and `docs/ENGINEERING_RETROSPECTIVE.md` for the write-up.
   endpoint. All data sources (BAM/CRAM/VCF/reference/index) now pass through one policy.
 - **Retired the OAuth theater** — dynamic client registration is off by default (an open
   `/register` that mints tokens is not access control); access is a stateless service token.
-  Scopes are required when auth is on. Anonymous → 401 invariant preserved.
+  Scopes are required when auth is on. Anonymous → 401 invariant preserved. (The public prod
+  demo turns registration back on in the wrapper's infra, `BAMCP_ALLOW_DYNAMIC_REGISTRATION`.)
 - **Proxy-aware, bounded rate limiter** — `X-Forwarded-For` is honored only behind a trusted
   proxy (no IP spoofing) and the tracking table is a bounded LRU (no memory exhaustion).
+- **Deep-review security fixes (#63)** — remote URLs containing `#` are rejected (htslib reads
+  `x.bam##idx##<url>` as a second, unvalidated URL); index-download redirects are re-validated
+  at every hop; every non-global address is blocked; DNS resolution runs off the event loop;
+  the OAuth stores and caches are bounded; the rate limiter reads `CF-Connecting-IP` behind the
+  tunnel (default 120 requests/min per IP); viewer strings are HTML-escaped (XSS).
 
 ### Fixed
 
+- An indel in a homopolymer run was flagged from the run's reference length alone. With at
+  least 8 reads spanning the whole run, the homopolymer risk now comes from the called
+  length's share among those reads, which also give the allele fraction and a genotype hint;
+  with fewer, the reference-length rule still applies (#71).
+- `list_contigs` suggested UCSC `bigZips` FASTAs that pysam cannot open; suggestions are now
+  verified bgzip-or-uncompressed URLs with an index, matched to the BAM's contig naming, or
+  `None` with a `reference_note`. Parse timeouts carry the region and mode instead of an empty
+  message, and an empty `BAMCP_REFERENCE=` reads as unset (#59).
+- VCF header and AF parsing crashes; external lookups now run in the BAM's build; gnomAD
+  not-found handling; `max_pop_af` gated so it cannot produce a false BA1; read-position bias
+  corrected (#63).
+- The Docker image pinned `BAMCP_MIN_VAF`/`_DEPTH`/`_MAPQ`, so prod ran `min_mapq=0` against a
+  code default of 20; the image no longer overrides the calling thresholds (#68).
+- Eval comparison runs now persist each spec's results, and Tracer floor verdicts are computed
+  from raw counts rather than rounded report values.
 - GIAB benchmark manifest wrote its region strings 0-based after region strings became 1-based
   (#63), so two negative regions started on a truth SNV and `make giab-benchmark` failed with 2
   false positives; `fetch_giab.py` now writes 1-based strings, and both published operating
@@ -44,12 +66,27 @@ plan and `docs/ENGINEERING_RETROSPECTIVE.md` for the write-up.
   the still-running previous image. Unauthenticated; a build without the arg reports `null`.
 - `schema_version` stamp on the viewer payload + a server↔viewer compatibility test.
 - Eval grader scores **tool selection and answer correctness separately** (a case can no longer
-  pass on the tool call alone); nightly runs both truth sets and the Anthropic provider (the
-  OpenAI path is gated until the runner translates provider-specific messages).
+  pass on the tool call alone); nightly runs both truth sets and, when `ANTHROPIC_API_KEY` is
+  set, the Anthropic provider (the OpenAI path is gated until the runner translates
+  provider-specific messages).
 - Frontend static/test layer: `tsc --noEmit` (strict), ESLint, and vitest, wired into CI.
+- Newcomer features (#67): an automatically selected reference (the registry FASTA matching the
+  BAM's build and contig naming), `demo:<NAME>` aliases with the `bamcp://demos`, `glossary` and
+  `guide` resources and three prompts, per-variant interpretation, a probe of the requested site
+  (`filter_check`), a time-bounded `scan_variants` that returns `next_region` to resume, and a
+  CIGAR-aware viewer.
+- Eval results publish to Tracer from CI on `main` and nightly (best-effort; needs
+  `TRACER_INGEST_TOKEN`).
+- Evaluation: a real-data GIAB HG002 tier and pre-registered visual-vs-text rounds 3–5
+  (#69, #70, #74); results in `docs/eval/visual-results.md`.
+- `make verify` runs every `ci.yml` gate in one command (#63).
 
 ### Changed
 
+- Region strings at the tool boundary are 1-based inclusive (samtools-style); every tool error
+  goes through one sanitized `isError` envelope (#63).
+- Viewer rendering: neutral read bodies, colour only on mismatches, strand shown by arrow and
+  underline, hollow tiles for low-base-quality mismatches (#68).
 - Docs lead remote deployment with **Streamable HTTP** (SSE is deprecated by the MCP spec).
 - Test suite is hermetic by default (live-network tests behind a `network` marker); CI's
   `lockfile` job checks `uv.lock` is fresh and runs the ship-gate from the frozen lock, while the

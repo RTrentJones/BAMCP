@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .yaml_io import load_yaml_file
+
 # Ordered least -> most severe. Index distance is the "within one step" metric.
 SEVERITY_ORDER = [
     "Benign",
@@ -206,13 +208,7 @@ class AcmgCase:
 
 def load_acmg_cases(path: str | Path) -> list[AcmgCase]:
     """Parse an ACMG manifest YAML into a list of :class:`AcmgCase`."""
-    try:
-        import yaml  # type: ignore[import-untyped]
-    except ImportError as e:  # pragma: no cover — install hint
-        raise RuntimeError(
-            "pyyaml is required for the ACMG eval. Install with 'pip install \".[eval]\"'."
-        ) from e
-    doc = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    doc = load_yaml_file(path, purpose="the ACMG eval") or {}
     cases_raw = doc.get("cases", []) if isinstance(doc, dict) else doc
     cases: list[AcmgCase] = []
     for c in cases_raw:

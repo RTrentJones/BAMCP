@@ -19,7 +19,6 @@ from bamcp.core.parsers import (
     format_region,
     parse_region,
     read_passes_filters,
-    scan_variants_chunked,
 )
 
 
@@ -739,53 +738,6 @@ class TestExtractSoftClips:
         assert len(read.soft_clips) == 1
         assert read.soft_clips[0].side == "left"
         assert read.soft_clips[0].length == 5
-
-
-class TestScanVariantsChunked:
-    """Tests for the scan_variants_chunked function."""
-
-    @pytest.mark.unit
-    def test_scans_contig(self, small_bam_path, ref_fasta_path):
-        """Should find variants across chr1."""
-        variants = scan_variants_chunked(small_bam_path, "chr1", ref_fasta_path, chunk_size=500)
-        assert isinstance(variants, list)
-        # All variants should be on chr1
-        for v in variants:
-            assert v["contig"] == "chr1"
-            assert "position" in v
-            assert "ref" in v
-            assert "alt" in v
-            assert "vaf" in v
-
-    @pytest.mark.unit
-    def test_sorted_by_vaf(self, small_bam_path, ref_fasta_path):
-        """Results should be sorted by VAF descending."""
-        variants = scan_variants_chunked(small_bam_path, "chr1", ref_fasta_path, chunk_size=500)
-        if len(variants) >= 2:
-            for i in range(len(variants) - 1):
-                assert variants[i]["vaf"] >= variants[i + 1]["vaf"]
-
-    @pytest.mark.unit
-    def test_nonexistent_contig(self, small_bam_path, ref_fasta_path):
-        """An unknown contig is an error, never a silent empty "no variants" result."""
-        with pytest.raises(ValueError, match="not found in the alignment header"):
-            scan_variants_chunked(small_bam_path, "chrZ", ref_fasta_path)
-
-    @pytest.mark.unit
-    def test_respects_min_vaf(self, small_bam_path, ref_fasta_path):
-        """Higher min_vaf should return fewer or equal variants."""
-        all_variants = scan_variants_chunked(small_bam_path, "chr1", ref_fasta_path, min_vaf=0.05)
-        strict_variants = scan_variants_chunked(small_bam_path, "chr1", ref_fasta_path, min_vaf=0.5)
-        assert len(strict_variants) <= len(all_variants)
-
-    @pytest.mark.unit
-    def test_respects_min_depth(self, small_bam_path, ref_fasta_path):
-        """Higher min_depth should return fewer or equal variants."""
-        all_variants = scan_variants_chunked(small_bam_path, "chr1", ref_fasta_path, min_depth=1)
-        strict_variants = scan_variants_chunked(
-            small_bam_path, "chr1", ref_fasta_path, min_depth=10
-        )
-        assert len(strict_variants) <= len(all_variants)
 
 
 class TestAnnotateVcfSnvSupport:

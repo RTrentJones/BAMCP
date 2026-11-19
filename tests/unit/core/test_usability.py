@@ -20,7 +20,7 @@ from bamcp.analysis.evidence import (
 from bamcp.config import BAMCPConfig
 from bamcp.core import reference as reference_mod
 from bamcp.core import tools as tools_mod
-from bamcp.core.parsers import RegionData, contig_not_found_message, scan_contig
+from bamcp.core.parsers import RegionData, contig_not_found_message
 from bamcp.core.reference import alternate_contig_names, map_contig_to_style
 from bamcp.core.tools import (
     VIEWER_SUMMARY_MAX_CHARS,
@@ -33,6 +33,8 @@ from bamcp.core.tools import (
     handle_visualize_region,
 )
 from bamcp.core.validation import validate_remote_url
+
+from .scan_helpers import scan
 
 REGION = "chr1:1000-2900"
 
@@ -338,10 +340,10 @@ class TestMinAltCount:
     def test_scan_contig_applies_alt_count_before_cap(
         self, comprehensive_bam_path, comprehensive_ref_fasta_path
     ):
-        loose = scan_contig(
+        loose = scan(
             comprehensive_bam_path, "chr1", comprehensive_ref_fasta_path, min_vaf=0.01, min_depth=1
         )
-        strict = scan_contig(
+        strict = scan(
             comprehensive_bam_path,
             "chr1",
             comprehensive_ref_fasta_path,
@@ -349,7 +351,7 @@ class TestMinAltCount:
             min_depth=1,
             min_alt_count=5,
         )
-        assert strict.total_candidates < loose.total_candidates
+        assert len(strict.variants) < len(loose.variants)
         assert all(v["alt_count"] >= 5 for v in strict.variants)
 
     @pytest.mark.unit

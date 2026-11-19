@@ -1045,8 +1045,8 @@ def detect_variants(
             ``sum(A,C,G,T)`` denominator understates depth and inflates VAF. Adding
             gap_depth restores the true spanning depth.
         min_alt_count: Minimum alt-supporting reads (1 = no floor). The tool layer applies
-            the configured floor itself; scan_contig passes it here so its result cap
-            counts only candidates that survive it.
+            the configured floor itself; the contig scanner (``core.tools._scan_chunk``)
+            passes it here so floor-failing noise never reaches its deletion pileup.
 
     Returns:
         List of candidate variant dicts (contig, position, ref, alt, vaf, depth,
@@ -1290,25 +1290,6 @@ def _detect_indels_if_small(
     )
 
 
-@dataclass
-class ScanResult:
-    """A contig scan's candidates plus what was (and wasn't) scanned.
-
-    ``scanned_start``/``scanned_end`` are internal 0-based half-open; the tool layer
-    renders them 1-based. ``total_candidates`` counts candidates before the
-    ``SCAN_VARIANTS_MAX_RESULTS`` cap, so ``results_capped`` is self-describing.
-    """
-
-    contig: str
-    contig_length: int
-    scanned_start: int
-    scanned_end: int
-    variants: list[dict]
-    total_candidates: int
-    results_capped: bool
-    truncated_by_max_region: bool
-
-
 def _deletion_depth_at(
     samfile: pysam.AlignmentFile, contig: str, positions: list[int], min_mapq: int
 ) -> dict[int, int]:
@@ -1332,116 +1313,3 @@ def _deletion_depth_at(
                 if pread.is_del and read_passes_filters(pread.alignment, min_mapq)
             )
     return counts
-
-
-def scan_contig(
-    bam_path: str,
-    contig: str,
-    reference_path: str,
-    chunk_size: int = 50_000,
-    min_vaf: float = 0.1,
-    min_depth: int = 3,
-    min_mapq: int = 0,
-    min_baseq: int = 0,
-    max_region: int = 250_000_000,
-    index_filename: str | None = None,
-    min_alt_count: int = 1,
-) -> ScanResult:
-    """Scan a contig for SNV candidates using fast coverage-based detection.
-
-    Uses pysam's count_coverage (C implementation) in chunks — no read
-    extraction — so scanning a full human chromosome is feasible. SNV-only: indels
-    need a per-read pileup that is too slow at chromosome scale. Candidate VAF/depth
-    include reads deleted at the site (as get_variants does), and N/IUPAC reference
-    bases are skipped.
-
-    Raises:
-        ValueError: If ``contig`` is not in the alignment header.
-    """
-    from ..constants import SCAN_VARIANTS_MAX_RESULTS
-
-    all_variants: list[dict] = []
-
-    with _open_alignment(bam_path, reference_path, index_filename) as samfile:
-        header_lengths = _header_lengths(samfile)
-        contig_length = header_lengths.get(contig)
-        if contig_length is None:
-            raise ValueError(contig_not_found_message(contig, header_lengths))
-
-        scan_end = min(contig_length, max_region)
-
-        with open_fasta(reference_path) as fasta:
-            for chunk_start in range(0, scan_end, chunk_size):
-                chunk_end = min(chunk_start + chunk_size, scan_end)
-
-                ref_seq = fasta.fetch(contig, chunk_start, chunk_end)
-
-                cov_A, cov_C, cov_G, cov_T = samfile.count_coverage(
-                    contig,
-                    chunk_start,
-                    chunk_end,
-                    quality_threshold=min_baseq,
-                    read_callback=lambda r: read_passes_filters(r, min_mapq),
-                )
-
-                chunk_variants = detect_variants(
-                    (cov_A, cov_C, cov_G, cov_T),
-                    ref_seq,
-                    contig,
-                    chunk_start,
-                    min_vaf,
-                    min_depth,
-                    min_alt_count=min_alt_count,
-                )
-                if chunk_variants:
-                    gaps = _deletion_depth_at(
-                        samfile, contig, sorted({v["position"] for v in chunk_variants}), min_mapq
-                    )
-                    for v in chunk_variants:
-                        gap = gaps.get(v["position"], 0)
-                        if gap:
-                            v["depth"] += gap
-                            v["vaf"] = round(v["alt_count"] / v["depth"], 3)
-                    # Adding deletion depth only lowers VAF: re-apply the threshold.
-                    chunk_variants = [v for v in chunk_variants if v["vaf"] >= min_vaf]
-                all_variants.extend(chunk_variants)
-
-    # Sort by VAF descending and cap results
-    all_variants.sort(key=lambda v: v["vaf"], reverse=True)
-    return ScanResult(
-        contig=contig,
-        contig_length=contig_length,
-        scanned_start=0,
-        scanned_end=scan_end,
-        variants=all_variants[:SCAN_VARIANTS_MAX_RESULTS],
-        total_candidates=len(all_variants),
-        results_capped=len(all_variants) > SCAN_VARIANTS_MAX_RESULTS,
-        truncated_by_max_region=scan_end < contig_length,
-    )
-
-
-def scan_variants_chunked(
-    bam_path: str,
-    contig: str,
-    reference_path: str,
-    chunk_size: int = 50_000,
-    min_vaf: float = 0.1,
-    min_depth: int = 3,
-    min_mapq: int = 0,
-    min_baseq: int = 0,
-    max_region: int = 250_000_000,
-    index_filename: str | None = None,
-) -> list[dict]:
-    """Candidates from :func:`scan_contig`, sorted by VAF descending, capped at 500."""
-    return scan_contig(
-        bam_path,
-        contig,
-        reference_path,
-        chunk_size,
-        min_vaf,
-        min_depth,
-        min_mapq,
-        min_baseq,
-        max_region,
-        index_filename,
-    ).variants

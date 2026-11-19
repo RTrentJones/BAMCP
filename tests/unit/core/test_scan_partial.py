@@ -9,7 +9,8 @@ import pytest
 from bamcp.config import BAMCPConfig
 from bamcp.core import tools
 from bamcp.core.errors import ToolInputError, sanitize_tool_exception
-from bamcp.core.parsers import scan_contig
+
+from .scan_helpers import scan
 
 pytestmark = pytest.mark.unit
 
@@ -24,13 +25,13 @@ def _payload(result):
 
 
 async def test_full_scan_matches_scan_contig(small_bam_path, ref_fasta_path, ref_config):
-    """The progressive scanner finds exactly what the whole-contig scanner finds."""
+    """The handler reports exactly what one uninterrupted scan of the contig finds."""
     payload = _payload(
         await tools.handle_scan_variants(
             {"file_path": small_bam_path, "contig": "chr1"}, ref_config
         )
     )
-    expected = scan_contig(
+    expected = scan(
         small_bam_path,
         "chr1",
         ref_fasta_path,
@@ -46,6 +47,7 @@ async def test_full_scan_matches_scan_contig(small_bam_path, ref_fasta_path, ref
     assert payload["truncated"] is False
     assert "truncation_reason" not in payload
     assert payload["scanned_region"] == f"chr1:1-{expected.scanned_end}"
+    assert expected.scanned_end == expected.contig_length
     assert payload["applied_filters"]["truncated_by_deadline"] is False
 
 
@@ -265,3 +267,55 @@ async def test_alt_count_floor_applied_before_deletion_pileups(
         {"file_path": small_bam_path, "contig": "chr1", "min_alt_count": 10_000}, ref_config
     )
     assert seen == []
+
+
+class TestScanner:
+    """The chunked scanner itself (formerly asserted against a test-only parsers copy)."""
+
+    def test_scans_contig(self, small_bam_path, ref_fasta_path):
+        variants = scan(small_bam_path, "chr1", ref_fasta_path, chunk_size=500).variants
+        for v in variants:
+            assert v["contig"] == "chr1"
+            assert {"position", "ref", "alt", "vaf", "alt_count"} <= v.keys()
+
+    def test_nonexistent_contig(self, small_bam_path, ref_fasta_path):
+        """An unknown contig is an error, never a silent empty "no variants" result."""
+        with pytest.raises(ToolInputError, match="not found in the alignment header"):
+            scan(small_bam_path, "chrZ", ref_fasta_path)
+
+    def test_respects_min_vaf(self, small_bam_path, ref_fasta_path):
+        loose = scan(small_bam_path, "chr1", ref_fasta_path, min_vaf=0.05).variants
+        strict = scan(small_bam_path, "chr1", ref_fasta_path, min_vaf=0.5).variants
+        assert len(strict) <= len(loose)
+        assert all(v["vaf"] >= 0.5 for v in strict)
+
+    def test_respects_min_depth(self, small_bam_path, ref_fasta_path):
+        loose = scan(small_bam_path, "chr1", ref_fasta_path, min_depth=1).variants
+        strict = scan(small_bam_path, "chr1", ref_fasta_path, min_depth=10).variants
+        assert len(strict) <= len(loose)
+        assert all(v["depth"] >= 10 for v in strict)
+
+    def test_chunking_does_not_change_the_result(self, small_bam_path, ref_fasta_path):
+        key = lambda v: (v["position"], v["alt"], v["vaf"], v["depth"])  # noqa: E731
+        small = scan(small_bam_path, "chr1", ref_fasta_path, chunk_size=100, min_depth=1)
+        big = scan(small_bam_path, "chr1", ref_fasta_path, chunk_size=50_000, min_depth=1)
+        assert sorted(map(key, small.variants)) == sorted(map(key, big.variants))
+
+
+async def test_capped_scan_keeps_highest_vaf(small_bam_path, ref_fasta_path, monkeypatch):
+    """Past SCAN_VARIANTS_MAX_RESULTS the highest-VAF candidates are kept (in position order)."""
+    cfg = BAMCPConfig(reference=ref_fasta_path, min_alt_count=1, min_vaf=0.05, min_depth=1)
+    every = scan(
+        small_bam_path, "chr1", ref_fasta_path, min_vaf=0.05, min_depth=1,
+        min_mapq=cfg.min_mapq, min_baseq=cfg.min_baseq, min_alt_count=1,
+    ).variants  # fmt: skip
+    if len({v["vaf"] for v in every}) < 2:
+        pytest.skip("fixture has too few distinct VAFs to exercise the cap")
+    monkeypatch.setattr(tools, "SCAN_VARIANTS_MAX_RESULTS", 1)
+    payload = _payload(
+        await tools.handle_scan_variants({"file_path": small_bam_path, "contig": "chr1"}, cfg)
+    )
+    assert payload["applied_filters"]["results_capped"] is True
+    assert payload["applied_filters"]["total_candidates"] == len(every)
+    [kept] = payload["variants"]
+    assert kept["vaf"] == max(v["vaf"] for v in every)

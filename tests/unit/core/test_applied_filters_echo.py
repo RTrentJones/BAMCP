@@ -15,7 +15,7 @@ import pytest
 
 from bamcp.config import BAMCPConfig
 from bamcp.constants import INDEL_DETECTION_MAX_REGION
-from bamcp.core.parsers import fetch_region, scan_contig
+from bamcp.core.parsers import fetch_region
 from bamcp.core.serialization import build_enhanced_variants, serialize_region_data
 from bamcp.core.tools import (
     _format_filters_line,
@@ -24,6 +24,8 @@ from bamcp.core.tools import (
     handle_scan_variants,
     handle_visualize_region,
 )
+
+from .scan_helpers import scan
 
 SEQ = "ACGT" * 250  # 1000 bp
 
@@ -226,8 +228,8 @@ class TestScanScope:
 
     @pytest.mark.unit
     def test_scan_reports_max_region_truncation(self, small_bam_path, ref_fasta_path):
-        scan = scan_contig(small_bam_path, "chr1", ref_fasta_path, max_region=500)
-        assert (scan.scanned_end, scan.truncated_by_max_region) == (500, True)
+        result = scan(small_bam_path, "chr1", ref_fasta_path, max_region=500)
+        assert (result.scanned_end, result.requested_end) == (500, 1000)
 
     @pytest.mark.unit
     def test_scan_vaf_counts_deletion_depth_like_get_variants(self, tmp_path):
@@ -239,8 +241,8 @@ class TestScanScope:
         reads += [{"start": 100, "seq": del_seq, "cigar": [(0, 48), (2, 5), (0, 47)]}] * 4
         bam, ref = _bam(tmp_path, reads), _ref(tmp_path)
 
-        scan = scan_contig(bam, "chr1", ref, min_vaf=0.1, min_depth=1)
-        [v] = [v for v in scan.variants if v["position"] == site]
+        result = scan(bam, "chr1", ref, min_vaf=0.1, min_depth=1)
+        [v] = [v for v in result.variants if v["position"] == site]
         assert (v["depth"], v["alt_count"], v["vaf"]) == (8, 2, 0.25)
 
         region_data = fetch_region(bam, "chr1:101-200", ref, min_vaf=0.1, min_depth=1)
@@ -248,5 +250,5 @@ class TestScanScope:
         assert (g["depth"], g["vaf"]) == (v["depth"], v["vaf"])
 
         # The deletion depth can push a candidate below min_vaf: re-filtered.
-        strict = scan_contig(bam, "chr1", ref, min_vaf=0.3, min_depth=1)
+        strict = scan(bam, "chr1", ref, min_vaf=0.3, min_depth=1)
         assert [x for x in strict.variants if x["position"] == site] == []

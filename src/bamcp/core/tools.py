@@ -2809,7 +2809,7 @@ def _scan_chunk(
     min_baseq: int,
     min_alt_count: int | None,
 ) -> list[dict]:
-    """SNV candidates in one chunk — the same per-chunk logic as ``parsers.scan_contig``."""
+    """SNV candidates in one chunk of a contig scan (count_coverage + deletion-depth fix)."""
     from .parsers import _deletion_depth_at, detect_variants, read_passes_filters
 
     ref_seq = fasta.fetch(contig, chunk_start, chunk_end)

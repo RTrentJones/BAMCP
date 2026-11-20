@@ -201,7 +201,7 @@ intentional. It is off by default in code; prod turns it on in the wrapper's inf
 (`RTrentJones.dev/infra/bamcp.tf`, `BAMCP_ALLOW_DYNAMIC_REGISTRATION = "true"`). Every in-memory store (OAuth clients/codes/tokens, index cache by bytes, region cache
 by bytes) is therefore bounded — keep any new store bounded too. Registration also caps each
 client record (`middleware/auth.py:check_client_metadata_size`: 10 `redirect_uris`, 2048 chars
-each, 256-char `client_name`, 16 KiB of metadata).
+each, 256-char `client_name`, 4 KiB of metadata).
 
 **One scheme classifier.** Every caller-supplied data source (BAM/CRAM, VCF, reference) goes
 through `core/validation.py:_is_remote_source`. Only an exact `http://` / `https://` prefix is

@@ -42,7 +42,8 @@ landed after that review.
   `Content-Length` and on streamed bytes; a malformed or conflicting `Content-Length` is a 400. It
   sits after `SecurityHeadersMiddleware` and before the rate limiter.
 - **Client-registration caps** — at most 10 `redirect_uris` of at most 2048 characters, a
-  `client_name` of at most 256 characters, and 16 KiB of metadata per client.
+  `client_name` of at most 256 characters, and 4 KiB of metadata per client (a real registration
+  is well under 1 KiB).
 - **IPv6 rate-limit buckets** — an IPv6 client is keyed by its /64 (IPv4-mapped addresses by the
   embedded IPv4), so rotating source addresses inside one /64 does not dodge the limit.
 - **CRAM reference lookup stays local** — at startup `REF_PATH` / `REF_CACHE` default to a

@@ -30,6 +30,7 @@ from typing import Any
 from ..config import BAMCPConfig
 from .metrics import PRF, ArtifactCheck, artifact_recall, prf_from_sets, risk_types_present
 from .router import InProcessRouter, ToolRouter
+from .yaml_io import load_yaml_file
 
 DEFAULT_VAF_TOLERANCE = 0.02
 
@@ -96,14 +97,7 @@ class TruthSet:
 
 def load_truthset(path: str | Path) -> TruthSet:
     """Parse a truth-set manifest YAML into a :class:`TruthSet`."""
-    try:
-        import yaml  # type: ignore[import-untyped]
-    except ImportError as e:  # pragma: no cover — install hint
-        raise RuntimeError(
-            "pyyaml is required for the truth-set scorer. Install with 'pip install \".[eval]\"'."
-        ) from e
-
-    doc = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    doc = load_yaml_file(path, purpose="the truth-set scorer")
     if not isinstance(doc, dict):
         raise ValueError("Truth-set manifest must be a mapping")
 

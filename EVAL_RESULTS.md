@@ -35,6 +35,11 @@ withheld, same cases) and reports the lift.
   EVAL_RESULTS.md`; pass `--models` to choose others. The OpenAI provider is gated off in the
   nightly workflow until the runner translates its message format.
 
+- **Tool descriptions before 2026-11-20.** Until then the LLM harness sent the model
+  placeholder tool descriptions instead of the registered `TOOL_SPECS` text, so any LLM-harness
+  result produced before that date measured a different tool surface. Results now record a
+  `tools_hash` of the descriptors shown, and `--cache` does not reuse a pass from another hash.
+
 ---
 
 ## Results

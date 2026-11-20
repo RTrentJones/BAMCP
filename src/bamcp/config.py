@@ -32,6 +32,8 @@ from .constants import (
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024  # 1 MiB; MCP JSON-RPC messages are small
+
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
@@ -180,6 +182,10 @@ class BAMCPConfig:
     # Security settings
     allowed_directories: list[str] | None = None
     allow_remote_files: bool = False
+    # Local BAM/CRAM/VCF/FASTA paths supplied by callers. Turn OFF for a remote-only public
+    # deployment so callers cannot probe or read the server's filesystem. (The operator's own
+    # BAMCP_REFERENCE is not a caller input and is unaffected.)
+    allow_local_files: bool = True
     allowed_remote_hosts: list[str] | None = None
     trusted_hosts: list[str] | None = None
     rate_limit: int = 120  # requests per minute per IP (every MCP JSON-RPC POST counts)
@@ -190,6 +196,8 @@ class BAMCPConfig:
     rate_limit_trusted_proxies: list[str] | None = None
     # Hard ceiling on distinct client IPs tracked by the limiter (bounds memory under churn).
     rate_limit_max_tracked_ips: int = 10_000
+    # Largest HTTP request body accepted (bytes); OAuth endpoints use a smaller fixed cap.
+    max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES
 
     # Telemetry settings
     telemetry_enabled: bool = False
@@ -266,6 +274,11 @@ class BAMCPConfig:
                 f"max_remote_index_bytes must be at least 1 byte, got {self.max_remote_index_bytes}"
             )
 
+        if self.max_request_bytes < 1:
+            raise ValueError(
+                f"max_request_bytes must be at least 1 byte, got {self.max_request_bytes}"
+            )
+
         if self.max_index_cache_bytes < 1:
             raise ValueError(
                 f"max_index_cache_bytes must be at least 1 byte, got {self.max_index_cache_bytes}"
@@ -329,6 +342,7 @@ class BAMCPConfig:
             ]
             or None,
             allow_remote_files=_env_bool("BAMCP_ALLOW_REMOTE_FILES", False),
+            allow_local_files=_env_bool("BAMCP_ALLOW_LOCAL_FILES", True),
             allowed_remote_hosts=[
                 h.strip() for h in env.get("BAMCP_ALLOWED_REMOTE_HOSTS", "").split(",") if h.strip()
             ]
@@ -344,6 +358,7 @@ class BAMCPConfig:
                 if p.strip()
             ]
             or None,
+            max_request_bytes=_env_int("BAMCP_MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES),
             telemetry_enabled=_env_bool("BAMCP_TELEMETRY_ENABLED", False),
             telemetry_path=env.get("BAMCP_TELEMETRY_PATH", ""),
             telemetry_otel_enabled=_env_bool("BAMCP_TELEMETRY_OTEL", False),

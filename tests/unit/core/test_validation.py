@@ -8,16 +8,16 @@ from bamcp.config import BAMCPConfig
 from bamcp.core.validation import (
     ALLELE_PATTERN,
     CHROM_PATTERN,
+    MAX_ALLELE_LENGTH,
     REGION_PATTERN,
     _is_private_ip,
+    check_variant_input,
     is_cram,
-    validate_data_sources,
     validate_path,
     validate_reference_path,
     validate_region,
     validate_remote_url,
     validate_variant_file_path,
-    validate_variant_input,
     warn_if_remote_unrestricted,
 )
 
@@ -444,67 +444,47 @@ class TestAllelePattern:
             assert not ALLELE_PATTERN.match(allele), f"{allele} should be invalid"
 
 
-class TestValidateVariantInput:
-    """Tests for validate_variant_input function."""
+class TestCheckVariantInput:
+    """The raising form: ValueError (mapped to isError by _run), limit is a named constant."""
 
     @pytest.mark.unit
-    def test_valid_input(self):
-        """Valid chromosome, position, ref, alt should pass validation."""
-        assert validate_variant_input("chr17", 7674220, "G", "A") is None
+    def test_valid_input_returns_none(self):
+        assert check_variant_input("chr17", 7674220, "G", "A") is None
+        assert check_variant_input("17", 7674220, "G", "A") is None
 
     @pytest.mark.unit
-    def test_valid_input_without_chr_prefix(self):
-        """Chromosome without chr prefix should be valid."""
-        assert validate_variant_input("17", 7674220, "G", "A") is None
+    @pytest.mark.parametrize(
+        ("chrom", "pos", "ref", "alt", "match"),
+        [
+            ("chrABC", 100, "A", "T", "Invalid chromosome"),
+            ("chr1", 0, "A", "T", "Position must be positive"),
+            ("chr1", -1, "A", "T", "Position must be positive"),
+            ("chr1", 100, "X", "A", "Invalid reference allele"),
+            ("chr1", 100, "", "A", "Invalid reference allele"),
+            ("chr1", 100, "A", "X", "Invalid alternate allele"),
+            ("chr1", 100, "A", "", "Invalid alternate allele"),
+        ],
+    )
+    def test_invalid_input_raises(self, chrom, pos, ref, alt, match):
+        with pytest.raises(ValueError, match=match):
+            check_variant_input(chrom, pos, ref, alt)
 
     @pytest.mark.unit
-    def test_invalid_chromosome(self):
-        """Invalid chromosome should return error."""
-        result = validate_variant_input("chrABC", 100, "A", "T")
-        assert result is not None
-        assert "Invalid chromosome" in result
+    def test_error_is_tool_input_error_and_value_error(self):
+        from bamcp.core.errors import ToolInputError
+
+        with pytest.raises(ToolInputError) as exc_info:
+            check_variant_input("chr1", 0, "A", "T")
+        assert isinstance(exc_info.value, ValueError)
 
     @pytest.mark.unit
-    def test_negative_position(self):
-        """Negative position should return error."""
-        result = validate_variant_input("chr1", -1, "A", "T")
-        assert result is not None
-        assert "Position must be positive" in result
-
-    @pytest.mark.unit
-    def test_zero_position(self):
-        """Zero position should return error."""
-        result = validate_variant_input("chr1", 0, "A", "T")
-        assert result is not None
-        assert "Position must be positive" in result
-
-    @pytest.mark.unit
-    def test_invalid_ref_allele(self):
-        """Invalid reference allele should return error."""
-        result = validate_variant_input("chr1", 100, "X", "A")
-        assert result is not None
-        assert "Invalid reference allele" in result
-
-    @pytest.mark.unit
-    def test_invalid_alt_allele(self):
-        """Invalid alternate allele should return error."""
-        result = validate_variant_input("chr1", 100, "A", "X")
-        assert result is not None
-        assert "Invalid alternate allele" in result
-
-    @pytest.mark.unit
-    def test_empty_ref_allele(self):
-        """Empty reference allele should return error."""
-        result = validate_variant_input("chr1", 100, "", "A")
-        assert result is not None
-        assert "Invalid reference allele" in result
-
-    @pytest.mark.unit
-    def test_empty_alt_allele(self):
-        """Empty alternate allele should return error."""
-        result = validate_variant_input("chr1", 100, "A", "")
-        assert result is not None
-        assert "Invalid alternate allele" in result
+    def test_allele_length_limit(self):
+        at_limit = "A" * MAX_ALLELE_LENGTH
+        assert check_variant_input("chr1", 100, at_limit, "T") is None
+        with pytest.raises(ValueError, match=f"maximum \\({MAX_ALLELE_LENGTH}bp\\)"):
+            check_variant_input("chr1", 100, at_limit + "A", "T")
+        with pytest.raises(ValueError, match="maximum"):
+            check_variant_input("chr1", 100, "T", at_limit + "A")
 
 
 class TestValidateReferencePath:
@@ -590,31 +570,6 @@ class TestValidateReferencePath:
         config = BAMCPConfig(allowed_directories=["/some/other/dir"])
         with pytest.raises(ValueError, match="not in allowed directories"):
             validate_reference_path(str(f), config)
-
-
-class TestValidateDataSources:
-    """The one-call aggregator validates every source a tool hands to pysam."""
-
-    @pytest.mark.unit
-    def test_reference_is_validated_via_aggregator(self, tmp_path):
-        bam = tmp_path / "sample.bam"
-        bam.write_bytes(b"BAM\x01")
-        config = BAMCPConfig(allow_remote_files=True, allowed_directories=None)
-        # A poisoned remote reference must be rejected even when the BAM is fine.
-        with patch("bamcp.core.validation.socket.getaddrinfo") as m:
-            m.return_value = _PRIVATE_IP_ADDRINFO
-            with pytest.raises(ValueError, match="private/internal address"):
-                validate_data_sources(
-                    str(bam), config, reference="https://internal.example.com/hg38.fa"
-                )
-
-    @pytest.mark.unit
-    def test_none_sources_skipped(self, tmp_path):
-        bam = tmp_path / "sample.bam"
-        bam.write_bytes(b"BAM\x01")
-        config = BAMCPConfig(allowed_directories=None)
-        # reference/vcf None → only the BAM is validated, no error.
-        validate_data_sources(str(bam), config)
 
 
 class TestRemoteUrlHardening:

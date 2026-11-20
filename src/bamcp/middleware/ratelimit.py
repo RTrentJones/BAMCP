@@ -112,6 +112,26 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     return self._valid_ip(hop) or peer
         return peer
 
+    @staticmethod
+    def _bucket_key(ip: str) -> str:
+        """Rate-limit bucket for a client IP.
+
+        IPv4 addresses are their own bucket. An IPv6 client is keyed by its /64: a single
+        end-site is routinely delegated a /64 (or larger), so per-address keys would let one
+        client rotate through 2**64 source addresses to dodge the limit and churn the table.
+        IPv4-mapped IPv6 (``::ffff:203.0.113.7``) is keyed as the embedded IPv4 address.
+        Values that are not IPs (e.g. ``"unknown"``) are returned unchanged.
+        """
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return ip
+        if isinstance(addr, ipaddress.IPv6Address):
+            if addr.ipv4_mapped is not None:
+                return str(addr.ipv4_mapped)
+            return str(ipaddress.IPv6Network((addr, 64), strict=False))
+        return str(addr)
+
     def _sweep_expired(self, now: float) -> None:
         """Drop fully-expired entries from the LRU front (amortized O(1) per request).
 
@@ -145,7 +165,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             self._requests.popitem(last=False)
 
     async def dispatch(self, request: Request, call_next):  # noqa: ANN001, ANN201
-        ip = self._get_client_ip(request)
+        ip = self._bucket_key(self._get_client_ip(request))
         now = time.monotonic()
 
         self._sweep_expired(now)

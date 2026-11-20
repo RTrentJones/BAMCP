@@ -65,6 +65,24 @@ six parallel implementation packages → QA acceptance against real public BAMs 
   cannot be read as reference (round-3 failure mode); GRCh37 demo cold latency (not measured in a
   committed doc); dependabot python 3.14 / mcp<3 (lockfile + API work).
 
+## Security + resource-bounds round (2026-11) — landed
+
+- [x] **One URI-scheme classifier** (`core/validation.py:_is_remote_source`): only exact
+  `http://` / `https://` is remote; any other scheme-looking value (`http:/`, `data:`, `ftp:`,
+  `file:`, `s3:`) is rejected. Closes the SSRF where a `vcf_path` of
+  `http:/127.0.0.1:<port>/x.vcf.gz` reached htslib. A local VCF/BCF must exist.
+- [x] **`BAMCP_ALLOW_LOCAL_FILES`** (off in the compose `prod` profile; `BAMCP_REFERENCE` exempt),
+  **request body limit** (`BAMCP_MAX_REQUEST_BYTES`, 413), **registration metadata caps**,
+  **IPv6 rate-limit buckets by /64**, **local-only CRAM reference lookup** (`REF_PATH` /
+  `REF_CACHE`), **gene-symbol validation**, `BAMCP_HOST` code default `127.0.0.1`, fixed lookup
+  `reason_code`s instead of upstream error text.
+- [x] **Per-call bounds** with self-describing flags: VCF records, samples per record, mismatches
+  per read, read payload bytes, `get_variants` results (values in `constants.py`).
+- [x] **Tool descriptions single-sourced** in `tool_specs.TOOL_SPECS`, including the eval router.
+- [ ] **Residual:** redirects and DNS rebinding inside htslib/libcurl cannot be checked per URL —
+  the exact-host allow-list stays the real SSRF control; an operator-set `REF_PATH` URL is honoured
+  with a warning.
+
 ## Biological correctness (peer-review round) — closed
 
 A peer review using the tool for real analysis found `search_gene` returned **GRCh38** coordinates
@@ -99,7 +117,7 @@ on it); optional `BAMCP_GENOME_BUILD` in prod infra.
 | LLM/vision evals | 4.5 | ~6.5 | Grader scores tool-selection vs answer-correctness; ablation reporting; nightly parity |
 | Frontend quality | 6.5 | ~7.5 | tsc + ESLint + vitest + CI job |
 | Test rigor | 7.5 | ~8.5 | Hermetic suite, lockfile-pinned CI gate |
-| Architecture | 7 | ~6.5 ▼ | Regressed: `tools.py` grew to ~2,980 lines; god modules unsplit |
+| Architecture | 7 | ~6.5 ▼ | `tools.py` split into `services`/`remote`/`lookups`/`scan`/`filters` (2,979 → 1,998 lines); `parsers.py`, `mcp-app.ts`, `renderer.ts` unsplit |
 
 The "Then" scores are from the external review, which is not committed; only the overall 7.5 and
 the evals 4.5 are recorded in [`engineering-review-response.md`](engineering-review-response.md).
@@ -112,8 +130,9 @@ The "Now" scores are this document's own estimates.
 - **Deterministic-eval + safety-invariant discipline**, now behind a hermetic lockfile-pinned CI gate.
 
 ## Weaknesses (now)
-- **`tools.py` is a ~2,980-line god module** (it *grew* during hardening); `parsers.py`, `mcp-app.ts`,
-  `renderer.ts` unsplit.
+- **`tools.py` is still the largest module** (1,998 lines after the split into `core/services.py`,
+  `remote.py`, `lookups.py`, `scan.py`, `filters.py`); `parsers.py`, `mcp-app.ts`, `renderer.ts`
+  unsplit.
 - **Contracts still dynamically typed** — `dict[str, Any]` payload → hand-maintained TS interfaces
   (only a `schema_version` stamp + compat test so far).
 - **Evals still run in-process, not through the real MCP transport** (`MCPStdioRouter` a stub); no
@@ -136,7 +155,10 @@ The "Now" scores are this document's own estimates.
   schemas, landed with ACMG in #49.)
 
 ### Tier 2 — pay down the debt that's growing
-- [ ] **3. Split `tools.py`** (and the two big `.ts` files) by use case, before it grows further.
+- [x] **3a. Split `tools.py`** — runtime services, remote-input download/warming, ClinVar/gnomAD
+  lookups, `scan_variants` and the candidate-filter predicate moved to their own `core/` modules;
+  the region tools share one `RegionRequest` preamble.
+- [ ] **3b. Split the two big `.ts` files** (`mcp-app.ts`, `renderer.ts`) and `parsers.py` by use case.
 - [ ] **4. Typed payload contract** (Pydantic → JSON Schema → TS codegen) — kills the dict-boundary bug class.
 
 ### Tier 3 — release credibility

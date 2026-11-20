@@ -15,6 +15,8 @@ helpers below raise :class:`NCBIUnavailableError` instead, which callers report 
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 import time
 from typing import Any
 
@@ -66,6 +68,61 @@ class TokenBucketRateLimiter:
                 self._tokens = 0
             else:
                 self._tokens -= 1
+
+
+# Query parameters that carry a credential; their values never reach a log line.
+_SECRET_PARAMS = frozenset({"api_key", "apikey", "key", "token", "access_token"})
+_SECRET_PARAM_RE = re.compile(r"(?i)\b(" + "|".join(sorted(_SECRET_PARAMS)) + r")=[^&\s'\"<>]*")
+
+
+def _redact_url(url: httpx.URL) -> str:
+    params = [
+        (k, "REDACTED" if k.lower() in _SECRET_PARAMS else v) for k, v in url.params.multi_items()
+    ]
+    return str(url.copy_with(params=params)) if params else str(url)
+
+
+def redact_error(exc: BaseException) -> str:
+    """A loggable description of an (httpx) error with every credential removed.
+
+    ``str()`` of an ``httpx.HTTPStatusError`` embeds the full request URL — for NCBI that
+    includes ``api_key=…`` — so log sites must use this instead of ``%s`` of the exception.
+    Gives the exception type, the HTTP status when there is one, and the request URL with
+    ``api_key``/``key``/``token`` values replaced; any other text is scrubbed of the same
+    ``name=value`` pairs.
+    """
+    name = type(exc).__name__
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{name}: HTTP {exc.response.status_code} for {_redact_url(exc.request.url)}"
+    if isinstance(exc, httpx.RequestError):
+        try:
+            where = f" for {_redact_url(exc.request.url)}"
+        except RuntimeError:  # no request attached
+            where = ""
+        return f"{name}{where}"
+    text = _SECRET_PARAM_RE.sub(lambda m: f"{m.group(1)}=REDACTED", str(exc))
+    return f"{name}: {text}" if text else name
+
+
+class _RedactingFilter(logging.Filter):
+    """Scrub credential query parameters from a record before any handler formats it.
+
+    httpx logs every request at INFO as ``HTTP Request: GET <full URL>`` — with NCBI's
+    ``api_key`` in the query — and FastMCP configures logging at INFO, so the key would land
+    in the server log on every lookup.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        scrubbed = _SECRET_PARAM_RE.sub(lambda m: f"{m.group(1)}=REDACTED", message)
+        if scrubbed != message:
+            record.msg, record.args = scrubbed, ()
+        return True
+
+
+_HTTPX_LOG_FILTER = _RedactingFilter()
+if _HTTPX_LOG_FILTER not in logging.getLogger("httpx").filters:
+    logging.getLogger("httpx").addFilter(_HTTPX_LOG_FILTER)
 
 
 # Bounded retry for NCBI's shared-quota throttling (429) and transient gateway errors. Under

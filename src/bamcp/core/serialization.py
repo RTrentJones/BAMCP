@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..analysis.evidence import _vcf_evidence, enhance_variants_with_evidence
-from ..constants import PAYLOAD_SCHEMA_VERSION
+from ..constants import COMPACT_REGION_THRESHOLD_BP, PAYLOAD_SCHEMA_VERSION
 from .parsers import AlignedRead, RegionData
 
 
@@ -33,6 +33,10 @@ def _serialize_reads_columnar(reads: list[AlignedRead], include_sequence: bool) 
         "is_reverse": [r.is_reverse for r in reads],
         "mismatches": [r.mismatches for r in reads],
     }
+
+    if any(r.mismatches_truncated for r in reads):
+        # Per-read marker: that read's ``mismatches`` stops at READ_MAX_MISMATCHES.
+        cols["mismatches_truncated"] = [r.mismatches_truncated for r in reads]
 
     if include_sequence:
         cols["sequence"] = [r.sequence for r in reads]
@@ -117,14 +121,12 @@ def serialize_region_data(data: RegionData, compact: bool | None = None) -> dict
         data: The region data to serialize.
         compact: If True, omit sequences to reduce payload size.
                  If None (default), auto-detect based on region size:
-                 include sequences for regions <= 500bp (base-level view possible).
+                 include sequences for regions <= COMPACT_REGION_THRESHOLD_BP
+                 (base-level view possible).
     """
-    # Auto-detect compact mode based on region size
-    # Base rendering requires scale >= 10, which means ~80bp at 800px width
-    # Use 500bp threshold for safety margin
     if compact is None:
         region_size = data.end - data.start
-        compact = region_size > 500
+        compact = region_size > COMPACT_REGION_THRESHOLD_BP
 
     # Compute read-level evidence for every variant (shared with get_variants).
     enhanced_variants, variant_evidence = build_enhanced_variants(data)
@@ -143,4 +145,6 @@ def serialize_region_data(data: RegionData, compact: bool | None = None) -> dict
         "reference_sequence": data.reference_sequence,
         "variant_evidence": variant_evidence,
         "compact": compact,
+        # Additive (no schema bump): the viewer's sequence auto-fetch cut-off.
+        "compact_threshold_bp": COMPACT_REGION_THRESHOLD_BP,
     }

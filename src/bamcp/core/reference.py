@@ -2,10 +2,30 @@
 
 from __future__ import annotations
 
+from typing import TypedDict
+
+from ..constants import GENOME_BUILD_ALIASES, normalize_genome_build
+
 # Contig naming styles. A reference is only usable for a BAM that names its
 # contigs the same way: fetching "1" from a "chr1"-style FASTA raises KeyError.
 CONTIG_STYLE_CHR = "chr"  # UCSC-style: chr1, chr2, chrM
 CONTIG_STYLE_NOCHR = "nochr"  # Ensembl/1000G-style: 1, 2, MT
+
+
+class GenomeBuildInfo(TypedDict):
+    """One entry of :data:`GENOME_BUILDS`."""
+
+    aliases: list[str]
+    chr1_length: int
+    description: str
+    # Contig style (CONTIG_STYLE_CHR / CONTIG_STYLE_NOCHR) -> openable FASTA URL, or None.
+    fasta_urls: dict[str, str | None]
+
+
+def _aliases_for(canonical: str) -> list[str]:
+    """Aliases of ``canonical``, derived from the one table in ``constants``."""
+    return sorted(a for a, c in GENOME_BUILD_ALIASES.items() if c == canonical)
+
 
 # Known genome builds with detection signatures and public references.
 #
@@ -21,9 +41,9 @@ CONTIG_STYLE_NOCHR = "nochr"  # Ensembl/1000G-style: 1, 2, MT
 # pysam fails with a bare "error when opening file <url>", so `list_contigs`
 # was steering callers straight into an error that no argument could fix.
 # Re-verify (HTTP 206 on all three) before changing any URL below.
-GENOME_BUILDS: dict[str, dict] = {
+GENOME_BUILDS: dict[str, GenomeBuildInfo] = {
     "GRCh38": {
-        "aliases": ["hg38", "grch38", "grch38.p14", "grch38.p13"],
+        "aliases": _aliases_for("GRCh38"),
         "chr1_length": 248956422,
         "description": "Human genome build 38 (Dec 2013)",
         "fasta_urls": {
@@ -40,7 +60,7 @@ GENOME_BUILDS: dict[str, dict] = {
         },
     },
     "GRCh37": {
-        "aliases": ["hg19", "grch37", "b37", "hs37d5"],
+        "aliases": _aliases_for("GRCh37"),
         "chr1_length": 249250621,
         "description": "Human genome build 37 (Feb 2009)",
         "fasta_urls": {
@@ -58,34 +78,6 @@ GENOME_BUILDS: dict[str, dict] = {
         },
     },
 }
-
-
-def normalize_build_name(name: str) -> str | None:
-    """Normalize build aliases to canonical names.
-
-    Args:
-        name: Build name or alias (e.g., "hg38", "GRCh38", "hg19")
-
-    Returns:
-        Canonical build name (e.g., "GRCh38") or None if not recognized.
-
-    Examples:
-        >>> normalize_build_name("hg38")
-        "GRCh38"
-        >>> normalize_build_name("hg19")
-        "GRCh37"
-        >>> normalize_build_name("unknown")
-        None
-    """
-    name_lower = name.lower()
-
-    for canonical, info in GENOME_BUILDS.items():
-        if name_lower == canonical.lower():
-            return canonical
-        if name_lower in info["aliases"]:
-            return canonical
-
-    return None
 
 
 def contig_style(contigs: list[dict]) -> str:
@@ -163,7 +155,7 @@ def get_public_reference_url(build: str, style: str | None = None) -> str | None
         that naming style. None means "nothing safe to suggest" — callers should
         say so rather than falling back to a URL that will fail to open.
     """
-    canonical = normalize_build_name(build)
+    canonical = normalize_genome_build(build)
     if not canonical or canonical not in GENOME_BUILDS:
         return None
     url = GENOME_BUILDS[canonical]["fasta_urls"].get(style or CONTIG_STYLE_NOCHR)

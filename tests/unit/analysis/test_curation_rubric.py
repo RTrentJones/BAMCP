@@ -12,6 +12,7 @@ from bamcp.analysis.curation import (
     handle_get_variant_curation_summary,
 )
 from bamcp.config import BAMCPConfig
+from bamcp.core.errors import ToolInputError
 
 
 @pytest.fixture
@@ -234,47 +235,41 @@ class TestHandlerFormatParam:
 
 
 class TestRubricErrorResponses:
-    """Errors should also respect the rubric envelope so the eval grader can parse them."""
+    """Invalid input is a tool ERROR (ToolInputError → isError via _run), in either format."""
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_validation_error_in_rubric_returns_json(self, small_bam_path, config):
-        result = await handle_get_variant_curation_summary(
-            {
-                "file_path": small_bam_path,
-                "chrom": "invalid_chr",
-                "pos": 100,
-                "ref": "A",
-                "alt": "T",
-                "format": "rubric",
-            },
-            config,
-        )
-        payload = json.loads(result["content"][0]["text"])
-        assert "error" in payload
-        assert payload["rubric_version"] == RUBRIC_VERSION
+    @pytest.mark.parametrize("fmt", ["rubric", "text"])
+    async def test_validation_error_raises(self, small_bam_path, config, fmt):
+        with pytest.raises(ToolInputError, match="Invalid chromosome"):
+            await handle_get_variant_curation_summary(
+                {
+                    "file_path": small_bam_path,
+                    "chrom": "invalid_chr",
+                    "pos": 100,
+                    "ref": "A",
+                    "alt": "T",
+                    "format": fmt,
+                },
+                config,
+            )
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_validation_error_in_text_returns_plain_text(self, small_bam_path, config):
-        result = await handle_get_variant_curation_summary(
-            {
-                "file_path": small_bam_path,
-                "chrom": "invalid_chr",
-                "pos": 100,
-                "ref": "A",
-                "alt": "T",
-                "format": "text",
-            },
-            config,
-        )
-        text = result["content"][0]["text"]
-        try:
-            json.loads(text)
-            is_json = True
-        except (ValueError, TypeError):
-            is_json = False
-        assert not is_json, "Text-mode error must remain plain text"
+    async def test_validation_runs_before_reference_resolution(
+        self, small_bam_path, config, monkeypatch
+    ):
+        """Bad input fails fast — before reference resolution can read a remote header."""
+
+        async def must_not_run(*_a, **_kw):
+            raise AssertionError("reference resolved before input validation")
+
+        monkeypatch.setattr("bamcp.core.tools._resolve_reference_info", must_not_run)
+        with pytest.raises(ToolInputError, match="Invalid alternate allele"):
+            await handle_get_variant_curation_summary(
+                {"file_path": small_bam_path, "chrom": "chr1", "pos": 1, "ref": "A", "alt": "Z"},
+                config,
+            )
 
 
 class TestCurationReferenceSSRF:
@@ -345,17 +340,52 @@ async def test_curation_rejects_ref_that_is_not_the_reference_base(
     config = BAMCPConfig(reference=comprehensive_ref_fasta_path)
     # chr1:1151 is A in the reference (a real A>G het); claim the reference base is G and
     # the alt is A — every reference read would otherwise count as alt support.
-    result = await handle_get_variant_curation_summary(
-        {
-            "file_path": comprehensive_bam_path,
-            "chrom": "chr1",
-            "pos": 1151,
-            "ref": "G",
-            "alt": "A",
-            "format": "rubric",
-        },
-        config,
-    )
-    payload = json.loads(result["content"][0]["text"])
-    assert "error" in payload
-    assert "does not match the reference" in payload["error"]
+    with pytest.raises(ToolInputError, match="does not match the reference"):
+        await handle_get_variant_curation_summary(
+            {
+                "file_path": comprehensive_bam_path,
+                "chrom": "chr1",
+                "pos": 1151,
+                "ref": "G",
+                "alt": "A",
+                "format": "rubric",
+            },
+            config,
+        )
+
+
+@pytest.mark.unit
+class TestFilterCheckUnknownCounts:
+    """An unknown alt count/VAF renders as "unknown", never as "None/20" or a format crash."""
+
+    def _check(self, **at):
+        from bamcp.analysis.curation import _format_filter_check
+
+        check = {
+            "passes_filters": False,
+            "failed_filters": ["min_alt_count"],
+            "at_filters": {"alt_count": None, "depth": 20, "vaf": None, **at},
+        }
+        return "\n".join(_format_filter_check(check, None))
+
+    def test_unknown_alt_count(self):
+        text = self._check()
+        assert "None" not in text
+        assert "unknown alt reads of 20 (VAF unknown)" in text
+
+    def test_known_counts_unchanged(self):
+        text = self._check(alt_count=3, vaf=0.15)
+        assert "At the filters: 3/20 alt reads (VAF 15.0%)" in text
+
+    def test_unknown_in_unfiltered_block(self):
+        from bamcp.analysis.curation import _format_filter_check
+
+        check = {
+            "passes_filters": True,
+            "failed_filters": [],
+            "at_filters": {"alt_count": 2, "depth": 10, "vaf": 0.2},
+            "unfiltered": {"alt_count": None, "depth": None, "vaf": None},
+        }
+        text = "\n".join(_format_filter_check(check, None))
+        assert "Unfiltered (min_baseq=0): unknown alt reads (VAF unknown)" in text
+        assert "None" not in text

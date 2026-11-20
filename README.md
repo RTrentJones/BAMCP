@@ -233,8 +233,9 @@ make install              # builds the viewer (npm), then pip install -e ".[dev]
 # Build production image
 docker compose --profile prod build
 
-# Run production server (Streamable HTTP on port 8000). The prod profile enables auth, so it
-# needs a service token — the server refuses to start without one:
+# Run production server (Streamable HTTP on 127.0.0.1:8000). The prod profile enables auth, so it
+# needs a service token — the server refuses to start without one. It also sets a remote-host
+# allow-list and BAMCP_ALLOW_LOCAL_FILES=false, so it serves only allow-listed URLs and demo: aliases:
 BAMCP_VERIFY_TOKEN="$(openssl rand -hex 32)" docker compose --profile prod up
 
 # Prefer to run without auth? Use the preview profile (Streamable HTTP at /mcp, auth disabled):
@@ -333,7 +334,7 @@ below are condensed from each tool's registered description.
 | Tool | Description | Required Args | Optional Args |
 |------|-------------|---------------|---------------|
 | `visualize_region` | Visualize aligned reads in a genomic region with the interactive MCP Apps viewer | `file_path`, `region` | `reference`, `vcf_path`, `variant_source` |
-| `get_variants` | Detect and return candidate variants in a region; each carries `artifact_risk`, confidence, concerns and a plain-language interpretation (with a zygosity hint) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_vaf`, `min_depth`, `min_alt_count` |
+| `get_variants` | Detect and return candidate variants in a region (at most 1,000; see [Per-call limits](#per-call-limits)); each carries `artifact_risk`, confidence, concerns and a plain-language interpretation (with a zygosity hint) | `file_path`, `region` | `reference`, `vcf_path`, `variant_source`, `min_vaf`, `min_depth`, `min_alt_count` |
 | `get_coverage` | Calculate depth of coverage statistics for a region | `file_path`, `region` | `reference` |
 | `list_contigs` | Detect the genome build (GRCh37 vs GRCh38) and contig naming style and list primary chromosomes; use this first on new BAM files | `file_path` | `reference`, `include_all` |
 | `jump_to` | Jump to a specific genomic position (1-based) and view surrounding reads | `file_path`, `contig`, `position` | `window`, `reference`, `vcf_path`, `variant_source` |
@@ -375,7 +376,10 @@ Enrich further with `lookup_clinvar` / `lookup_gnomad` on the returned 1-based p
 `lookup_clinvar` / `lookup_gnomad` responses carry an explicit `status`:
 `found` · `not_found` (the variant is genuinely absent from that database) ·
 `unavailable` (the lookup **errored or timed out** — absence is *unknown*) · `disabled`
-(switched off on this server via `BAMCP_CLINVAR_ENABLED` / `BAMCP_GNOMAD_ENABLED`). Invalid
+(switched off on this server via `BAMCP_CLINVAR_ENABLED` / `BAMCP_GNOMAD_ENABLED`). An
+`unavailable` answer carries a fixed `reason_code` (`timeout`, `network_error`, `upstream_error`,
+`unsupported_build`) and a short `reason`; upstream error text stays in the server log. Every
+outcome states the `genome_build` queried. Invalid
 input (a bad allele, position or build) is a tool error (`isError`), not a status. This matters because a failed lookup must not read as "not in the database" —
 in the ACMG scaffold (`classify_variant`) that would let a network blip masquerade as rarity
 (PM2) or "no pathogenic assertion" evidence. When a source is `unavailable` (or `disabled`), the
@@ -393,6 +397,22 @@ indel detection ran); `get_variants`, `scan_variants` and the viewer tools also 
 `filter_note`. This makes a variant's **absence** interpretable: an empty result
 at a site may reflect an aggressive `min_vaf`/`min_depth` rather than a true reference call. Loosen
 the thresholds (per-call `min_vaf`/`min_depth`, or the server defaults) to widen the net.
+
+#### Per-call limits
+
+Each call reads a bounded amount, and says so when it hits a bound:
+
+| Bound | Value | What the response says |
+|-------|-------|------------------------|
+| VCF records read per call | 5,000 | `applied_filters.vcf_truncated` + `vcf_max_records` (past the cap a VCF site's absence is not a call) |
+| Samples kept per VCF record | 16 (GT only) | `samples_truncated` + the full `sample_count` on the variant |
+| Mismatches kept per read | 1,000 | `mismatches_truncated` on the read |
+| Estimated read payload | 64 MiB | read extraction stops; `reads_truncated` |
+| Variants returned by `get_variants` | 1,000 | `applied_filters.truncated`, `total_candidates`, `max_results`; VCF records are kept first, then the candidates with the most alt reads; output stays position-sorted |
+
+`get_region_summary` lists at most 1,000 variants and adds a "Variant listing TRUNCATED" line
+when it cuts the list; `scan_variants` returns at
+most 500 candidates.
 
 ### Demo datasets, resources & prompts
 
@@ -455,7 +475,7 @@ A region string is at most 100 characters and spans at most 1 Mbp (`scan_variant
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
 | `BAMCP_TRANSPORT` | Transport mode: `stdio`, `sse`, `streamable-http` | `stdio` |
-| `BAMCP_HOST` | HTTP bind address | `0.0.0.0` |
+| `BAMCP_HOST` | HTTP bind address (the Docker image sets `0.0.0.0`) | `127.0.0.1` |
 | `BAMCP_PORT` | HTTP port | `8000` |
 
 ### Authentication Settings
@@ -494,19 +514,28 @@ deploy-identity route is unauthenticated.
 
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
-| `BAMCP_ALLOW_REMOTE_FILES` | Allow HTTP(S) BAM/CRAM/VCF/reference URLs | `false` |
+| `BAMCP_ALLOW_REMOTE_FILES` | Allow `http://` / `https://` BAM/CRAM/VCF/reference URLs (no other scheme is ever accepted) | `false` |
 | `BAMCP_ALLOWED_REMOTE_HOSTS` | Comma-separated host allow-list for remote fetch (the real SSRF control) | None |
 | `BAMCP_ALLOWED_DIRECTORIES` | Comma-separated local dirs that file paths must be under | None |
+| `BAMCP_ALLOW_LOCAL_FILES` | Accept caller-supplied local paths (BAM/CRAM, VCF, reference). Set `false` on a remote-only server; the operator's `BAMCP_REFERENCE` still works | `true` |
+| `BAMCP_MAX_REQUEST_BYTES` | Largest HTTP request body accepted (413 above it); OAuth endpoints are capped at 64 KiB | `1048576` |
 | `BAMCP_RATE_LIMIT` | Requests per minute per client IP (every MCP JSON-RPC message counts) | `120` |
 | `BAMCP_RATE_LIMIT_TRUSTED_PROXIES` | IPs/CIDRs whose `CF-Connecting-IP` / `X-Forwarded-For` headers are trusted | loopback (`127.0.0.1`, `::1`) |
 | `BAMCP_TRUSTED_HOSTS` | Comma-separated allowed `Host` headers (DNS-rebinding protection) | None (no Host check) |
+
+Only an exact `http://` or `https://` prefix is treated as remote. Any other value that starts
+like a URI scheme (`http:/` with one slash, `data:`, `ftp:`, `file:`, `s3:`, …) is rejected rather
+than read as a local path, because htslib would open it itself. A local VCF/BCF must exist.
 
 Remote fetch is SSRF-guarded: private/internal/metadata IPs are always blocked, and — because the
 actual fetch is performed by pysam/htslib (which follows redirects outside BAMCP) — the
 **host allow-list is the primary control**. Set `BAMCP_ALLOWED_REMOTE_HOSTS` in any
 internet-reachable deployment. Client-IP headers are honored only from a trusted proxy
 (`CF-Connecting-IP` first, then `X-Forwarded-For` walked right-to-left), so a client cannot spoof
-its IP to bypass rate limits.
+its IP to bypass rate limits. An IPv6 client is rate-limited per /64.
+
+At startup BAMCP points htslib's `REF_PATH` / `REF_CACHE` at a local directory under the cache dir
+(unless you set them), so a CRAM's reference is never looked up over the network by checksum.
 
 ---
 
@@ -645,17 +674,18 @@ BAMCP/
 │       ├── server.py         # FastMCP server setup, tool/resource registration
 │       ├── config.py         # Environment-based configuration
 │       ├── constants.py      # Shared defaults and thresholds
-│       ├── tool_specs.py     # JSON-schema spec per tool
+│       ├── tool_specs.py     # Description + JSON-schema spec per tool (the one source)
 │       ├── resources.py      # UI resource provider
 │       ├── demos.py          # demo: dataset aliases
 │       ├── prompts.py        # MCP prompts + bamcp://demos / guide resources
 │       ├── glossary.py       # bamcp://glossary
 │       ├── viewer_build.py   # Viewer source-hash build stamp
-│       ├── core/             # tools (handlers), parsers (pysam), validation, serialization,
-│       │                     # cache, reference, errors, prewarm
+│       ├── core/             # tools (handlers), services, remote, lookups, scan, filters,
+│       │                     # parsers (pysam), validation, serialization, cache, reference,
+│       │                     # errors, prewarm
 │       ├── analysis/         # evidence, curation, acmg, fusion
 │       ├── clients/          # clinvar, gnomad, genes, ncbi, ttl_cache
-│       ├── middleware/       # auth (OAuth 2.0), ratelimit, security, telemetry
+│       ├── middleware/       # auth (OAuth 2.0), bodylimit, ratelimit, security, telemetry
 │       ├── eval/             # evaluation harness (truthset gate, runner, grader, visual/)
 │       └── static/           # Viewer TS/Vite app (viewer.html, mcp-app.ts, renderer.ts, …)
 │           └── dist/         # Built viewer.html bundle (generated by `make build-viewer`)

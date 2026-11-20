@@ -7,9 +7,11 @@ import time
 import pytest
 
 from bamcp.config import BAMCPConfig
+from bamcp.core import scan as scan_mod
 from bamcp.core import tools
-from bamcp.core.errors import ToolInputError
-from bamcp.core.parsers import scan_contig
+from bamcp.core.errors import ToolInputError, sanitize_tool_exception
+
+from .scan_helpers import scan
 
 pytestmark = pytest.mark.unit
 
@@ -24,13 +26,13 @@ def _payload(result):
 
 
 async def test_full_scan_matches_scan_contig(small_bam_path, ref_fasta_path, ref_config):
-    """The progressive scanner finds exactly what the whole-contig scanner finds."""
+    """The handler reports exactly what one uninterrupted scan of the contig finds."""
     payload = _payload(
         await tools.handle_scan_variants(
             {"file_path": small_bam_path, "contig": "chr1"}, ref_config
         )
     )
-    expected = scan_contig(
+    expected = scan(
         small_bam_path,
         "chr1",
         ref_fasta_path,
@@ -46,14 +48,15 @@ async def test_full_scan_matches_scan_contig(small_bam_path, ref_fasta_path, ref
     assert payload["truncated"] is False
     assert "truncation_reason" not in payload
     assert payload["scanned_region"] == f"chr1:1-{expected.scanned_end}"
+    assert expected.scanned_end == expected.contig_length
     assert payload["applied_filters"]["truncated_by_deadline"] is False
 
 
 async def test_deadline_returns_partial_results(small_bam_path, ref_config, monkeypatch):
     """A slow chunk past the soft deadline yields truncated:true + what was scanned."""
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_CHUNK_SIZE", 100)
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_DEADLINE_SECONDS", 0.15)
-    real_chunk = tools._scan_chunk
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_CHUNK_SIZE", 100)
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_DEADLINE_SECONDS", 0.15)
+    real_chunk = scan_mod._scan_chunk
     calls = []
 
     def slow_chunk(*args, **kwargs):
@@ -61,7 +64,7 @@ async def test_deadline_returns_partial_results(small_bam_path, ref_config, monk
         time.sleep(0.06)
         return real_chunk(*args, **kwargs)
 
-    monkeypatch.setattr(tools, "_scan_chunk", slow_chunk)
+    monkeypatch.setattr(scan_mod, "_scan_chunk", slow_chunk)
     payload = _payload(
         await tools.handle_scan_variants(
             {"file_path": small_bam_path, "contig": "chr1"}, ref_config
@@ -131,17 +134,17 @@ async def test_region_and_contig_must_agree(small_bam_path, ref_config):
 
 async def test_hard_timeout_returns_partial_results(small_bam_path, ref_config, monkeypatch):
     """A single chunk hung past the hard timeout still answers with the completed chunks."""
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_CHUNK_SIZE", 100)
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_DEADLINE_SECONDS", 30.0)
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_TIMEOUT_SECONDS", 0.2)
-    real_chunk = tools._scan_chunk
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_CHUNK_SIZE", 100)
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_DEADLINE_SECONDS", 30.0)
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_TIMEOUT_SECONDS", 0.2)
+    real_chunk = scan_mod._scan_chunk
 
     def hang_second(*args, **kwargs):
         if args[3] >= 100:
             time.sleep(0.4)
         return real_chunk(*args, **kwargs)
 
-    monkeypatch.setattr(tools, "_scan_chunk", hang_second)
+    monkeypatch.setattr(scan_mod, "_scan_chunk", hang_second)
     payload = _payload(
         await tools.handle_scan_variants(
             {"file_path": small_bam_path, "contig": "chr1"}, ref_config
@@ -155,12 +158,12 @@ async def test_hard_timeout_returns_partial_results(small_bam_path, ref_config, 
 
 async def test_nothing_scanned_is_an_error(small_bam_path, ref_config, monkeypatch):
     """No header read at all → no partial answer to give → an error, not an empty result."""
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_TIMEOUT_SECONDS", 0.05)
 
     def stuck(*args, **kwargs):
         time.sleep(0.2)
 
-    monkeypatch.setattr(tools, "_scan_contig_progressive", stuck)
+    monkeypatch.setattr(scan_mod, "_scan_contig_progressive", stuck)
     with pytest.raises(ToolInputError, match="before any data"):
         await tools.handle_scan_variants(
             {"file_path": small_bam_path, "contig": "chr1"}, ref_config
@@ -187,10 +190,44 @@ async def test_region_start_beyond_contig_is_an_error(small_bam_path, ref_config
         )
     )
     past = full["applied_filters"]["contig_length"] + 100
-    with pytest.raises(ToolInputError, match="beyond the end of chr1"):
+    with pytest.raises(ValueError, match="beyond the end of chr1") as exc:
         await tools.handle_scan_variants(
             {"file_path": small_bam_path, "region": f"chr1:{past}-{past + 50}"}, ref_config
         )
+    # The server's _run maps it to a caller-facing error with the same text.
+    mapped = sanitize_tool_exception(exc.value, "scan_variants", ref_config)
+    assert "beyond the end of chr1" in str(mapped)
+
+
+async def test_unknown_contig_suggests_the_files_spelling(small_bam_path, ref_config):
+    """An unknown contig is a ToolInputError naming the file's own spelling."""
+    with pytest.raises(ToolInputError, match="not found in the alignment header") as exc:
+        await tools.handle_scan_variants({"file_path": small_bam_path, "contig": "1"}, ref_config)
+    assert "retry with 'chr1'" in str(exc.value)
+    with pytest.raises(ToolInputError, match="check contig names with list_contigs"):
+        await tools.handle_scan_variants(
+            {"file_path": small_bam_path, "contig": "chrNope"}, ref_config
+        )
+
+
+async def test_other_value_errors_are_sanitized_not_echoed(small_bam_path, monkeypatch):
+    """A ValueError carrying an operator path is left to _run's scrubbing, not re-raised raw."""
+    secret_ref = "/srv/secret/operator_ref.fa"
+    config = BAMCPConfig(reference=secret_ref)
+
+    def boom(*_a, **_kw):
+        raise ValueError(f"could not open {secret_ref}")
+
+    monkeypatch.setattr(scan_mod, "_scan_contig_progressive", boom)
+
+    async def _noop(*_a, **_kw):
+        return None
+
+    monkeypatch.setattr(scan_mod, "_warm_remote_inputs", _noop)
+    with pytest.raises(ValueError) as exc:
+        await tools.handle_scan_variants({"file_path": small_bam_path, "contig": "chr1"}, config)
+    assert not isinstance(exc.value, ToolInputError)
+    assert secret_ref not in str(sanitize_tool_exception(exc.value, "scan_variants", config))
 
 
 async def test_max_region_cap_is_reported_with_continuation(
@@ -198,7 +235,7 @@ async def test_max_region_cap_is_reported_with_continuation(
 ):
     """A scan capped by SCAN_VARIANTS_MAX_REGION is truncated, with a next_region through the
     caller's requested stop — never truncated:false over an unscanned remainder."""
-    monkeypatch.setattr(tools, "SCAN_VARIANTS_MAX_REGION", 300)
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_MAX_REGION", 300)
     payload = _payload(
         await tools.handle_scan_variants(
             {"file_path": small_bam_path, "contig": "chr1"}, ref_config
@@ -231,3 +268,96 @@ async def test_alt_count_floor_applied_before_deletion_pileups(
         {"file_path": small_bam_path, "contig": "chr1", "min_alt_count": 10_000}, ref_config
     )
     assert seen == []
+
+
+class TestScanner:
+    """The chunked scanner itself (formerly asserted against a test-only parsers copy)."""
+
+    def test_scans_contig(self, small_bam_path, ref_fasta_path):
+        variants = scan(small_bam_path, "chr1", ref_fasta_path, chunk_size=500).variants
+        for v in variants:
+            assert v["contig"] == "chr1"
+            assert {"position", "ref", "alt", "vaf", "alt_count"} <= v.keys()
+
+    def test_nonexistent_contig(self, small_bam_path, ref_fasta_path):
+        """An unknown contig is an error, never a silent empty "no variants" result."""
+        with pytest.raises(ToolInputError, match="not found in the alignment header"):
+            scan(small_bam_path, "chrZ", ref_fasta_path)
+
+    def test_respects_min_vaf(self, small_bam_path, ref_fasta_path):
+        loose = scan(small_bam_path, "chr1", ref_fasta_path, min_vaf=0.05).variants
+        strict = scan(small_bam_path, "chr1", ref_fasta_path, min_vaf=0.5).variants
+        assert len(strict) <= len(loose)
+        assert all(v["vaf"] >= 0.5 for v in strict)
+
+    def test_respects_min_depth(self, small_bam_path, ref_fasta_path):
+        loose = scan(small_bam_path, "chr1", ref_fasta_path, min_depth=1).variants
+        strict = scan(small_bam_path, "chr1", ref_fasta_path, min_depth=10).variants
+        assert len(strict) <= len(loose)
+        assert all(v["depth"] >= 10 for v in strict)
+
+    def test_chunking_does_not_change_the_result(self, small_bam_path, ref_fasta_path):
+        key = lambda v: (v["position"], v["alt"], v["vaf"], v["depth"])  # noqa: E731
+        small = scan(small_bam_path, "chr1", ref_fasta_path, chunk_size=100, min_depth=1)
+        big = scan(small_bam_path, "chr1", ref_fasta_path, chunk_size=50_000, min_depth=1)
+        assert sorted(map(key, small.variants)) == sorted(map(key, big.variants))
+
+
+async def test_capped_scan_keeps_highest_vaf(small_bam_path, ref_fasta_path, monkeypatch):
+    """Past SCAN_VARIANTS_MAX_RESULTS the highest-VAF candidates are kept (in position order)."""
+    cfg = BAMCPConfig(reference=ref_fasta_path, min_alt_count=1, min_vaf=0.05, min_depth=1)
+    every = scan(
+        small_bam_path, "chr1", ref_fasta_path, min_vaf=0.05, min_depth=1,
+        min_mapq=cfg.min_mapq, min_baseq=cfg.min_baseq, min_alt_count=1,
+    ).variants  # fmt: skip
+    if len({v["vaf"] for v in every}) < 2:
+        pytest.skip("fixture has too few distinct VAFs to exercise the cap")
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_MAX_RESULTS", 1)
+    payload = _payload(
+        await tools.handle_scan_variants({"file_path": small_bam_path, "contig": "chr1"}, cfg)
+    )
+    assert payload["applied_filters"]["results_capped"] is True
+    assert payload["applied_filters"]["total_candidates"] == len(every)
+    [kept] = payload["variants"]
+    assert kept["vaf"] == max(v["vaf"] for v in every)
+
+
+def _old_selection(candidates: list[dict], cap: int) -> list[dict]:
+    """The pre-streaming end-of-scan selection, verbatim: stable VAF sort, cap, position sort."""
+    every = list(candidates)
+    every.sort(key=lambda v: v["vaf"], reverse=True)
+    return sorted(every[:cap], key=lambda v: v["position"])
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_streaming_selection_matches_end_of_scan_selection(seed):
+    """Keeping the top candidates while scanning picks exactly what the old end-of-scan sort
+    picked, in the same order, ties included (few distinct VAFs, repeated positions)."""
+    import random
+
+    rng = random.Random(seed)  # noqa: S311 — reproducible test data, not crypto
+    n = rng.randint(0, 60)
+    vafs = [rng.choice([0.0, 0.1, 0.25, 0.5, 1.0, 1]) for _ in range(rng.randint(1, 4))]
+    candidates = [
+        {"position": rng.randint(0, 40), "vaf": rng.choice(vafs), "id": i} for i in range(n)
+    ]
+    cap = rng.randint(1, 25)
+    top = scan_mod._TopCandidates(cap)
+    for v in candidates:
+        top.add(v)
+    streamed = sorted(top.by_vaf(), key=lambda v: v["position"])
+    assert [v["id"] for v in streamed] == [v["id"] for v in _old_selection(candidates, cap)]
+    assert top.total == n
+
+
+def test_scan_holds_at_most_the_result_cap(small_bam_path, ref_fasta_path, monkeypatch):
+    """Memory is bounded by the response cap however many candidates the scan visits, and the
+    total seen stays exact for the truncation report."""
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_MAX_RESULTS", 2)
+    progress = scan(small_bam_path, "chr1", ref_fasta_path, min_vaf=0.0, min_depth=1)
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_MAX_RESULTS", 10**9)
+    every = scan(small_bam_path, "chr1", ref_fasta_path, min_vaf=0.0, min_depth=1)
+    if every.candidates.total <= 2:
+        pytest.skip("fixture yields too few candidates to exercise the bound")
+    assert len(progress.candidates._heap) == 2
+    assert progress.candidates.total == every.candidates.total

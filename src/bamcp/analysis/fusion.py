@@ -21,6 +21,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from ..clients.ncbi import redact_error
 from ..config import BAMCPConfig
 from ..core.errors import ReferenceUnavailableError
 from ..core.serialization import build_enhanced_variants
@@ -110,7 +111,7 @@ async def _lookup_clinvar_safe(
     try:
         return await get_clinvar_client(config).lookup(chrom, pos, ref, alt, build=build)
     except Exception as e:  # noqa: BLE001 — degrade to "unavailable" rather than fail fusion
-        logger.warning("ClinVar lookup failed during fusion: %s", e)
+        logger.warning("ClinVar lookup failed during fusion: %s", redact_error(e))
         return UNAVAILABLE
 
 
@@ -124,7 +125,7 @@ async def _lookup_gnomad_safe(
     try:
         return await get_gnomad_client(config).lookup(chrom, pos, ref, alt, build=build)
     except Exception as e:  # noqa: BLE001 — degrade to "unavailable" rather than fail fusion
-        logger.warning("gnomAD lookup failed during fusion: %s", e)
+        logger.warning("gnomAD lookup failed during fusion: %s", redact_error(e))
         return UNAVAILABLE
 
 
@@ -308,6 +309,7 @@ async def assemble_evidence(
     from ..core.tools import (
         _applied_filters,
         _fetch_region_with_timeout,
+        _mismatch_truncation_filters,
         probe_site,
         site_filter_check,
     )
@@ -416,9 +418,12 @@ async def assemble_evidence(
         "observation": _observation_from_variant(
             target,
             fetch_error=fetch_error,
-            applied_filters=_applied_filters(
-                config, {}, include_max_reads=True, min_alt_count=config.min_alt_count
-            ),
+            applied_filters={
+                **_applied_filters(
+                    config, {}, include_max_reads=True, min_alt_count=config.min_alt_count
+                ),
+                **(_mismatch_truncation_filters(data) if data is not None else {}),
+            },
             alt_reads_seen=alt_reads_seen,
             probe=probe,
         ),

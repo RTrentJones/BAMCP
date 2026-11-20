@@ -3,6 +3,7 @@
 import asyncio
 import json
 
+import httpx
 import pytest
 
 from bamcp.config import BAMCPConfig
@@ -88,6 +89,24 @@ class TestVariantLineFormatting:
             "sv_len": None,
         }
         assert _format_variant_line(v) == "  chr2:1 <DUP>"
+
+    @pytest.mark.unit
+    def test_truncated_samples_say_how_many_are_hidden(self):
+        v = dict(
+            contig="chr1", position=99, ref="A", alt="G", vaf=0.5, depth=20, source="vcf",
+            variant_kind="snv", samples={f"S{i}": {"GT": [0, 1]} for i in range(16)},
+            sample_count=2504, samples_truncated=True,
+        )  # fmt: skip
+        line = _format_variant_line(v)
+        assert line.endswith("S15=0/1 … +2488 more samples]")
+
+    @pytest.mark.unit
+    def test_truncated_samples_without_count_still_flagged(self):
+        v = dict(
+            contig="chr1", position=99, ref="A", alt="G", vaf=0.5, depth=20,
+            samples={"S0": {"GT": [0, 1]}}, samples_truncated=True,
+        )  # fmt: skip
+        assert _format_variant_line(v).endswith("S0=0/1 … more samples]")
 
     @pytest.mark.unit
     def test_multisample_genotypes_appended(self):
@@ -1938,18 +1957,17 @@ class TestHandleGetVariantCurationSummary:
     async def test_invalid_chromosome_rejected(self, small_bam_path, config):
         from bamcp.analysis.curation import handle_get_variant_curation_summary
 
-        result = await handle_get_variant_curation_summary(
-            {
-                "file_path": small_bam_path,
-                "chrom": "invalid_chr",
-                "pos": 100,
-                "ref": "A",
-                "alt": "T",
-            },
-            config,
-        )
-        text = result["content"][0]["text"]
-        assert "Invalid" in text
+        with pytest.raises(ToolInputError, match="Invalid"):
+            await handle_get_variant_curation_summary(
+                {
+                    "file_path": small_bam_path,
+                    "chrom": "invalid_chr",
+                    "pos": 100,
+                    "ref": "A",
+                    "alt": "T",
+                },
+                config,
+            )
 
 
 class TestHandleScanVariants:
@@ -2395,7 +2413,7 @@ class TestMediumRoadmapCoverage:
                 assert url == "https://example.com/sample.bam.bai"
                 return StreamContext()
 
-        monkeypatch.setattr(tools_module, "validate_remote_url", mock_validate_remote_url)
+        monkeypatch.setattr("bamcp.core.remote.validate_remote_url", mock_validate_remote_url)
         index_path = tmp_path / "sample.bai"
 
         result = await tools_module._download_index_streaming(
@@ -2435,7 +2453,7 @@ class TestMediumRoadmapCoverage:
             def stream(self, method, url):
                 return StreamContext()
 
-        monkeypatch.setattr(tools_module, "validate_remote_url", lambda url, cfg: None)
+        monkeypatch.setattr("bamcp.core.remote.validate_remote_url", lambda url, cfg: None)
 
         with pytest.raises(ValueError, match="exceeds configured maximum"):
             await tools_module._download_index_streaming(
@@ -2503,7 +2521,7 @@ class TestMediumRoadmapCoverage:
 
         from bamcp.core.tools import _get_cached_region, _set_cached_region
 
-        monkeypatch.setattr("bamcp.core.tools.REGION_CACHE_MAX_ENTRIES", 3)
+        monkeypatch.setattr("bamcp.core.services.REGION_CACHE_MAX_ENTRIES", 3)
         cache: OrderedDict = OrderedDict()
         for i in range(3):
             _set_cached_region(cache, (f"k{i}",), object(), ttl=3600)
@@ -2537,11 +2555,12 @@ class TestMediumRoadmapCoverage:
         import asyncio
         import threading
 
+        import bamcp.core.services as services_mod
         import bamcp.core.tools as tm
 
         # Cap concurrency at 2 for the test.
         gate = asyncio.Semaphore(2)
-        monkeypatch.setattr(tm, "_get_parse_gate", lambda: gate)
+        monkeypatch.setattr(services_mod, "_get_parse_gate", lambda: gate)  # looked up there
         running = []
         release = threading.Event()
 
@@ -2584,7 +2603,7 @@ class TestMediumRoadmapCoverage:
 
         import bamcp.core.tools as tm
 
-        monkeypatch.setattr(tm, "_SERVICES_REGISTRY_MAX", 2)
+        monkeypatch.setattr("bamcp.core.services._SERVICES_REGISTRY_MAX", 2)
         cfg_a = BAMCPConfig()
         svc_a = tm.get_services(cfg_a)
         svc_a._clinvar = AsyncMock()  # a client that aclose() must release
@@ -2608,7 +2627,7 @@ class TestMediumRoadmapCoverage:
         """Sync embedded churn (no loop) must still close evicted services' clients."""
         import bamcp.core.tools as tm
 
-        monkeypatch.setattr(tm, "_SERVICES_REGISTRY_MAX", 2)
+        monkeypatch.setattr("bamcp.core.services._SERVICES_REGISTRY_MAX", 2)
         cfg_a = BAMCPConfig()
         svc_a = tm.get_services(cfg_a)
 
@@ -2639,18 +2658,23 @@ class TestMediumRoadmapCoverage:
         assert id(cfg) not in _services_registry
 
     @pytest.mark.unit
-    def test_get_services_identity_guard_rebuilds_on_stale_entry(self):
-        """If an id() is reused, the guard rebuilds rather than aliasing stale services."""
+    def test_registry_keys_cannot_alias_a_dead_config(self):
+        """Every entry keeps its own config alive, so its id() key is never reused."""
+        import gc
+        import weakref
+
         from bamcp.core.tools import _services_registry, get_services
 
         cfg = BAMCPConfig()
-        stale_cfg = BAMCPConfig()
-        stale_services = get_services(stale_cfg)
-        # Simulate id() reuse: a stale services object parked under cfg's id.
-        _services_registry[id(cfg)] = stale_services
-        rebuilt = get_services(cfg)
-        assert rebuilt is not stale_services  # guard rejected the stale entry
-        assert rebuilt.config is cfg
+        ref = weakref.ref(cfg)
+        services = get_services(cfg)
+        del cfg
+        gc.collect()
+        assert ref() is not None  # held by the registry entry, not collected
+        assert services.config is ref()
+        for key, entry in _services_registry.items():
+            assert key == id(entry.config)
+        assert get_services(ref()) is services
 
 
 class TestSearchGeneBuildResolution:
@@ -2947,16 +2971,90 @@ class TestFetchRegionTimeoutMessage:
     @pytest.mark.unit
     async def test_warm_reference_small_region_gets_no_cold_hint(self, monkeypatch):
         import bamcp.core.tools as tools_mod
+        from bamcp.core import remote
 
         async def _boom(*args, **kwargs):
             raise asyncio.TimeoutError()
 
         ref = "https://example.com/warm.fa.gz"
         monkeypatch.setattr(tools_mod, "_fetch_region_data", _boom)
-        monkeypatch.setitem(tools_mod._warm_inputs, ref, None)
+        monkeypatch.setitem(remote._warm_inputs, ref, None)
         with pytest.raises(TimeoutError) as exc_info:
             await tools_mod._fetch_region_with_timeout("/x.bam", "chr1:1-100", ref, BAMCPConfig())
         assert "retrying" not in str(exc_info.value)
+
+
+class TestLookupOutcomeEnvelope:
+    """Every lookup outcome carries build_info, timeouts reach their own branch, and upstream
+    error text is never echoed to the caller."""
+
+    _ARGS = {"chrom": "17", "pos": 1, "ref": "G", "alt": "C"}
+
+    @staticmethod
+    def _patch(monkeypatch, exc):
+        from bamcp.clients import clinvar, gnomad
+
+        async def lookup(self, *_a, **_kw):
+            raise exc
+
+        monkeypatch.setattr(clinvar.ClinVarClient, "lookup", lookup)
+        monkeypatch.setattr(gnomad.GnomadClient, "lookup", lookup)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc", [asyncio.TimeoutError(), TimeoutError("slow"), httpx.ReadTimeout("slow")]
+    )
+    async def test_timeout_is_reported_as_timeout(self, config, monkeypatch, exc):
+        self._patch(monkeypatch, exc)
+        for handler, source in (
+            (handle_lookup_clinvar, "ClinVar"),
+            (handle_lookup_gnomad, "gnomAD"),
+        ):
+            p = json.loads((await handler(dict(self._ARGS), config))["content"][0]["text"])
+            assert p["status"] == "unavailable"
+            assert p["reason_code"] == "timeout"
+            assert p["error"] == f"{source} lookup timed out"
+            assert p["genome_build"] and p["build_source"] == "server-default"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_network_failure_carries_build_info(self, config, monkeypatch):
+        self._patch(monkeypatch, ConnectionError("boom"))
+        for handler in (handle_lookup_clinvar, handle_lookup_gnomad):
+            p = json.loads((await handler(dict(self._ARGS), config))["content"][0]["text"])
+            assert p["reason_code"] == "network_error"
+            assert "boom" not in json.dumps(p)
+            assert p["genome_build"] and p["build_source"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_disabled_carries_build_info(self):
+        config = BAMCPConfig(clinvar_enabled=False, gnomad_enabled=False)
+        for handler in (handle_lookup_clinvar, handle_lookup_gnomad):
+            args = {**self._ARGS, "build": "hg19"}
+            p = json.loads((await handler(args, config))["content"][0]["text"])
+            assert p["status"] == "disabled"
+            assert p["genome_build"] == "GRCh37"
+            assert p["build_source"] == "explicit"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_upstream_error_text_not_echoed(self, config, monkeypatch):
+        from bamcp.clients.clinvar import ClinVarUnavailableError
+        from bamcp.clients.gnomad import GnomadQueryError
+
+        secret = "<html>" + "x" * 5000 + "upstream-internal-detail"
+        self._patch(monkeypatch, ClinVarUnavailableError(secret))
+        p = json.loads(
+            (await handle_lookup_clinvar(dict(self._ARGS), config))["content"][0]["text"]
+        )
+        assert "upstream-internal-detail" not in json.dumps(p)
+        assert p["reason_code"] == "upstream_error"
+        self._patch(monkeypatch, GnomadQueryError(secret))
+        p = json.loads((await handle_lookup_gnomad(dict(self._ARGS), config))["content"][0]["text"])
+        assert "upstream-internal-detail" not in json.dumps(p)
+        assert len(p["reason"]) < 200
 
 
 class TestLookupBuildRouting:
@@ -3030,7 +3128,9 @@ class TestLookupBuildRouting:
         r = await handle_lookup_clinvar({"chrom": "17", "pos": 1, "ref": "G", "alt": "C"}, config)
         p = json.loads(r["content"][0]["text"])
         assert p["status"] == "unavailable"
-        assert "truncated" in p["reason"]
+        assert p["reason_code"] == "upstream_error"
+        # Upstream error text stays in the server log, never in the payload.
+        assert "truncated" not in p["reason"]
         assert p.get("found") is not False
 
     @pytest.mark.unit
@@ -3062,7 +3162,9 @@ class TestLookupBuildRouting:
         )
         p = json.loads(r["content"][0]["text"])
         assert p["status"] == "unavailable"
-        assert "GRCh38" in p["reason"]
+        assert p["reason_code"] == "unsupported_build"
+        assert "gnomad_r4" not in p["reason"]
+        assert p["genome_build"] == "GRCh37"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -3206,13 +3308,41 @@ class TestSearchGeneHonesty:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_unavailable_reason_is_fixed_not_upstream_text(self, monkeypatch):
+        import httpx
+
+        from bamcp.clients.genes import GeneLookupError
+        from bamcp.core.tools import _LOOKUP_REASONS, handle_search_gene
+
+        leaky = "NCBI said: <internal detail 10.0.0.7>"
+        self._client(monkeypatch, exc=GeneLookupError(leaky))
+        r = await handle_search_gene({"symbol": "TP53", "build": "GRCh38"}, BAMCPConfig())
+        p = json.loads(r["content"][0]["text"])
+        assert p["reason_code"] == "upstream_error"
+        assert p["reason"] == f"NCBI Gene: {_LOOKUP_REASONS['upstream_error']}"
+        assert leaky not in r["content"][0]["text"]
+
+        exc = GeneLookupError("Gene esearch: NCBI request failed (ConnectError)")
+        exc.__cause__ = httpx.ConnectError("boom")
+        self._client(monkeypatch, exc=exc)
+        r = await handle_search_gene({"symbol": "TP53", "build": "GRCh38"}, BAMCPConfig())
+        assert json.loads(r["content"][0]["text"])["reason_code"] == "network_error"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_genuine_absence_is_not_found(self, monkeypatch):
         from bamcp.core.tools import handle_search_gene
 
         self._client(monkeypatch, None)
         r = await handle_search_gene({"symbol": "NOPE1", "build": "GRCh38"}, BAMCPConfig())
+        assert not r.get("isError")
         p = json.loads(r["content"][0]["text"])
+        # Same not-found shape as lookup_clinvar / lookup_gnomad: an answer, not an error.
         assert p["status"] == "not_found"
+        assert p["found"] is False
+        assert "NOPE1" in p["message"]
+        assert "error" not in p
+        assert p["genome_build"] == "GRCh38"
 
     @pytest.mark.unit
     @pytest.mark.asyncio

@@ -1,0 +1,301 @@
+"""CRAM decode on a remote-only server must not fall back to the header's ``@SQ UR:`` tag."""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from pathlib import Path
+
+import pysam
+import pytest
+
+from bamcp.config import BAMCPConfig
+from bamcp.core.errors import ToolInputError
+from bamcp.core.parsers import _open_alignment, guard_cram_decoding
+from bamcp.core.tools import (
+    CRAM_REFERENCE_REQUIRED_MESSAGE,
+    _fetch_region_with_timeout,
+    _require_cram_reference,
+)
+
+pytestmark = pytest.mark.unit
+
+FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
+
+
+def _cram_with_header_ur(tmp_path: Path, ur: str | None = None) -> tuple[Path, Path]:
+    """Write a CRAM whose only @SQ carries ``UR:`` (default ``file://<local fasta>``).
+
+    Returns ``(cram, fasta)``; the FASTA is the one the reads were encoded against.
+    """
+    ref = tmp_path / "header_ref.fa"
+    ref.write_text((FIXTURES / "ref.fa").read_text())
+    pysam.faidx(str(ref))
+    with pysam.FastaFile(str(ref)) as fa:
+        seq = fa.fetch("chr1").upper()
+        length = fa.get_reference_length("chr1")
+    header = {
+        "HD": {"VN": "1.6", "SO": "coordinate"},
+        "SQ": [
+            {
+                "SN": "chr1",
+                "LN": length,
+                "M5": hashlib.md5(seq.encode(), usedforsecurity=False).hexdigest(),
+                "UR": f"file://{ref}",
+            }
+        ],
+    }
+    cram = tmp_path / "header_ur.cram"
+    with (
+        pysam.AlignmentFile(str(FIXTURES / "small.bam")) as src,
+        pysam.AlignmentFile(str(cram), "wc", header=header, reference_filename=str(ref)) as out,
+    ):
+        for read in src.fetch("chr1"):
+            d = read.to_dict()
+            if d["next_ref_name"] not in ("=", "chr1"):
+                d["next_ref_name"] = "*"
+            out.write(pysam.AlignedSegment.from_dict(d, out.header))
+    if ur is not None:
+        # htslib rewrites UR: to the encoding reference on write, so set the attacker's
+        # value afterwards, as `samtools reheader` would.
+        with pysam.AlignmentFile(str(cram)) as f:
+            text = str(f.header)
+        header_sam = tmp_path / "header.sam"
+        header_sam.write_text(re.sub(r"UR:[^\t\n]+", f"UR:{ur}", text))
+        pysam.samtools.reheader("-i", str(header_sam), str(cram))
+    pysam.index(str(cram))
+    return cram, ref
+
+
+class TestRequireCramReference:
+    def test_remote_only_cram_without_reference_refused(self):
+        config = BAMCPConfig(allow_local_files=False)
+        with pytest.raises(ToolInputError, match="CRAM decoding needs a reference"):
+            _require_cram_reference("https://example.org/x.cram", None, config)
+
+    def test_resolved_reference_passes(self):
+        config = BAMCPConfig(allow_local_files=False)
+        _require_cram_reference("https://example.org/x.cram", "https://example.org/r.fa", config)
+
+    def test_bam_without_reference_passes(self):
+        config = BAMCPConfig(allow_local_files=False)
+        _require_cram_reference("https://example.org/x.bam", None, config)
+
+    def test_local_files_allowed_is_unchanged(self):
+        _require_cram_reference("https://example.org/x.cram", None, BAMCPConfig())
+
+
+class TestFetchGate:
+    async def test_header_ur_reference_is_used_when_local_files_allowed(self, tmp_path):
+        # Documents the htslib behavior the gate exists for: with no reference, the CRAM
+        # decodes against the file its header's UR: tag names.
+        cram, _ = _cram_with_header_ur(tmp_path)
+        data = await _fetch_region_with_timeout(
+            str(cram), "chr1:1-200", None, BAMCPConfig(cache_dir=str(tmp_path / "c"))
+        )
+        assert data.reads
+
+    async def test_remote_only_refuses_before_opening(self, tmp_path):
+        cram, _ = _cram_with_header_ur(tmp_path)
+        config = BAMCPConfig(allow_local_files=False, cache_dir=str(tmp_path / "c"))
+        with pytest.raises(ToolInputError) as exc:
+            await _fetch_region_with_timeout(str(cram), "chr1:1-200", None, config)
+        assert str(exc.value) == CRAM_REFERENCE_REQUIRED_MESSAGE
+
+
+class TestHeaderReferenceFallback:
+    """A resolved reference lacking a header contig still lets htslib follow that @SQ UR:."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_checks(self):
+        from bamcp.core import parsers
+
+        parsers._REFERENCE_CONTIGS.clear()
+        yield
+        parsers._REFERENCE_CONTIGS.clear()
+
+    def _other_ref(self, tmp_path: Path) -> Path:
+        other = tmp_path / "other.fa"
+        other.write_text(">other\nACGTACGTACGT\n")
+        pysam.faidx(str(other))
+        return other
+
+    async def test_htslib_falls_back_to_header_ur(self, tmp_path):
+        cram, _ = _cram_with_header_ur(tmp_path)
+        other = self._other_ref(tmp_path)
+        with pysam.AlignmentFile(str(cram), "rc", reference_filename=str(other)) as f:
+            seqs = [r.query_sequence for r in f.fetch(until_eof=True)]
+        assert seqs and all(seqs)
+
+    async def test_remote_only_refuses_uncovered_ur_contig(self, tmp_path):
+        cram, _ = _cram_with_header_ur(tmp_path)
+        other = self._other_ref(tmp_path)
+        config = BAMCPConfig(allow_local_files=False, cache_dir=str(tmp_path / "c"))
+        with pytest.raises(ToolInputError, match=r"\(chr1\) at an external reference \(@SQ UR:\)"):
+            await _fetch_region_with_timeout(str(cram), "chr1:1-200", str(other), config)
+
+    async def test_remote_only_covering_reference_decodes(self, tmp_path):
+        cram, ref = _cram_with_header_ur(tmp_path)
+        config = BAMCPConfig(allow_local_files=False, cache_dir=str(tmp_path / "c"))
+        data = await _fetch_region_with_timeout(str(cram), "chr1:1-200", str(ref), config)
+        assert data.reads
+
+    async def test_local_files_allowed_permits_local_ur(self, tmp_path):
+        # With local files allowed the caller could name that FASTA directly, so a local
+        # UR: is no escalation and decoding proceeds.
+        cram, _ = _cram_with_header_ur(tmp_path)
+        other = self._other_ref(tmp_path)
+        with (
+            guard_cram_decoding(not BAMCPConfig().allow_local_files),
+            _open_alignment(str(cram), str(other)) as f,
+        ):
+            assert all(r.query_sequence for r in f.fetch("chr1"))
+
+
+def _renamed_bam(cram: Path) -> Path:
+    """The CRAM under a ``.bam`` name (index too): htslib still decodes it as CRAM."""
+    bam = cram.with_name("disguised.bam")
+    cram.rename(bam)
+    Path(f"{cram}.crai").rename(f"{bam}.crai")
+    return bam
+
+
+class TestCramDetectedByContent:
+    """The gate follows the bytes, not the suffix: a CRAM named ``.bam`` is still a CRAM."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_checks(self):
+        from bamcp.core import parsers
+
+        parsers._REFERENCE_CONTIGS.clear()
+        yield
+        parsers._REFERENCE_CONTIGS.clear()
+
+    def test_htslib_decodes_renamed_cram_against_header_ur(self, tmp_path):
+        # The bypass this class pins shut: opened as "rb", no reference, it is still CRAM
+        # and its reads decode against the header's UR: file.
+        bam = _renamed_bam(_cram_with_header_ur(tmp_path)[0])
+        with pysam.AlignmentFile(str(bam), "rb", index_filename=f"{bam}.crai") as f:
+            assert f.is_cram
+            assert all(r.query_sequence for r in f.fetch("chr1"))
+
+    async def test_remote_only_refuses_renamed_cram_without_reference(self, tmp_path):
+        bam = _renamed_bam(_cram_with_header_ur(tmp_path)[0])
+        config = BAMCPConfig(allow_local_files=False, cache_dir=str(tmp_path / "c"))
+        with pytest.raises(ToolInputError) as exc:
+            await _fetch_region_with_timeout(str(bam), "chr1:1-200", None, config)
+        assert str(exc.value) == CRAM_REFERENCE_REQUIRED_MESSAGE
+
+    async def test_remote_only_refuses_renamed_cram_uncovered_ur(self, tmp_path):
+        bam = _renamed_bam(_cram_with_header_ur(tmp_path)[0])
+        other = tmp_path / "other.fa"
+        other.write_text(">other\nACGTACGTACGT\n")
+        pysam.faidx(str(other))
+        config = BAMCPConfig(allow_local_files=False, cache_dir=str(tmp_path / "c"))
+        with pytest.raises(ToolInputError, match=r"\(chr1\) at an external reference"):
+            await _fetch_region_with_timeout(str(bam), "chr1:1-200", str(other), config)
+
+    async def test_remote_only_renamed_cram_with_covering_reference_decodes(self, tmp_path):
+        cram, ref = _cram_with_header_ur(tmp_path)
+        bam = _renamed_bam(cram)
+        config = BAMCPConfig(allow_local_files=False, cache_dir=str(tmp_path / "c"))
+        data = await _fetch_region_with_timeout(str(bam), "chr1:1-200", str(ref), config)
+        assert data.reads
+
+    async def test_scan_variants_refuses_renamed_cram_uncovered_ur(self, tmp_path):
+        from bamcp.core.tools import handle_scan_variants
+
+        bam = _renamed_bam(_cram_with_header_ur(tmp_path)[0])
+        other = tmp_path / "other.fa"
+        other.write_text(">other\nACGTACGTACGT\n")
+        pysam.faidx(str(other))
+        config = BAMCPConfig(allow_local_files=False, cache_dir=str(tmp_path / "c"))
+        args = {"file_path": str(bam), "contig": "chr1", "reference": str(other)}
+        with (
+            pytest.MonkeyPatch.context() as mp,
+            pytest.raises(ToolInputError, match="external reference"),
+        ):
+            # validate_path / validate_reference_path reject local paths on this config; the
+            # gate under test sits after them.
+            mp.setattr("bamcp.core.scan.validate_path", lambda *a: None)
+            mp.setattr("bamcp.core.tools.validate_reference_path", lambda *a: None)
+            await handle_scan_variants(args, config)
+
+    def test_guard_is_scoped_to_the_context(self, tmp_path):
+        bam = _renamed_bam(_cram_with_header_ur(tmp_path)[0])
+        with guard_cram_decoding(True), pytest.raises(ToolInputError):
+            _open_alignment(str(bam))
+        with _open_alignment(str(bam)) as f:  # guard reset: local-files servers unchanged
+            assert f.is_cram
+
+    async def test_guard_reaches_the_parse_pool(self, tmp_path):
+        from bamcp.core.services import _run_in_parse_pool
+
+        bam = _renamed_bam(_cram_with_header_ur(tmp_path)[0])
+        with guard_cram_decoding(True), pytest.raises(ToolInputError):
+            await _run_in_parse_pool(_open_alignment, str(bam))
+
+
+class TestNetworkHeaderReference:
+    """A URL in @SQ UR: is fetched by htslib/libcurl outside validate_remote_url (the pysam
+    pinned in uv.lock does fetch it; newer htslib refuses). BAMCP refuses it on every server,
+    with or without a reference, whatever BAMCP_ALLOW_LOCAL_FILES says."""
+
+    @pytest.fixture
+    def listener(self, monkeypatch, tmp_path):
+        import http.server
+        import threading
+
+        hits: list[str] = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - stdlib hook name
+                hits.append(self.path)
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            monkeypatch.delenv(var, raising=False)  # reach the loopback listener directly
+        monkeypatch.setenv("REF_PATH", str(tmp_path / "refs" / "%s"))  # no M5 hit either
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        yield server.server_port, hits
+        server.shutdown()
+
+    @pytest.mark.parametrize("with_reference", [False, True])
+    async def test_network_ur_refused_with_local_files_allowed(
+        self, tmp_path, listener, with_reference
+    ):
+        port, hits = listener
+        cram, _ = _cram_with_header_ur(tmp_path, ur=f"http://127.0.0.1:{port}/internal.fa")
+        reference = None
+        if with_reference:  # a reference that lacks the UR:-tagged contig
+            reference = tmp_path / "other.fa"
+            reference.write_text(">other\nACGTACGTACGT\n")
+            pysam.faidx(str(reference))
+        config = BAMCPConfig(cache_dir=str(tmp_path / "c"))  # allow_local_files defaults on
+        with pytest.raises(ToolInputError, match=r"\(chr1\) at an external reference"):
+            await _fetch_region_with_timeout(
+                str(cram), "chr1:1-200", str(reference) if reference else None, config
+            )
+        assert hits == []
+
+    async def test_covering_reference_still_decodes(self, tmp_path, listener):
+        port, hits = listener
+        cram, ref = _cram_with_header_ur(tmp_path, ur=f"http://127.0.0.1:{port}/internal.fa")
+        config = BAMCPConfig(cache_dir=str(tmp_path / "c"))
+        data = await _fetch_region_with_timeout(str(cram), "chr1:1-200", str(ref), config)
+        assert data.reads
+        assert hits == []
+
+    def test_is_network_ur(self):
+        from bamcp.core.parsers import _is_network_ur
+
+        assert _is_network_ur("http://example.org/x.fa")
+        assert _is_network_ur("ftp://example.org/x.fa")
+        assert _is_network_ur("http:/127.0.0.1/x.fa")
+        assert not _is_network_ur("file:///data/x.fa")
+        assert not _is_network_ur("/data/x.fa")

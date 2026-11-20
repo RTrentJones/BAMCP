@@ -23,6 +23,9 @@ import asyncio
 import logging
 from typing import Any
 
+import httpx
+
+from ..clients.ncbi import redact_error
 from ..config import BAMCPConfig
 
 logger = logging.getLogger(__name__)
@@ -34,6 +37,11 @@ class ToolInputError(Exception):
     Raise it with a message built only from caller-supplied values and static text —
     never from operator config (paths, hosts, tokens).
     """
+
+
+class InvalidVariantInputError(ToolInputError, ValueError):
+    """Bad chrom/pos/ref/alt. Both a ``ToolInputError`` (the handler contract) and a
+    ``ValueError`` (validation's vocabulary), so either ``except`` catches it."""
 
 
 class ReferenceUnavailableError(ToolInputError):
@@ -99,6 +107,11 @@ def sanitize_tool_exception(
             "Could not open or read an input file (missing, unreadable, unindexed, or "
             f"wrong format).{hint}"
         )
+    if isinstance(exc, httpx.HTTPError):
+        # No traceback: an httpx error's text (and its chain) embeds the request URL, which
+        # carries the NCBI api_key.
+        logger.warning("%s: upstream HTTP error: %s", tool, redact_error(exc))
+        return ToolInputError(f"An upstream service failed while running {tool}; retry later.")
     logger.exception("%s: unexpected error", tool, exc_info=exc)
     return ToolInputError(f"Internal error while running {tool}.")
 

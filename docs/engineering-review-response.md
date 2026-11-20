@@ -34,7 +34,7 @@ depth with large refactors scoped as follow-ups (see [Deferred](#deferred-follow
 | Rate limiter trusts `X-Forwarded-For`; unbounded dict | ✅ Confirmed | `middleware/ratelimit.py:33-37`; `_requests` is a `defaultdict(list)` cleaned only when the same IP returns |
 | Remote-file validation is one-shot DNS; no redirect re-validation | ✅ Confirmed | `core/validation.py:88-100`; docstring admits the TOCTOU/rebind gap |
 | **Reference-FASTA URL is unvalidated** | ✅ Confirmed | No validator for the `reference` arg; flows straight to `pysam.AlignmentFile(reference_filename=…)` — the one genuinely-open SSRF path |
-| Index (`.bai`/`.crai`) URL *is* validated | ✅ Already handled | `core/tools.py:242` calls `validate_remote_url(index_url, config)` — review was wrong here; drop that item |
+| Index (`.bai`/`.crai`) URL *is* validated | ✅ Already handled | `core/tools.py:242` (index download now in `core/remote.py`) calls `validate_remote_url(index_url, config)` — review was wrong here; drop that item |
 | Caches/registry unbounded, lazy expiry | ✅ Confirmed | `region_cache` plain dict (`tools.py:74`); `_services_registry` keyed by `id(config)`, never evicts |
 | `id(config)` registry can alias stale services | ✅ Confirmed | `id()` reuse after GC → correctness bug, not just a leak |
 | Grader passes on tool invocation alone | ✅ Confirmed | `eval/grader.py:48-92` — `tools_expected` satisfied + no score markers → deterministic PASS; answer text never checked |
@@ -155,9 +155,12 @@ Cheapest wins: align words with reality, de-flake CI. Do first — changes how e
   (not applied — needs sign-off on user cloud-bucket hosts).**
 - [x] **(M) [sub]** **Reference-URL validation** — `validate_reference_path()` closes the one open
   SSRF path (allowlist-aware, shares the `validate_remote_url` core). Wired into all 7 handlers.
-- [x] **(M–L) [sub]** **Unified data-source validation** — `validate_data_sources()` is the one
-  choke point over BAM/CRAM/VCF/reference/index. Index + BAM/VCF were already validated; reference
-  folded in. Option A (allowlist-first) chosen and documented; Option B (BAMCP-proxied fetch) deferred.
+- [x] **(M–L) [sub]** **Unified data-source validation** — every source is checked by its own
+  validator (`validate_path` for BAM/CRAM, `validate_variant_file_path` for VCF/BCF,
+  `validate_reference_path` for the reference — explicit or auto-selected, in
+  `_resolve_reference_info`), and all of them share the one remote choke point,
+  `validate_remote_url()`; index downloads re-validate each redirect hop. Index + BAM/VCF were
+  already validated; reference folded in. Option A (allowlist-first) chosen and documented; Option B (BAMCP-proxied fetch) deferred.
   Adversarial tests: rebinding, metadata endpoint, CRAM-reference, allowlist. *(Temp-index atomic
   write/sweep — small follow-up; see Deferred.)*
 - [x] **(M) [sub] + [wrap]** **Auth: deleted the theater** — dynamic registration is a config flag

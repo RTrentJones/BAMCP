@@ -76,10 +76,12 @@ def test_run_returns_zero_when_all_cached(tmp_path: Path, capsys):
     cases_file.write_text("- case:\n    name: c1\n    input: q\n    expected: a\n")
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    # Seed a passing prior result so --cache filters everything.
-    (out_dir / "results.json").write_text(
-        json.dumps([{"case_name": "c1", "passed": True, "provider": "mock", "model": "mock"}])
-    )
+    # Seed a passing prior result (same tool descriptors) so --cache filters everything.
+    from bamcp.eval.router import InProcessRouter, tool_descriptors_hash
+
+    prior = {"case_name": "c1", "passed": True, "provider": "mock", "model": "mock"}
+    prior["tools_hash"] = tool_descriptors_hash(InProcessRouter())
+    (out_dir / "results.json").write_text(json.dumps([prior]))
     cfg = parse_args(
         [
             "--test-cases",
@@ -147,8 +149,20 @@ def test_filter_cached_drops_passing_cases(tmp_path: Path):
     results_path.write_text(
         json.dumps(
             [
-                {"case_name": "a", "passed": True, "provider": "p", "model": "m"},
-                {"case_name": "b", "passed": False, "provider": "p", "model": "m"},
+                {
+                    "case_name": "a",
+                    "passed": True,
+                    "provider": "p",
+                    "model": "m",
+                    "tools_hash": "h",
+                },
+                {
+                    "case_name": "b",
+                    "passed": False,
+                    "provider": "p",
+                    "model": "m",
+                    "tools_hash": "h",
+                },
             ]
         )
     )
@@ -157,7 +171,7 @@ def test_filter_cached_drops_passing_cases(tmp_path: Path):
         EvalCase(name="b", input="q", expected="e"),
         EvalCase(name="c", input="q", expected="e"),
     ]
-    out = _filter_cached(results_path, cases, "p", "m")
+    out = _filter_cached(results_path, cases, "p", "m", "h")
     names = [c.name for c in out]
     assert "a" not in names  # was passing
     assert "b" in names  # was failing — rerun
@@ -203,7 +217,52 @@ def test_filter_cached_ignores_passes_from_another_model(tmp_path: Path):
         EvalCase(name="a", input="q", expected="e"),
         EvalCase(name="b", input="q", expected="e"),
     ]
-    assert [c.name for c in _filter_cached(results_path, cases, "p", "m")] == ["a", "b"]
+    assert [c.name for c in _filter_cached(results_path, cases, "p", "m", "h")] == ["a", "b"]
+
+
+@pytest.mark.unit
+def test_filter_cached_ignores_passes_against_other_tool_descriptions(tmp_path: Path):
+    # Passes graded when the harness sent placeholder descriptions (no tools_hash, or a
+    # different one) are a different experiment and must be re-run.
+    results_path = tmp_path / "results.json"
+    results_path.write_text(
+        json.dumps(
+            [
+                {"case_name": "a", "passed": True, "provider": "p", "model": "m"},
+                {"case_name": "b", "passed": True, "provider": "p", "model": "m",
+                 "tools_hash": "old"},
+                {"case_name": "c", "passed": True, "provider": "p", "model": "m",
+                 "tools_hash": "new"},
+            ]
+        )
+    )  # fmt: skip
+    cases = [EvalCase(name=n, input="q", expected="e") for n in ("a", "b", "c")]
+    assert [c.name for c in _filter_cached(results_path, cases, "p", "m", "new")] == ["a", "b"]
+
+
+@pytest.mark.unit
+def test_tool_descriptors_hash_is_stable_and_tracks_descriptions(monkeypatch):
+    from bamcp import tool_specs
+    from bamcp.eval.router import InProcessRouter, tool_descriptors_hash
+
+    router = InProcessRouter()
+    first = tool_descriptors_hash(router)
+    assert first == tool_descriptors_hash(InProcessRouter())
+    assert len(first) == 12
+    name = router.list_tools()[0]
+    changed = {**tool_specs.TOOL_SPECS[name], "description": "placeholder"}
+    monkeypatch.setitem(tool_specs.TOOL_SPECS, name, changed)
+    assert tool_descriptors_hash(router) != first
+
+
+@pytest.mark.unit
+def test_reports_record_tools_hash(tmp_path: Path):
+    from bamcp.eval.report import write_reports
+    from bamcp.eval.schema import RunConfig
+
+    cfg = RunConfig(test_cases_path=tmp_path / "t.yaml", output_dir=tmp_path, tools_hash="abc123")
+    write_reports([], cfg, tmp_path)
+    assert "tools_hash: abc123" in (tmp_path / "run_config.yaml").read_text()
 
 
 @pytest.mark.unit

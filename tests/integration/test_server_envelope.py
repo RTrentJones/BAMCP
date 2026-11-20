@@ -9,6 +9,7 @@ import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from bamcp.config import BAMCPConfig
+from bamcp.core import remote
 from bamcp.core.tools import get_services
 from bamcp.server import create_server
 
@@ -80,6 +81,35 @@ async def test_scan_variants_without_contig_scans_first_contig():
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ({"chrom": "chr1", "pos": 100, "ref": "A", "alt": "Z"}, "Invalid alternate allele"),
+        ({"chrom": "chrZZ", "pos": 100, "ref": "A", "alt": "T"}, "chrZZ"),
+    ],
+)
+async def test_curation_failures_are_error_results(args, expected):
+    """Invalid input / unknown contig are isError results, never a successful error payload."""
+    result = await _call(
+        BAMCPConfig(reference=REF),
+        "get_variant_curation_summary",
+        {"file_path": SMALL_BAM, **args},
+    )
+    assert result.isError
+    assert expected in _text(result)
+    assert "KeyError" not in _text(result)
+
+
+@pytest.mark.integration
+async def test_scan_variants_unknown_contig_suggests_spelling():
+    result = await _call(
+        BAMCPConfig(reference=REF), "scan_variants", {"file_path": SMALL_BAM, "contig": "1"}
+    )
+    assert result.isError
+    assert "retry with 'chr1'" in _text(result)
+
+
+@pytest.mark.integration
 async def test_curation_summary_exposes_include_clinical(monkeypatch):
     seen: dict = {}
 
@@ -134,6 +164,7 @@ async def test_cleanup_cache_never_closes_shared_clients(tmp_path):
     services.region_cache[("k",)] = (0.0, object(), 1)  # type: ignore[assignment]
     services.cache.cache_dir.mkdir(parents=True, exist_ok=True)
     (services.cache.cache_dir / "x.bai").write_bytes(b"x")
+    remote._mark_warm("https://example.org/x.bam")
 
     result = await _call(config, "cleanup_cache", {})
 
@@ -141,6 +172,8 @@ async def test_cleanup_cache_never_closes_shared_clients(tmp_path):
     assert "Removed 1 cached index files" in _text(result)
     assert services._clinvar is client and not client.closed
     assert not services.region_cache
+    # The index is gone, so the input is cold again: its next open gets the cold budget.
+    assert "https://example.org/x.bam" not in remote._warm_inputs
 
 
 @pytest.mark.integration
@@ -150,12 +183,15 @@ async def test_cleanup_cache_is_noop_on_shared_http_server(tmp_path):
     services.cache.cache_dir.mkdir(parents=True, exist_ok=True)
     index = services.cache.cache_dir / "x.bai"
     index.write_bytes(b"x")
+    remote._mark_warm("https://example.org/y.bam")
 
     result = await _call(config, "cleanup_cache", {})
 
     assert not result.isError
     assert "disabled on shared" in _text(result)
     assert index.exists()
+    assert "https://example.org/y.bam" in remote._warm_inputs
+    remote._warm_inputs.pop("https://example.org/y.bam", None)
     assert "this session" not in _text(result)
 
 

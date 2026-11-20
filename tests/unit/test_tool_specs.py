@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from bamcp.eval.router import InProcessRouter
-from bamcp.tool_specs import TOOL_SPECS, get_tool_spec
+from bamcp.tool_specs import TOOL_SPECS
 
 
 @pytest.mark.unit
@@ -31,12 +31,6 @@ def test_specs_are_wellformed_json_schema():
         props = set(schema["properties"])
         for req in schema.get("required", []):
             assert req in props, f"{name}: required field {req!r} not in properties"
-
-
-@pytest.mark.unit
-def test_get_tool_spec_returns_none_for_unknown():
-    assert get_tool_spec("does_not_exist") is None
-    assert get_tool_spec("get_variants") is not None
 
 
 def _server_schemas() -> dict[str, dict]:
@@ -65,3 +59,26 @@ def test_spec_parameters_match_server_schema(name):
     spec_schema = TOOL_SPECS[name]["input_schema"]
     assert set(spec_schema["properties"]) == set(server_schema.get("properties", {})), name
     assert set(spec_schema.get("required", [])) == set(server_schema.get("required", [])), name
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", sorted(TOOL_SPECS))
+def test_registered_description_is_the_spec_description(name):
+    """One source: the description a client sees is exactly TOOL_SPECS[name]["description"]."""
+    from bamcp.config import BAMCPConfig
+    from bamcp.server import create_server
+
+    tool = create_server(BAMCPConfig())._tool_manager._tools[name]
+    assert tool.description == TOOL_SPECS[name]["description"]
+
+
+@pytest.mark.unit
+def test_description_numbers_come_from_constants():
+    from bamcp import constants
+
+    scan = TOOL_SPECS["scan_variants"]["description"]
+    assert f"up to {constants.SCAN_VARIANTS_MAX_RESULTS} candidates" in scan
+    variants = TOOL_SPECS["get_variants"]["description"]
+    assert f"min_alt_count {constants.DEFAULT_MIN_ALT_COUNT}" in variants
+    assert f"MAPQ>={constants.DEFAULT_MIN_MAPQ}" in variants
+    assert f"base quality>={constants.DEFAULT_MIN_BASEQ}" in variants

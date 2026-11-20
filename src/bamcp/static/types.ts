@@ -69,6 +69,10 @@ export interface Variant {
     depth: number;
     samples?: Record<string, Record<string, unknown>>;
     sample_names?: string[];
+    // Total samples in the VCF record; `samples`/`sample_names` hold at most the first 16
+    // (GT only) when `samples_truncated` is set.
+    sample_count?: number;
+    samples_truncated?: boolean;
     sv_type?: string | null;
     sv_end?: number | null;
     // Normalized to this ALT's SVLEN by the backend (load_vcf_variants), so a scalar.
@@ -142,6 +146,8 @@ export interface RegionData {
     reference_sequence?: string;
     variant_evidence?: Record<string, VariantEvidence>;
     schema_version?: number;  // Payload contract version (see EXPECTED_SCHEMA_VERSION)
+    compact?: boolean;  // Sequences omitted (region wider than compact_threshold_bp)
+    compact_threshold_bp?: number;  // Server's compact-mode cut-off; older servers omit it
     file_path?: string;  // For client-side re-queries
     reference?: string;  // Reference FASTA path — preserved so CRAM/mismatch context survives refetches
     vcf_path?: string;  // Preserved across refetches so VCF sourcing sticks

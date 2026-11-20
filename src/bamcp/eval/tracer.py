@@ -38,6 +38,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from .yaml_io import load_yaml_file
+
 TOOL = "bamcp"
 DEFAULT_URL = "https://tracer.rtrentjones.dev"
 
@@ -341,9 +343,7 @@ def truthset_payload(
 
 
 def _load_yaml(path: Path) -> Any:
-    import yaml  # type: ignore[import-untyped]
-
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
+    return load_yaml_file(path, purpose="publishing LLM runs to Tracer")
 
 
 def _test_cases(path: Path | None) -> dict[str, dict[str, Any]]:

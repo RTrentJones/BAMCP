@@ -10,9 +10,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Least privilege: read-only by default. Only `build` pushes to GHCR, so only it gets
+# `packages: write` — the `test` job (pip install + the full suite) never holds a registry token.
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: build-${{ github.ref }}
@@ -31,7 +32,7 @@ jobs:
           python-version: '3.12'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '24'
+          node-version-file: src/bamcp/static/.nvmrc
       - run: make install
       - run: pip install -e ".[telemetry,eval]"
       - run: make test
@@ -42,6 +43,9 @@ jobs:
     needs: [test]
     # Native arm64 runner — builds the arm64 image directly (no QEMU emulation, much faster).
     runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve image ref (GHCR namespaces are lowercase)

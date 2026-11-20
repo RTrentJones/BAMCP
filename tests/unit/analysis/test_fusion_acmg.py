@@ -119,6 +119,31 @@ async def test_handle_classify_variant_rejects_bad_input(offline_cfg, comprehens
 
 
 @pytest.mark.unit
+async def test_classify_validates_before_reference_resolution(
+    offline_cfg, comprehensive_bam_path, monkeypatch
+):
+    """Bad input fails fast — before reference resolution can read a remote header."""
+
+    async def must_not_run(*_a, **_kw):
+        raise AssertionError("reference resolved before input validation")
+
+    monkeypatch.setattr("bamcp.core.tools._resolve_reference", must_not_run)
+    from bamcp.core.errors import ToolInputError
+
+    with pytest.raises(ToolInputError, match="Invalid alternate allele"):
+        await handle_classify_variant(
+            {
+                "file_path": comprehensive_bam_path,
+                "chrom": "chr1",
+                "pos": 1,
+                "ref": "A",
+                "alt": "Z",
+            },
+            offline_cfg,
+        )
+
+
+@pytest.mark.unit
 async def test_clinical_context_disabled_returns_disabled_blocks(offline_cfg):
     ctx = await clinical_context(offline_cfg, "chr1", 100, "A", "T")
     assert ctx == {
@@ -469,24 +494,21 @@ def _curation_args(path: str, **kw) -> dict:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("exc", "expected"),
-    [
-        (TimeoutError("slow"), "Timeout"),
-        (KeyError("chrZ"), "contig not present"),
-        (ValueError("bad region"), "contig not present"),
-        (OSError("unreadable"), "Could not read the alignment file"),
-    ],
+    "exc", [TimeoutError("slow"), KeyError("chrZ"), ValueError("bad region"), OSError("x")]
 )
-async def test_curation_fetch_errors_become_error_results(offline_cfg, monkeypatch, exc, expected):
+async def test_curation_fetch_errors_propagate_to_the_envelope(offline_cfg, monkeypatch, exc):
+    """Fetch failures are raised (never returned as a success) so _run maps them to isError."""
     from bamcp.analysis.curation import handle_get_variant_curation_summary
+    from bamcp.core.errors import ToolInputError, sanitize_tool_exception
 
     async def boom(*_a, **_k):
         raise exc
 
     monkeypatch.setattr("bamcp.core.tools._fetch_region_with_timeout", boom)
     monkeypatch.setattr("bamcp.analysis.curation.validate_path", lambda *_a: None)
-    result = await handle_get_variant_curation_summary(_curation_args("x.bam"), offline_cfg)
-    assert expected in result["content"][0]["text"]
+    with pytest.raises(type(exc)) as raised:
+        await handle_get_variant_curation_summary(_curation_args("x.bam"), offline_cfg)
+    assert isinstance(sanitize_tool_exception(raised.value, "t", offline_cfg), ToolInputError)
 
 
 @pytest.mark.unit
@@ -496,7 +518,7 @@ async def test_curation_not_found_echoes_applied_filters(offline_cfg, comprehens
     from bamcp.analysis.curation import handle_get_variant_curation_summary
 
     result = await handle_get_variant_curation_summary(
-        _curation_args(comprehensive_bam_path, pos=1500, ref="A", alt="G", format="rubric"),
+        _curation_args(comprehensive_bam_path, pos=1500, ref="C", alt="G", format="rubric"),
         offline_cfg,
     )
     payload = json.loads(result["content"][0]["text"])
@@ -504,7 +526,7 @@ async def test_curation_not_found_echoes_applied_filters(offline_cfg, comprehens
     assert payload["applied_filters"]["min_vaf"] == offline_cfg.min_vaf
 
     text_result = await handle_get_variant_curation_summary(
-        _curation_args(comprehensive_bam_path, pos=1500, ref="A", alt="G"), offline_cfg
+        _curation_args(comprehensive_bam_path, pos=1500, ref="C", alt="G"), offline_cfg
     )
     assert "Applied filters:" in text_result["content"][0]["text"]
 

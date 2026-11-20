@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .schema import EvalResult, RunConfig
+from .yaml_io import dump_yaml
 
 
 def write_reports(
@@ -22,10 +23,15 @@ def write_reports(
 ) -> dict[str, Path]:
     """Write all report artifacts. Returns a dict of name -> file path."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    # Each row carries the provider/model that produced it, so --cache only reuses a
-    # pass recorded by the same configuration.
+    # Each row carries the provider/model and tool-descriptor hash that produced it, so
+    # --cache only reuses a pass recorded by the same configuration.
     serialized = [
-        {**_serialize_result(r), "provider": config.provider, "model": config.model}
+        {
+            **_serialize_result(r),
+            "provider": config.provider,
+            "model": config.model,
+            "tools_hash": config.tools_hash,
+        }
         for r in results
     ]
 
@@ -36,11 +42,11 @@ def write_reports(
     paths["json"] = json_path
 
     yaml_path = output_dir / "results.yaml"
-    yaml_path.write_text(_dump_yaml(serialized), encoding="utf-8")
+    yaml_path.write_text(dump_yaml(serialized), encoding="utf-8")
     paths["yaml"] = yaml_path
 
     cfg_path = output_dir / "run_config.yaml"
-    cfg_path.write_text(_dump_yaml(_config_to_dict(config)), encoding="utf-8")
+    cfg_path.write_text(dump_yaml(_config_to_dict(config)), encoding="utf-8")
     paths["config"] = cfg_path
 
     html_path = output_dir / "report.html"
@@ -82,20 +88,11 @@ def _config_to_dict(config: RunConfig) -> dict:
         "with_vanilla": config.with_vanilla,
         "with_rendering_comparison": config.with_rendering_comparison,
         "router": config.router,
+        "tools_hash": config.tools_hash,
         "test_cases_path": str(config.test_cases_path),
         "output_dir": str(config.output_dir),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-
-
-def _dump_yaml(obj: object) -> str:
-    try:
-        import yaml  # type: ignore[import-untyped]
-
-        return str(yaml.safe_dump(obj, sort_keys=False, default_flow_style=False))
-    except ImportError:
-        # Hard fallback so the report is still written without pyyaml.
-        return json.dumps(obj, indent=2)
 
 
 def _render_html(results: list[EvalResult], config: RunConfig, output_dir: Path) -> str:

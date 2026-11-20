@@ -335,7 +335,7 @@ echo
 # bound prod applies via BAMCP_ALLOWED_REMOTE_HOSTS in RTrentJones.dev infra/bamcp.tf. Keep this
 # default in sync with that list. Override with a comma-separated BAMCP_ALLOWED_REMOTE_HOSTS env var
 # (e.g. to add your own bucket host); matching is exact per host, no subdomain wildcards.
-DEFAULT_ALLOWED_REMOTE_HOSTS="hgdownload.soe.ucsc.edu,ftp.ncbi.nlm.nih.gov,ftp-trace.ncbi.nlm.nih.gov,ftp.1000genomes.ebi.ac.uk,1000genomes.s3.amazonaws.com"
+DEFAULT_ALLOWED_REMOTE_HOSTS="hgdownload.soe.ucsc.edu,ftp.ncbi.nlm.nih.gov,ftp-trace.ncbi.nlm.nih.gov,ftp.1000genomes.ebi.ac.uk,1000genomes.s3.amazonaws.com,ftp.ensembl.org"
 BAMCP_ALLOWED_REMOTE_HOSTS="${BAMCP_ALLOWED_REMOTE_HOSTS:-$DEFAULT_ALLOWED_REMOTE_HOSTS}"
 if [[ ! "$BAMCP_ALLOWED_REMOTE_HOSTS" =~ ^[A-Za-z0-9.,-]+$ ]]; then
     echo "Error: BAMCP_ALLOWED_REMOTE_HOSTS must be a comma-separated list of hostnames." >&2

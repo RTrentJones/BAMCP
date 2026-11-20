@@ -14,6 +14,7 @@
 import { BAMCPClient, DebugInfo, FetchResult } from "./client";
 import {
     baseColor,
+    compactThresholdBp,
     displayPos,
     escapeHtml,
     formatNearEndSummary,
@@ -30,7 +31,7 @@ import {
     firstHiddenRow,
     hiddenReadCount,
     hiddenReadsLabel,
-    referenceBannerMessage,
+    statusBannerMessage,
 } from "./ui-sync";
 import { Renderer } from "./renderer";
 import { StateManager, DEFAULT_SETTINGS } from "./state";
@@ -93,7 +94,6 @@ class BAMCPViewer {
     private pendingSequenceRequest = false;
     private sequenceFallbackTimer: ReturnType<typeof setTimeout> | null = null;
     private static readonly BASE_RENDER_SCALE = 10;
-    private static readonly SEQUENCE_REGION_THRESHOLD = 500;
     private static readonly SEQUENCE_FETCH_TIMEOUT_MS = 3000;
 
     // Viewport refetch state — auto-load data when panning/zooming beyond loaded range
@@ -611,7 +611,7 @@ class BAMCPViewer {
         }
 
         // Check if region is small enough for sequences
-        if (viewportSpan > BAMCPViewer.SEQUENCE_REGION_THRESHOLD) {
+        if (viewportSpan > compactThresholdBp(this.state.data)) {
             this.sequenceNotice.classList.add('hidden');
             return;
         }
@@ -886,11 +886,11 @@ class BAMCPViewer {
         if (legend && legend.dataset.mode !== s.displayMode) legend.dataset.mode = s.displayMode;
     }
 
-    /** Show/hide the no-reference banner from the payload's applied_filters. */
+    /** Show/hide the status banner (no reference, capped variant list) from applied_filters. */
     private updateReferenceBanner(): void {
         const banner = document.getElementById('reference-banner');
         if (!banner) return;
-        const message = referenceBannerMessage(this.state.data);
+        const message = statusBannerMessage(this.state.data);
         const text = document.getElementById('reference-banner-text');
         if (message) {
             if (text && text.textContent !== message) text.textContent = message;
@@ -974,7 +974,9 @@ class BAMCPViewer {
                 altCell = `<span style="color:${baseColor(v.alt, '#333')};font-weight:bold">${escapeHtml(v.alt)}</span>`;
             }
             // A multi-sample VCF gets a small sample-count marker on the position cell.
-            const sampleCount = Array.isArray(v.sample_names) ? v.sample_names.length : 0;
+            const sampleCount = typeof v.sample_count === 'number'
+                ? v.sample_count
+                : (Array.isArray(v.sample_names) ? v.sample_names.length : 0);
             const sampleMarker = sampleCount > 1
                 ? ` <span class="sample-count" title="${sampleCount} samples genotyped">×${sampleCount}</span>`
                 : '';
@@ -1183,6 +1185,10 @@ class BAMCPViewer {
 
         const genotypes = formatGenotypes(variant.samples);
         if (genotypes.length) {
+            const hidden = variant.samples_truncated && typeof variant.sample_count === 'number'
+                ? variant.sample_count - genotypes.length
+                : 0;
+            if (hidden > 0) genotypes.push(`…and ${hidden.toLocaleString()} more samples (not shown)`);
             const items = genotypes.map(g => `<li>${escapeHtml(g)}</li>`).join('');
             rows.push(`<span class="detail-key">Genotypes</span><ul class="genotype-list">${items}</ul>`);
         }

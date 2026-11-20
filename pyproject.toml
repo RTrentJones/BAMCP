@@ -122,6 +122,7 @@ module = [
     "opentelemetry.*",
     "matplotlib",
     "matplotlib.*",
+    "yaml",
 ]
 ignore_missing_imports = true
 

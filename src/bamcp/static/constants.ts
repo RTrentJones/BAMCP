@@ -8,6 +8,16 @@
 // server and may mis-decode, so we warn loudly (see BAMCPClient.handleData).
 export const EXPECTED_SCHEMA_VERSION = 1;
 
+// Fallback compact-mode cut-off (bp) when the payload predates `compact_threshold_bp`.
+// Mirrors COMPACT_REGION_THRESHOLD_BP in src/bamcp/constants.py.
+export const DEFAULT_COMPACT_THRESHOLD_BP = 500;
+
+/** The payload's compact-mode cut-off if it is a positive number, else the fallback. */
+export function compactThresholdBp(data: { compact_threshold_bp?: unknown } | null | undefined): number {
+    const v = data?.compact_threshold_bp;
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : DEFAULT_COMPACT_THRESHOLD_BP;
+}
+
 // Base colors for nucleotides. Deep enough that each keeps >= 3:1 contrast against
 // the grey read body (palette.ts READ_BODY) at every MAPQ fade, and >= 4.5:1 for the
 // white letters drawn on them; roughly iso-luminant so no base out-shouts another.

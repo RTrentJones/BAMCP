@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 # Paths and networking defaults
-DEFAULT_HOST = "0.0.0.0"  # noqa: S104
+DEFAULT_HOST = "127.0.0.1"  # HTTP transports; Docker/OCI set BAMCP_HOST=0.0.0.0 explicitly
 DEFAULT_PORT = 8000
 DEFAULT_ISSUER_URL = "http://localhost:8000"
 DEFAULT_RESOURCE_SERVER_URL = "http://localhost:8000"
@@ -46,18 +46,39 @@ REGION_TILE_SIZE = 4_096
 # of silently mis-decoding. A first step toward a generated, typed server<->viewer contract.
 PAYLOAD_SCHEMA_VERSION = 1
 
+# Regions wider than this (bp) are serialized in compact mode: read sequences omitted to
+# shrink the payload. Base-level rendering needs scale >= 10 px/bp (~80 bp at 800 px), so
+# 500 leaves a safety margin. Sent to the viewer as ``compact_threshold_bp`` so its
+# sequence auto-fetch uses the same cut-off.
+COMPACT_REGION_THRESHOLD_BP = 500
+
 # Cap on distinct regions held in a server's in-memory region cache (LRU-evicted).
 # Bounds memory: each entry can hold a full RegionData payload.
 REGION_CACHE_MAX_ENTRIES = 128
-# ...and by approximate in-memory bytes (see tools._approx_region_bytes): a full-mode 1 Mb entry
-# can weigh tens of MB, so the count cap alone could exceed a 2 GB container. An entry larger
-# than a quarter of this budget is served uncached.
+# ...and by approximate in-memory bytes (see core/services._approx_region_bytes): a full-mode
+# 1 Mb entry can weigh tens of MB, so the count cap alone could exceed a 2 GB container. An
+# entry larger than a quarter of this budget is served uncached.
 REGION_CACHE_MAX_BYTES = 512 * 1024 * 1024
 
 # Max concurrent pysam parses. All blocking BAM/CRAM/VCF work runs in a dedicated thread pool
 # of this size, so a burst of requests (or parses that hang past their timeout) is confined to
 # this pool and cannot starve the event loop's default executor.
 PARSE_MAX_CONCURRENCY = 8
+
+# Per-call VCF bounds. A 1000 Genomes per-chromosome VCF (2,504 samples) costs ~1 MB of Python
+# objects per record when every FORMAT field of every sample is materialized, so a 1 Mb window
+# could exceed a 2 GB container. At most VCF_MAX_RECORDS records are read per call (the rest are
+# reported as ``vcf_truncated`` in applied_filters); a record with more than
+# VCF_MAX_SAMPLES_DETAIL samples keeps only the GT of its first VCF_MAX_SAMPLES_DETAIL samples
+# (``samples_truncated`` + the full ``sample_count`` on the variant).
+VCF_MAX_RECORDS = 5_000
+VCF_MAX_SAMPLES_DETAIL = 16
+# Per-read payload bounds for fetch_region. max_reads caps the read count, not each read's size:
+# a long or noisy read could carry thousands of mismatches, so each read keeps at most
+# READ_MAX_MISMATCHES (``mismatches_truncated`` marks the read), and read extraction stops (the
+# existing ``reads_truncated`` flag) once the estimated read payload passes READ_PAYLOAD_MAX_BYTES.
+READ_MAX_MISMATCHES = 1_000
+READ_PAYLOAD_MAX_BYTES = 64 * 1024 * 1024
 
 # Auth and integrations
 DEFAULT_TOKEN_EXPIRY_SECONDS = 3_600
@@ -72,7 +93,9 @@ DEFAULT_GNOMAD_DATASET = "auto"
 GNOMAD_DATASET_BY_BUILD = {"GRCh37": "gnomad_r2_1", "GRCh38": "gnomad_r4"}
 GNOMAD_DATASET_BUILD = {"gnomad_r2_1": "GRCh37", "gnomad_r3": "GRCh38", "gnomad_r4": "GRCh38"}
 DEFAULT_GENOME_BUILD = "GRCh38"
-# Accepted spellings of the two supported human builds (case-insensitive).
+# The one table of accepted spellings of the two supported human builds
+# (case-insensitive, surrounding whitespace ignored). core.reference.GENOME_BUILDS
+# derives its "aliases" from it.
 GENOME_BUILD_ALIASES = {
     "grch37": "GRCh37",
     "hg19": "GRCh37",
@@ -102,6 +125,9 @@ DEFAULT_MAX_REMOTE_INDEX_BYTES = 64 * 1024 * 1024
 # open server's cache could be grown without bound; oldest files are evicted past this.
 DEFAULT_MAX_INDEX_CACHE_BYTES = 512 * 1024 * 1024
 
+# Per-request HTTP timeout (seconds) for downloading a remote .bai/.crai/.fai/.gzi index.
+INDEX_DOWNLOAD_TIMEOUT_SECONDS = 60.0
+
 # Timeout for BAM/CRAM parsing operations (seconds)
 BAM_PARSE_TIMEOUT_SECONDS = 30.0
 # First use of a not-yet-seen remote BAM/CRAM or reference FASTA: opening it fetches the remote
@@ -129,6 +155,9 @@ SCAN_VARIANTS_MIN_CHUNK_SIZE = 1_000
 SCAN_VARIANTS_CHUNK_TARGET_SECONDS = 2.0
 SCAN_VARIANTS_MAX_REGION = 250_000_000
 SCAN_VARIANTS_MAX_RESULTS = 500
+# get_variants returns at most this many variants (``truncated`` + ``total_candidates`` in
+# applied_filters); get_region_summary lists at most this many variant lines.
+GET_VARIANTS_MAX_RESULTS = 1_000
 
 # UI constants
 VIEWER_RESOURCE_URI = "ui://bamcp/viewer"

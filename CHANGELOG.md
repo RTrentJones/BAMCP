@@ -55,6 +55,10 @@ landed after that review.
   a CRAM needs a resolved reference that covers every `UR:`-tagged contig in its header. The
   gate is applied on the opened file's detected format, not its name: a CRAM renamed `.bam`
   (htslib detects CRAM from the bytes) used to skip it and decode against its `UR:` file.
+- **CRAM header URLs refused everywhere** — with the pysam pinned in `uv.lock` (0.23.3), htslib
+  fetches a URL in a CRAM header's `@SQ UR:` tag through libcurl when no reference is given or
+  the reference lacks that contig: an SSRF past the host allow-list and the private-address
+  block, on any server. Such a CRAM is now refused regardless of `BAMCP_ALLOW_LOCAL_FILES`.
 - **NCBI API key kept out of logs** — `str()` of an httpx error embeds the request URL, so a failed
   ClinVar/gnomAD/gene lookup logged `api_key=…`, as did httpx's own per-request INFO line. Every
   log site now goes through `redact_error` (type, status, URL with credential parameters

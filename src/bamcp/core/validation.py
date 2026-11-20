@@ -60,6 +60,11 @@ _URI_SCHEME_RE = re.compile(r"^[A-Za-z0-9+.-]+:")
 LOCAL_FILES_DISABLED_MESSAGE = "Local files are disabled on this server"
 
 
+def starts_with_uri_scheme(value: str) -> bool:
+    """True when htslib would treat ``value`` as a URL (it starts like ``name:``)."""
+    return bool(_URI_SCHEME_RE.match(value))
+
+
 def _is_remote_source(path: str, config: BAMCPConfig, what: str) -> bool:
     """Classify a caller-supplied data source as remote (True) or local (False).
 

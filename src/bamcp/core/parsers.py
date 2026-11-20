@@ -19,7 +19,7 @@ from ..constants import (
     VCF_MAX_SAMPLES_DETAIL,
 )
 from .errors import ToolInputError
-from .validation import is_cram
+from .validation import is_cram, starts_with_uri_scheme
 
 
 @dataclass
@@ -354,9 +354,9 @@ def _open_alignment(
         reference_filename=reference_path,
         index_filename=index_filename,
     )
-    if _CRAM_DECODE_GUARD.get() and samfile.is_cram:
+    if samfile.is_cram:
         try:
-            _check_cram_decode(samfile, reference_path)
+            _check_cram_decode(samfile, reference_path, local_files_off=_CRAM_DECODE_GUARD.get())
         except BaseException:
             samfile.close()
             raise
@@ -412,26 +412,48 @@ def _reference_contigs(reference_path: str) -> frozenset[str]:
     return names
 
 
-def _check_cram_decode(samfile: pysam.AlignmentFile, reference_path: str | None) -> None:
-    """Refuse a CRAM whose decode could fall back to its header's ``@SQ UR:`` file.
+def _is_network_ur(ur: str) -> bool:
+    """A ``UR:`` value htslib would fetch over the network (any scheme but ``file:``)."""
+    return starts_with_uri_scheme(ur) and not ur.lower().startswith("file:")
 
-    With no ``reference_filename`` htslib resolves each contig's reference from the header's
-    ``UR:`` tag (a path chosen by whoever wrote the file) and returns those bytes as read
-    sequence; with a reference that lacks a contig, it falls back to that contig's ``UR:``
-    (``cram_get_ref``: "Reference file given, but ref '…' not present"). ``REF_PATH`` /
-    ``REF_CACHE`` (pinned local at startup) only govern the M5 lookup. Reads only the header
-    and the FASTA index; no slice is decoded.
+
+def _check_cram_decode(
+    samfile: pysam.AlignmentFile, reference_path: str | None, *, local_files_off: bool
+) -> None:
+    """Refuse a CRAM whose decode could fall back to its header's ``@SQ UR:`` reference.
+
+    htslib resolves a contig's reference from the header's ``UR:`` tag (chosen by whoever
+    wrote the file) when no ``reference_filename`` is given, and also when the given
+    reference lacks that contig (``cram_get_ref``: "Reference file given, but ref '…' not
+    present"). ``REF_PATH`` / ``REF_CACHE`` (pinned local at startup) only govern the M5
+    lookup. Two policies, applied to the contigs the reference does not cover:
+
+    * a **URL** ``UR:`` is refused on every server: htslib/libcurl would fetch it without
+      :func:`validate_remote_url` (no host allow-list, no private-address block). The pysam
+      pinned in ``uv.lock`` does fetch it; ``test_cram_reference_gate`` proves it.
+    * a **local path** ``UR:`` is refused only when ``local_files_off``: otherwise the caller
+      could name that file directly anyway.
+
+    Reads only the header and the FASTA index; no slice is decoded.
     """
-    if not reference_path:
+    ur_by_contig = {
+        str(sq["SN"]): str(sq["UR"])
+        for sq in samfile.header.to_dict().get("SQ", [])
+        if sq.get("UR")
+    }
+    if local_files_off and not reference_path:
         raise ToolInputError(CRAM_REFERENCE_REQUIRED_MESSAGE)
-    ur_contigs = [str(sq["SN"]) for sq in samfile.header.to_dict().get("SQ", []) if sq.get("UR")]
-    if not ur_contigs:
+    if not ur_by_contig:
         return
-    served = _reference_contigs(reference_path)
-    unserved = [name for name in ur_contigs if name not in served]
-    if unserved:
-        shown = ", ".join(unserved[:3]) + (
-            f" (+{len(unserved) - 3} more)" if len(unserved) > 3 else ""
+    served = _reference_contigs(reference_path) if reference_path else frozenset()
+    refused = [
+        name
+        for name, ur in ur_by_contig.items()
+        if name not in served and (local_files_off or _is_network_ur(ur))
+    ]
+    if refused:
+        shown = ", ".join(refused[:3]) + (
+            f" (+{len(refused) - 3} more)" if len(refused) > 3 else ""
         )
         raise ToolInputError(
             f"This CRAM's header points contigs the reference does not contain ({shown}) at "

@@ -230,8 +230,10 @@ sets per call) refuses a CRAM with no resolved reference, or one whose `UR:`-tag
 reference does not cover. **It decides on the opened file's content** (`AlignmentFile.is_cram`),
 never the name — htslib decodes a CRAM named `.bam` as CRAM; `is_cram(path)` is only for the
 early `_require_cram_reference` refusal and for choosing an index suffix. The guard is a
-ContextVar; `_run_in_parse_pool` copies the context into the parse thread. htslib itself refuses
-a remote `UR:` (pinned by `test_cram_reference_gate.py`).
+ContextVar; `_run_in_parse_pool` copies the context into the parse thread. A **URL** `UR:` on a
+contig the reference does not cover is refused on *every* server, whatever the flag: the pysam in
+`uv.lock` (0.23.3) has libcurl fetch it outside `validate_remote_url` (newer htslib refuses it
+itself); `test_cram_reference_gate.py` proves both against a loopback listener.
 
 Input validation: regions against `REGION_PATTERN`, paths ≤2048 chars, regions ≤100 chars,
 only `.bam`/`.cram` for local files, gene symbols against `GENE_SYMBOL_PATTERN` (1–40 of letters,

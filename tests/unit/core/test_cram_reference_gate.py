@@ -237,12 +237,12 @@ class TestCramDetectedByContent:
 
 
 class TestNetworkHeaderReference:
-    """htslib itself refuses a URL in @SQ UR: ("UR tags pointing to remote files are not
-    supported"), so BAMCP's header gate only needs to handle local paths. Pin that: if a
-    pysam/htslib upgrade starts following remote UR: tags, this fails before any release."""
+    """A URL in @SQ UR: is fetched by htslib/libcurl outside validate_remote_url (the pysam
+    pinned in uv.lock does fetch it; newer htslib refuses). BAMCP refuses it on every server,
+    with or without a reference, whatever BAMCP_ALLOW_LOCAL_FILES says."""
 
     @pytest.fixture
-    def listener(self):
+    def listener(self, monkeypatch, tmp_path):
         import http.server
         import threading
 
@@ -257,18 +257,45 @@ class TestNetworkHeaderReference:
             def log_message(self, *args):
                 pass
 
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            monkeypatch.delenv(var, raising=False)  # reach the loopback listener directly
+        monkeypatch.setenv("REF_PATH", str(tmp_path / "refs" / "%s"))  # no M5 hit either
         server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         yield server.server_port, hits
         server.shutdown()
 
-    def test_htslib_never_fetches_a_remote_ur(self, tmp_path, listener, monkeypatch):
+    @pytest.mark.parametrize("with_reference", [False, True])
+    async def test_network_ur_refused_with_local_files_allowed(
+        self, tmp_path, listener, with_reference
+    ):
         port, hits = listener
-        for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-            monkeypatch.delenv(var, raising=False)  # reach the loopback listener directly
-        monkeypatch.setenv("REF_PATH", str(tmp_path / "refs" / "%s"))  # no M5 hit either
         cram, _ = _cram_with_header_ur(tmp_path, ur=f"http://127.0.0.1:{port}/internal.fa")
-        with pytest.raises(OSError), pysam.AlignmentFile(str(cram), "rc") as f:
-            for _read in f.fetch(until_eof=True):
-                pass
+        reference = None
+        if with_reference:  # a reference that lacks the UR:-tagged contig
+            reference = tmp_path / "other.fa"
+            reference.write_text(">other\nACGTACGTACGT\n")
+            pysam.faidx(str(reference))
+        config = BAMCPConfig(cache_dir=str(tmp_path / "c"))  # allow_local_files defaults on
+        with pytest.raises(ToolInputError, match=r"\(chr1\) at an external reference"):
+            await _fetch_region_with_timeout(
+                str(cram), "chr1:1-200", str(reference) if reference else None, config
+            )
         assert hits == []
+
+    async def test_covering_reference_still_decodes(self, tmp_path, listener):
+        port, hits = listener
+        cram, ref = _cram_with_header_ur(tmp_path, ur=f"http://127.0.0.1:{port}/internal.fa")
+        config = BAMCPConfig(cache_dir=str(tmp_path / "c"))
+        data = await _fetch_region_with_timeout(str(cram), "chr1:1-200", str(ref), config)
+        assert data.reads
+        assert hits == []
+
+    def test_is_network_ur(self):
+        from bamcp.core.parsers import _is_network_ur
+
+        assert _is_network_ur("http://example.org/x.fa")
+        assert _is_network_ur("ftp://example.org/x.fa")
+        assert _is_network_ur("http:/127.0.0.1/x.fa")
+        assert not _is_network_ur("file:///data/x.fa")
+        assert not _is_network_ur("/data/x.fa")

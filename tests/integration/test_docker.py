@@ -356,7 +356,8 @@ class TestDockerCompose:
         assert match
         compose_hosts = set(env["BAMCP_ALLOWED_REMOTE_HOSTS"].split(","))
         assert compose_hosts == set(match.group(1).split(","))
-        assert "ftp.ensembl.org" in compose_hosts
+        # Set membership of allow-list entries, not URL matching.
+        assert {"ftp.ensembl.org"} <= compose_hosts
 
 
 # ===========================================================================

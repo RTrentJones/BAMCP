@@ -746,7 +746,13 @@ def _format_variant_line(variant: dict[str, Any]) -> str:
             f"VAF={variant['vaf']:.1%} depth={variant['depth']}"
         )
 
-    genotypes = _format_genotypes(variant.get("samples") or {})
+    samples = variant.get("samples") or {}
+    genotypes = _format_genotypes(samples)
+    if variant.get("samples_truncated"):
+        # Only the first VCF_MAX_SAMPLES_DETAIL genotypes are kept; never hide the rest silently.
+        count = variant.get("sample_count")
+        hidden = count - len(samples) if isinstance(count, int) else None
+        genotypes.append(f"… +{hidden} more samples" if hidden else "… more samples")
     if genotypes:
         line += f" [{' '.join(genotypes)}]"
     return line

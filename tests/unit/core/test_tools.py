@@ -91,6 +91,24 @@ class TestVariantLineFormatting:
         assert _format_variant_line(v) == "  chr2:1 <DUP>"
 
     @pytest.mark.unit
+    def test_truncated_samples_say_how_many_are_hidden(self):
+        v = dict(
+            contig="chr1", position=99, ref="A", alt="G", vaf=0.5, depth=20, source="vcf",
+            variant_kind="snv", samples={f"S{i}": {"GT": [0, 1]} for i in range(16)},
+            sample_count=2504, samples_truncated=True,
+        )  # fmt: skip
+        line = _format_variant_line(v)
+        assert line.endswith("S15=0/1 … +2488 more samples]")
+
+    @pytest.mark.unit
+    def test_truncated_samples_without_count_still_flagged(self):
+        v = dict(
+            contig="chr1", position=99, ref="A", alt="G", vaf=0.5, depth=20,
+            samples={"S0": {"GT": [0, 1]}}, samples_truncated=True,
+        )  # fmt: skip
+        assert _format_variant_line(v).endswith("S0=0/1 … more samples]")
+
+    @pytest.mark.unit
     def test_multisample_genotypes_appended(self):
         v = {
             "contig": "chr1",

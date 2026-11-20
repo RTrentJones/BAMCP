@@ -107,7 +107,8 @@ landed after that review.
 - Per-call resource bounds: at most `VCF_MAX_RECORDS` (5,000) VCF records per call
   (`vcf_truncated` + `vcf_max_records` in `applied_filters`); records with more than
   `VCF_MAX_SAMPLES_DETAIL` (16) samples keep the GT of the first 16 (`samples_truncated`,
-  `sample_count`; the viewer shows the full count); at most `READ_MAX_MISMATCHES` (1,000)
+  `sample_count`; the viewer shows the full count and `get_region_summary` appends
+  `… +N more samples`); at most `READ_MAX_MISMATCHES` (1,000)
   mismatches per read (`mismatches_truncated`); read extraction stops past an estimated
   `READ_PAYLOAD_MAX_BYTES` (64 MiB, `reads_truncated`); `get_variants` returns at most
   `GET_VARIANTS_MAX_RESULTS` (1,000) variants (`truncated`, `total_candidates`, `max_results`),

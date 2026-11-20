@@ -259,7 +259,8 @@ port bound to `127.0.0.1`, `BAMCP_ALLOWED_REMOTE_HOSTS` set, `BAMCP_ALLOW_LOCAL_
 
 **Resource bounds per call** (`constants.py`): `VCF_MAX_RECORDS` (5,000; `vcf_truncated` +
 `vcf_max_records` in `applied_filters`), `VCF_MAX_SAMPLES_DETAIL` (16; GT only for the first 16,
-`samples_truncated` + `sample_count` on the variant), `READ_MAX_MISMATCHES` (1,000 per read;
+`samples_truncated` + `sample_count` on the variant; `get_region_summary` lines end
+`… +N more samples`), `READ_MAX_MISMATCHES` (1,000 per read;
 `mismatches_truncated`), `READ_PAYLOAD_MAX_BYTES` (64 MiB; sets `reads_truncated`),
 `GET_VARIANTS_MAX_RESULTS` (1,000; `truncated` / `total_candidates` / `max_results` in
 `applied_filters`, VCF records kept first, then most alt reads; the viewer tools' payload uses

@@ -258,6 +258,11 @@ def _format_filters_line(filters: dict[str, Any]) -> str:
         parts.append(
             "read list TRUNCATED at max_reads (SNV evidence from pileup; indel evidence incomplete)"
         )
+    if filters.get("variants_truncated"):
+        parts.append(
+            f"variant list TRUNCATED to {filters.get('max_results')} of "
+            f"{filters.get('total_candidates')} (narrow the region)"
+        )
     if filters.get("vcf_truncated"):
         parts.append(
             f"VCF TRUNCATED at {filters.get('vcf_max_records')} records "
@@ -1853,6 +1858,11 @@ async def _viewer_response(
         file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
     )
     data = _apply_alt_count(data, config.min_alt_count)
+    # A 1 Mbp window at permissive floors can pass a candidate at nearly every base; the viewer
+    # payload carries at most GET_VARIANTS_MAX_RESULTS of them, chosen as get_variants does.
+    total_variants = len(data.variants)
+    if total_variants > GET_VARIANTS_MAX_RESULTS:
+        data = replace(data, variants=_cap_variants(data.variants, GET_VARIANTS_MAX_RESULTS))
     filters = _applied_filters(
         config,
         args,
@@ -1863,6 +1873,11 @@ async def _viewer_response(
         reference_source=resolved.source,
     )
     filters.update(_vcf_truncation_filters(data))
+    filters["max_results"] = GET_VARIANTS_MAX_RESULTS
+    filters["variants_truncated"] = total_variants > GET_VARIANTS_MAX_RESULTS
+    filters["total_candidates"] = total_variants
+    if filters["variants_truncated"]:
+        filters["truncation_note"] = _RESULTS_TRUNCATION_NOTE
     if resolved.note:
         filters["reference_note"] = resolved.note
     payload = serialize_region_data(data)

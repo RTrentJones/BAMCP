@@ -31,7 +31,7 @@ import {
     firstHiddenRow,
     hiddenReadCount,
     hiddenReadsLabel,
-    referenceBannerMessage,
+    statusBannerMessage,
 } from "./ui-sync";
 import { Renderer } from "./renderer";
 import { StateManager, DEFAULT_SETTINGS } from "./state";
@@ -886,11 +886,11 @@ class BAMCPViewer {
         if (legend && legend.dataset.mode !== s.displayMode) legend.dataset.mode = s.displayMode;
     }
 
-    /** Show/hide the no-reference banner from the payload's applied_filters. */
+    /** Show/hide the status banner (no reference, capped variant list) from applied_filters. */
     private updateReferenceBanner(): void {
         const banner = document.getElementById('reference-banner');
         if (!banner) return;
-        const message = referenceBannerMessage(this.state.data);
+        const message = statusBannerMessage(this.state.data);
         const text = document.getElementById('reference-banner-text');
         if (message) {
             if (text && text.textContent !== message) text.textContent = message;

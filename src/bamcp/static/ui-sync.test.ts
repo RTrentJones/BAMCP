@@ -5,6 +5,8 @@ import {
   hiddenReadCount,
   hiddenReadsLabel,
   referenceBannerMessage,
+  statusBannerMessage,
+  variantsTruncatedMessage,
 } from "./ui-sync";
 import { Read } from "./types";
 
@@ -86,5 +88,40 @@ describe("hidden-reads accounting", () => {
   it("labels the count", () => {
     expect(hiddenReadsLabel(1)).toMatch(/1 read not shown/);
     expect(hiddenReadsLabel(1234)).toMatch(/1,234 reads not shown/);
+  });
+});
+
+describe("variantsTruncatedMessage", () => {
+  it("states how many variants are shown when the server capped the list", () => {
+    const msg = variantsTruncatedMessage({
+      applied_filters: { variants_truncated: true, max_results: 1000, total_candidates: 4321 },
+    });
+    expect(msg).toMatch(/1,000 of 4,321 variants shown/);
+  });
+
+  it("stays hidden when not truncated or the field is missing/malformed", () => {
+    expect(variantsTruncatedMessage({ applied_filters: { variants_truncated: false } })).toBeNull();
+    expect(variantsTruncatedMessage({ applied_filters: { variants_truncated: "yes" } })).toBeNull();
+    expect(variantsTruncatedMessage({})).toBeNull();
+    expect(variantsTruncatedMessage(null)).toBeNull();
+  });
+
+  it("still warns without counts", () => {
+    expect(variantsTruncatedMessage({ applied_filters: { variants_truncated: true } }))
+      .toMatch(/Not every variant is shown/);
+  });
+});
+
+describe("statusBannerMessage", () => {
+  it("joins the reference and truncation messages", () => {
+    const msg = statusBannerMessage({
+      applied_filters: { reference_source: "none", variants_truncated: true },
+    });
+    expect(msg).toContain(NO_REFERENCE_MESSAGE);
+    expect(msg).toMatch(/Not every variant is shown/);
+  });
+
+  it("is null when neither applies", () => {
+    expect(statusBannerMessage({ applied_filters: { snv_detection: "enabled" } })).toBeNull();
   });
 });

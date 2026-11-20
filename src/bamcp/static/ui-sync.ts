@@ -39,6 +39,32 @@ export function referenceBannerMessage(data: Partial<RegionData> | null | undefi
 }
 
 /**
+ * Banner text when the server capped the variant list (`applied_filters.variants_truncated`),
+ * or null. Like the reference banner, every field is optional and a missing or malformed one
+ * never shows a banner.
+ */
+export function variantsTruncatedMessage(data: Partial<RegionData> | null | undefined): string | null {
+    if (!data || typeof data !== 'object') return null;
+    const filters = (data.applied_filters && typeof data.applied_filters === 'object')
+        ? data.applied_filters as Record<string, unknown>
+        : {};
+    if (filters.variants_truncated !== true) return null;
+    const shown = typeof filters.max_results === 'number' ? filters.max_results : null;
+    const total = typeof filters.total_candidates === 'number' ? filters.total_candidates : null;
+    const counts = shown !== null && total !== null
+        ? `${shown.toLocaleString()} of ${total.toLocaleString()} variants shown`
+        : 'Not every variant is shown';
+    return `${counts} — narrow the region or raise min_vaf/min_depth to see the rest.`;
+}
+
+/** The viewer's one status banner: every applicable message, in a fixed order. */
+export function statusBannerMessage(data: Partial<RegionData> | null | undefined): string | null {
+    const parts = [referenceBannerMessage(data), variantsTruncatedMessage(data)]
+        .filter((m): m is string => m !== null);
+    return parts.length ? parts.join(' ') : null;
+}
+
+/**
  * Index of the first packed row that is not fully visible inside a reads area
  * `visibleHeightPx` tall (rows are `rowPitch` apart and `rowHeight` tall), also
  * capped by `drawnRows` (rows past the canvas cap are never drawn at all).

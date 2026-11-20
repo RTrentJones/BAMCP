@@ -262,7 +262,9 @@ port bound to `127.0.0.1`, `BAMCP_ALLOWED_REMOTE_HOSTS` set, `BAMCP_ALLOW_LOCAL_
 `samples_truncated` + `sample_count` on the variant), `READ_MAX_MISMATCHES` (1,000 per read;
 `mismatches_truncated`), `READ_PAYLOAD_MAX_BYTES` (64 MiB; sets `reads_truncated`),
 `GET_VARIANTS_MAX_RESULTS` (1,000; `truncated` / `total_candidates` / `max_results` in
-`applied_filters`, VCF records kept first, then most alt reads), `SCAN_VARIANTS_MAX_RESULTS`
+`applied_filters`, VCF records kept first, then most alt reads; the viewer tools' payload uses
+the same cap and reports `variants_truncated` / `total_candidates` / `max_results`, which the
+viewer shows in its status banner), `SCAN_VARIANTS_MAX_RESULTS`
 (500; `scan.py:_TopCandidates` keeps only the highest-VAF ones *while* scanning — the same picks,
 ties included, as a sort at the end — and counts the rest for `total_candidates`).
 

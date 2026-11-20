@@ -283,3 +283,35 @@ async def test_region_summary_listing_capped(bam_and_ref, monkeypatch):
     text = (await tm.handle_get_region_summary(args, config))["content"][0]["text"]
     assert "Variant listing TRUNCATED: 3 of" in text
     assert sum(1 for line in text.splitlines() if line.startswith("  chr1:")) == 3
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["visualize_region", "jump_to"])
+async def test_viewer_variants_capped(bam_and_ref, monkeypatch, tool):
+    """The viewer payload's variant list is capped like get_variants, and says so."""
+    bam_path, ref_path = bam_and_ref
+    config = BAMCPConfig(reference=ref_path, min_alt_count=1)
+    if tool == "visualize_region":
+        handler, args = tm.handle_visualize_region, {"region": "chr1:101-300"}
+    else:
+        handler, args = tm.handle_jump_to, {"contig": "chr1", "position": 200, "window": 200}
+    args.update(file_path=bam_path, min_vaf=0, min_depth=1)
+
+    full = (await handler(args, config))["_meta"]["ui/init"]
+    total = len(full["variants"])
+    assert total > 3
+    assert full["applied_filters"]["variants_truncated"] is False
+    assert full["applied_filters"]["total_candidates"] == total
+
+    monkeypatch.setattr(tm, "GET_VARIANTS_MAX_RESULTS", 3)
+    tm._services_registry.clear()
+    result = await handler(args, config)
+    payload = result["_meta"]["ui/init"]
+    filters = payload["applied_filters"]
+    assert len(payload["variants"]) == 3
+    assert filters["variants_truncated"] is True
+    assert filters["total_candidates"] == total
+    assert filters["max_results"] == 3
+    assert "truncation_note" in filters
+    assert f"variant list TRUNCATED to 3 of {total}" in result["content"][0]["text"]

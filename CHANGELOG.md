@@ -63,6 +63,10 @@ landed after that review.
   at caller floors as low as `min_vaf=0`, `min_alt_count=1`) was held until the end and only then
   capped at 500. The highest-VAF candidates are now kept as the scan goes (same selection, ties
   included); `total_candidates` / `results_capped` still count everything seen.
+- **Viewer variant list capped** — `visualize_region` / `jump_to` put every passing candidate of
+  a window (up to 1 Mbp) into the viewer payload. They now keep `GET_VARIANTS_MAX_RESULTS`,
+  chosen as `get_variants` chooses, record `variants_truncated` / `total_candidates` /
+  `max_results` in `applied_filters`, and the viewer says how many are shown.
 - **`search_gene` symbol validation** — symbols must be 1–40 letters, digits, `.`, `_` or `-`
   before they are put into an NCBI Entrez query.
 - **`BAMCP_HOST` defaults to `127.0.0.1`** in code; the Docker image still sets `0.0.0.0`.

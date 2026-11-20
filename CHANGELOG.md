@@ -137,6 +137,8 @@ landed after that review.
   input gets the cold-start budget again.
 - A candidate with an unknown `alt_count` was dropped by the viewer/region-summary floor and the
   site probe but kept by `get_variants`; all of them now keep it.
+- The curation summary's CALLING FILTERS block printed an unknown alt count as `None/20 alt reads`
+  (and an unknown VAF failed to format); both now read `unknown`.
 - pysam parses ran on the event loop's default executor, so a hung parse could starve unrelated
   async work — parsing is confined to a dedicated bounded pool.
 

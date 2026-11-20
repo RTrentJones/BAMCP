@@ -352,3 +352,40 @@ async def test_curation_rejects_ref_that_is_not_the_reference_base(
             },
             config,
         )
+
+
+@pytest.mark.unit
+class TestFilterCheckUnknownCounts:
+    """An unknown alt count/VAF renders as "unknown", never as "None/20" or a format crash."""
+
+    def _check(self, **at):
+        from bamcp.analysis.curation import _format_filter_check
+
+        check = {
+            "passes_filters": False,
+            "failed_filters": ["min_alt_count"],
+            "at_filters": {"alt_count": None, "depth": 20, "vaf": None, **at},
+        }
+        return "\n".join(_format_filter_check(check, None))
+
+    def test_unknown_alt_count(self):
+        text = self._check()
+        assert "None" not in text
+        assert "unknown alt reads of 20 (VAF unknown)" in text
+
+    def test_known_counts_unchanged(self):
+        text = self._check(alt_count=3, vaf=0.15)
+        assert "At the filters: 3/20 alt reads (VAF 15.0%)" in text
+
+    def test_unknown_in_unfiltered_block(self):
+        from bamcp.analysis.curation import _format_filter_check
+
+        check = {
+            "passes_filters": True,
+            "failed_filters": [],
+            "at_filters": {"alt_count": 2, "depth": 10, "vaf": 0.2},
+            "unfiltered": {"alt_count": None, "depth": None, "vaf": None},
+        }
+        text = "\n".join(_format_filter_check(check, None))
+        assert "Unfiltered (min_baseq=0): unknown alt reads (VAF unknown)" in text
+        assert "None" not in text

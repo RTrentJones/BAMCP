@@ -130,6 +130,9 @@ landed after that review.
   resolution, as `classify_variant` now also does) and other failures take the `isError` envelope.
 - 10 of 13 tool descriptions in `tool_specs.py` had drifted from the registered text; the eval
   router sent placeholder descriptions to the eval model.
+- `--cache` could merge those placeholder-description passes into a run graded on the real
+  descriptions: it matched provider + model only. Each result row and `run_config.yaml` now
+  record a `tools_hash` of the descriptors the model saw, and the cache requires it to match.
 - `cleanup_cache` now also forgets which remote inputs are warm, so the next open of a remote
   input gets the cold-start budget again.
 - A candidate with an unknown `alt_count` was dropped by the viewer/region-summary floor and the

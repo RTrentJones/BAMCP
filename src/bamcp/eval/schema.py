@@ -117,6 +117,8 @@ class RunConfig:
     # supports vision. Useful for cost control.
     no_vision: bool = False
     vision_screenshot_dir: Path | None = None
+    # router.tool_descriptors_hash of the tools shown to the model (None: not recorded).
+    tools_hash: str | None = None
 
 
 def load_cases(path: str | Path) -> list[EvalCase]:

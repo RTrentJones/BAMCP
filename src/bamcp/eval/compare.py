@@ -45,7 +45,7 @@ from .providers import (
     resolve_judge,
 )
 from .report import write_reports
-from .router import InProcessRouter, RouterResult, ToolRouter
+from .router import InProcessRouter, RouterResult, ToolRouter, tool_descriptors_hash
 from .runner import run_cases
 from .schema import EvalCase, EvalResult, RunConfig, apply_subset, load_cases
 
@@ -355,10 +355,11 @@ async def run_comparison(
     judges = [build_judge(spec, judge_provider, judge_model) for spec in specs]
     spec_results: list[SpecResult] = []
     for spec, judge in zip(specs, judges, strict=True):
+        router = build_router(spec)
         results = await run_cases(
             cases=cases,
             provider=build_provider(spec),
-            router=build_router(spec),
+            router=router,
             judge=judge,
             output_dir=output_dir / spec.slug,
             vision_mode=spec.vision,
@@ -379,6 +380,7 @@ async def run_comparison(
                 judge_provider=resolved[0] if resolved else None,
                 judge_model=resolved[1] if resolved else None,
                 router="in-process" if spec.tools else "none",
+                tools_hash=tool_descriptors_hash(router),
             ),
             output_dir / spec.slug,
         )

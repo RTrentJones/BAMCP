@@ -29,7 +29,7 @@ dependencies = [
     # does not import under it. uv.lock already pins 1.x — this makes pyproject agree, so the
     # pip-based CI jobs (`lint`, `test` run `make install`) stop resolving a version the code
     # cannot run. Floor stays at 1.23.0 for CVE-2025-66416.
-    "mcp>=1.23.0,<2",
+    "mcp>=1.23.0,<3",
     "numpy>=1.21.0",
     "pysam>=0.23.3",
     "uvicorn>=0.29",

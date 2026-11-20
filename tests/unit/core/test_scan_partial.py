@@ -320,3 +320,44 @@ async def test_capped_scan_keeps_highest_vaf(small_bam_path, ref_fasta_path, mon
     assert payload["applied_filters"]["total_candidates"] == len(every)
     [kept] = payload["variants"]
     assert kept["vaf"] == max(v["vaf"] for v in every)
+
+
+def _old_selection(candidates: list[dict], cap: int) -> list[dict]:
+    """The pre-streaming end-of-scan selection, verbatim: stable VAF sort, cap, position sort."""
+    every = list(candidates)
+    every.sort(key=lambda v: v["vaf"], reverse=True)
+    return sorted(every[:cap], key=lambda v: v["position"])
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_streaming_selection_matches_end_of_scan_selection(seed):
+    """Keeping the top candidates while scanning picks exactly what the old end-of-scan sort
+    picked, in the same order, ties included (few distinct VAFs, repeated positions)."""
+    import random
+
+    rng = random.Random(seed)  # noqa: S311 — reproducible test data, not crypto
+    n = rng.randint(0, 60)
+    vafs = [rng.choice([0.0, 0.1, 0.25, 0.5, 1.0, 1]) for _ in range(rng.randint(1, 4))]
+    candidates = [
+        {"position": rng.randint(0, 40), "vaf": rng.choice(vafs), "id": i} for i in range(n)
+    ]
+    cap = rng.randint(1, 25)
+    top = scan_mod._TopCandidates(cap)
+    for v in candidates:
+        top.add(v)
+    streamed = sorted(top.by_vaf(), key=lambda v: v["position"])
+    assert [v["id"] for v in streamed] == [v["id"] for v in _old_selection(candidates, cap)]
+    assert top.total == n
+
+
+def test_scan_holds_at_most_the_result_cap(small_bam_path, ref_fasta_path, monkeypatch):
+    """Memory is bounded by the response cap however many candidates the scan visits, and the
+    total seen stays exact for the truncation report."""
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_MAX_RESULTS", 2)
+    progress = scan(small_bam_path, "chr1", ref_fasta_path, min_vaf=0.0, min_depth=1)
+    monkeypatch.setattr(scan_mod, "SCAN_VARIANTS_MAX_RESULTS", 10**9)
+    every = scan(small_bam_path, "chr1", ref_fasta_path, min_vaf=0.0, min_depth=1)
+    if every.candidates.total <= 2:
+        pytest.skip("fixture yields too few candidates to exercise the bound")
+    assert len(progress.candidates._heap) == 2
+    assert progress.candidates.total == every.candidates.total

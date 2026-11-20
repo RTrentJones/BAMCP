@@ -23,7 +23,7 @@ from .providers import (
     resolve_judge,
 )
 from .report import write_reports, write_summary_line
-from .router import InProcessRouter, ToolRouter
+from .router import InProcessRouter, ToolRouter, tool_descriptors_hash
 from .runner import run_cases
 from .schema import RunConfig, apply_subset, load_cases
 
@@ -151,10 +151,11 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
     )
 
 
-def _filter_cached(results_path: Path, cases, provider: str, model: str):  # noqa: ANN001, ANN201
+def _filter_cached(results_path: Path, cases, provider: str, model: str, tools_hash: str):  # noqa: ANN001, ANN201
     """Drop cases that have a passing result in ``results.json`` from the SAME
-    provider + model. A pass by a different model (or an older row that does not
-    record one) is not reused."""
+    provider + model + tool descriptors (``tools_hash``). A pass by a different model or
+    against different tool descriptions (or an older row that does not record them) is not
+    reused."""
     if not results_path.exists():
         return cases
     try:
@@ -168,6 +169,7 @@ def _filter_cached(results_path: Path, cases, provider: str, model: str):  # noq
         and r.get("passed")
         and r.get("provider") == provider
         and r.get("model") == model
+        and r.get("tools_hash") == tools_hash
     }
     return [c for c in cases if c.name not in passed]
 
@@ -208,9 +210,15 @@ async def _run(config: RunConfig) -> int:
         print(f"Parsed {len(cases)} cases from {config.test_cases_path}")
         return 0
 
+    router = _build_router(config)
+    config.tools_hash = tool_descriptors_hash(router)
     if config.cache:
         cases = _filter_cached(
-            config.output_dir / "results.json", cases, config.provider, config.model
+            config.output_dir / "results.json",
+            cases,
+            config.provider,
+            config.model,
+            config.tools_hash,
         )
         if not cases:
             print("All cases cached. Nothing to do.")
@@ -218,7 +226,6 @@ async def _run(config: RunConfig) -> int:
 
     provider = get_provider(config.provider, config.model)
     judge = _build_judge(config)
-    router = _build_router(config)
 
     # Warn (once) when the user asked for rendering modes but the provider
     # can't actually see images. The runner will skip vision_required cases.

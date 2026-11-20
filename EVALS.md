@@ -170,7 +170,7 @@ make eval-visual-dry
 
 # LLM harness (needs ANTHROPIC_API_KEY + [eval] extras)
 make eval                             # run text cases
-make eval-cached                      # skip cases that already passed for this provider+model
+make eval-cached                      # skip cases that already passed for this provider+model+tools_hash
 make eval-compare                     # add vanilla + rendering-mode comparison
 make eval-dry                         # parse and validate the cases without calling a model
 

@@ -30,6 +30,8 @@ from .evidence import (
     compute_variant_evidence,
     is_indel,
     is_read_position_biased,
+    mismatch_capped_spans,
+    snv_evidence_capped,
     zygosity_hint,
 )
 
@@ -307,6 +309,17 @@ def _format_repeat_span(span: dict | None) -> list[str]:
     return lines
 
 
+def _support_text(counts: dict) -> str:
+    """``alt/depth alt reads (VAF x%)``, saying "unknown" for a count that is not known
+    rather than printing ``None``."""
+    alt, depth, vaf = counts.get("alt_count"), counts.get("depth"), counts.get("vaf")
+    if alt is None:
+        reads = "unknown alt reads" + (f" of {depth}" if depth is not None else "")
+    else:
+        reads = f"{alt}/{depth if depth is not None else 'unknown'} alt reads"
+    return f"{reads} (VAF {f'{vaf:.1%}' if vaf is not None else 'unknown'})"
+
+
 def _format_filter_check(check: dict | None, applied: dict | None) -> list[str]:
     """The CALLING FILTERS block: does this site pass the filters get_variants applies?"""
     if not check:
@@ -320,16 +333,12 @@ def _format_filter_check(check: dict | None, applied: dict | None) -> list[str]:
             + ", ".join(check["failed_filters"])
             + " — get_variants does NOT report this site."
         )
-    at = check["at_filters"]
-    lines.append(
-        f"  At the filters: {at['alt_count']}/{at['depth']} alt reads (VAF {at['vaf']:.1%})"
-    )
+    lines.append(f"  At the filters: {_support_text(check['at_filters'])}")
     unf = check.get("unfiltered")
     if unf:
         lines.append(
-            f"  Unfiltered (min_baseq=0): {unf['alt_count']}/{unf['depth']} alt reads "
-            f"(VAF {unf['vaf']:.1%}); {check.get('low_baseq_alt_reads_removed', 0)} alt read(s) "
-            "removed by min_baseq"
+            f"  Unfiltered (min_baseq=0): {_support_text(unf)}; "
+            f"{check.get('low_baseq_alt_reads_removed', 0)} alt read(s) removed by min_baseq"
         )
         lines.append(f"  {check.get('note', '')}")
     if applied:
@@ -416,6 +425,7 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     from ..core.tools import (
         _applied_filters,
         _fetch_region_with_timeout,
+        _mismatch_truncation_filters,
         _resolve_reference_info,
         probe_site,
         site_filter_check,
@@ -469,6 +479,7 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
         min_alt_count=config.min_alt_count,
         reference_source=resolved.source,
     )
+    applied_filters.update(_mismatch_truncation_filters(data))
     filter_check = site_filter_check(target_variant, config) if target_variant else None
     if target_variant is not None and filter_check and filter_check["passes_filters"]:
         # Build the support index (mismatches for SNVs, CIGAR events for indels) and
@@ -477,6 +488,8 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
             evidence = compute_indel_evidence(build_indel_index(data.reads), target_variant)
         else:
             evidence = compute_variant_evidence(build_mismatch_index(data.reads), target_variant)
+            if snv_evidence_capped(mismatch_capped_spans(data.reads), target_variant):
+                evidence["incomplete"] = True
         artifact_risk = compute_artifact_risk(
             target_variant,
             evidence,
@@ -517,6 +530,8 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
             "alt_count": target_variant.get("alt_count", 0),
         },
         "read_evidence_computed": computed,
+        # True when a read past READ_MAX_MISMATCHES covers the site: support is undercounted.
+        "evidence_incomplete": bool(evidence.get("incomplete")),
         "quality_metrics": {
             "mean_quality": evidence["mean_quality"] if computed else None,
             "median_quality": evidence["median_quality"] if computed else None,

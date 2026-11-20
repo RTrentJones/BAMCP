@@ -42,7 +42,7 @@ src/bamcp/
     fusion.py        — multi-source evidence fusion
   clients/
     clinvar.py, gnomad.py, genes.py — async NCBI / gnomAD GraphQL / NCBI gene clients
-    ncbi.py          — shared NCBI E-utilities rate limiting + error detection
+    ncbi.py          — shared NCBI E-utilities rate limiting + error detection, redact_error
     ttl_cache.py     — BoundedTTLCache (shared LRU + TTL)
   middleware/
     auth.py          — BAMCPAuthProvider (in-memory OAuth 2.0)
@@ -201,7 +201,7 @@ intentional. It is off by default in code; prod turns it on in the wrapper's inf
 (`RTrentJones.dev/infra/bamcp.tf`, `BAMCP_ALLOW_DYNAMIC_REGISTRATION = "true"`). Every in-memory store (OAuth clients/codes/tokens, index cache by bytes, region cache
 by bytes) is therefore bounded — keep any new store bounded too. Registration also caps each
 client record (`middleware/auth.py:check_client_metadata_size`: 10 `redirect_uris`, 2048 chars
-each, 256-char `client_name`, 16 KiB of metadata).
+each, 256-char `client_name`, 4 KiB of metadata).
 
 **One scheme classifier.** Every caller-supplied data source (BAM/CRAM, VCF, reference) goes
 through `core/validation.py:_is_remote_source`. Only an exact `http://` / `https://` prefix is
@@ -224,16 +224,22 @@ At startup `__main__.py` sets `REF_PATH` / `REF_CACHE` (when the operator has no
 directory under the cache dir, so htslib's CRAM reference-by-M5 lookup never goes to the network;
 an operator value naming a URL is kept and logged with a warning. A CRAM header's `@SQ UR:` tag
 is the other route: htslib decodes a contig against the file it names when no reference is given,
-or when the given reference lacks that contig. With `BAMCP_ALLOW_LOCAL_FILES=false`,
-`core/tools.py` (`_require_cram_reference`, `_check_cram_header_references`) refuses a CRAM with
-no resolved reference, or one whose `UR:`-tagged contigs the reference does not cover. htslib
-itself refuses a remote `UR:` (pinned by `test_cram_reference_gate.py`).
+or when the given reference lacks that contig. With `BAMCP_ALLOW_LOCAL_FILES=false`, every
+alignment open (`core/parsers.py:_open_alignment`, under `guard_cram_decoding`, which `server._run`
+sets per call) refuses a CRAM with no resolved reference, or one whose `UR:`-tagged contigs the
+reference does not cover. **It decides on the opened file's content** (`AlignmentFile.is_cram`),
+never the name — htslib decodes a CRAM named `.bam` as CRAM; `is_cram(path)` is only for the
+early `_require_cram_reference` refusal and for choosing an index suffix. The guard is a
+ContextVar; `_run_in_parse_pool` copies the context into the parse thread. htslib itself refuses
+a remote `UR:` (pinned by `test_cram_reference_gate.py`).
 
 Input validation: regions against `REGION_PATTERN`, paths ≤2048 chars, regions ≤100 chars,
 only `.bam`/`.cram` for local files, gene symbols against `GENE_SYMBOL_PATTERN` (1–40 of letters,
 digits, `.`, `_`, `-`; they go into an Entrez query), error messages sanitized (never leak config).
 Unavailable lookups carry a fixed `reason_code` (`timeout`, `network_error`, `upstream_error`,
-`unsupported_build`) — upstream error text is logged, never returned.
+`unsupported_build`) — upstream error text is logged, never returned, and logged only through
+`clients/ncbi.py:redact_error` (an httpx error's text embeds the request URL, NCBI `api_key` and
+all); a filter on the `httpx` logger scrubs the same parameters from its per-request INFO line.
 
 **One error envelope.** Every tool runs through `_run()` in `server.py`, which maps any handler
 exception via `core/errors.py:sanitize_tool_exception` to an `isError=true` result with a
@@ -253,10 +259,17 @@ port bound to `127.0.0.1`, `BAMCP_ALLOWED_REMOTE_HOSTS` set, `BAMCP_ALLOW_LOCAL_
 
 **Resource bounds per call** (`constants.py`): `VCF_MAX_RECORDS` (5,000; `vcf_truncated` +
 `vcf_max_records` in `applied_filters`), `VCF_MAX_SAMPLES_DETAIL` (16; GT only for the first 16,
-`samples_truncated` + `sample_count` on the variant), `READ_MAX_MISMATCHES` (1,000 per read;
-`mismatches_truncated`), `READ_PAYLOAD_MAX_BYTES` (64 MiB; sets `reads_truncated`),
+`samples_truncated` + `sample_count` on the variant; `get_region_summary` lines end
+`… +N more samples`), `READ_MAX_MISMATCHES` (1,000 per read;
+`mismatches_truncated` on the read; any capped read sets `applied_filters.mismatches_truncated`
++ `mismatches_truncated_reads`, and SNV candidates it covers past its kept mismatches get
+`evidence_incomplete`, as a `reads_truncated` indel does), `READ_PAYLOAD_MAX_BYTES` (64 MiB; sets `reads_truncated`),
 `GET_VARIANTS_MAX_RESULTS` (1,000; `truncated` / `total_candidates` / `max_results` in
-`applied_filters`, VCF records kept first, then most alt reads).
+`applied_filters`, VCF records kept first, then most alt reads; the viewer tools' payload uses
+the same cap and reports `variants_truncated` / `total_candidates` / `max_results`, which the
+viewer shows in its status banner), `SCAN_VARIANTS_MAX_RESULTS`
+(500; `scan.py:_TopCandidates` keeps only the highest-VAF ones *while* scanning — the same picks,
+ties included, as a sort at the end — and counts the rest for `total_candidates`).
 
 ## Viewer payload
 

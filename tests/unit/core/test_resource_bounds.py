@@ -210,6 +210,61 @@ def test_mismatches_capped_per_read(bam_and_ref, monkeypatch):
 
 
 @pytest.mark.unit
+def test_mismatch_cap_marks_snv_evidence_incomplete(bam_and_ref, monkeypatch):
+    """A capped read stops listing mismatches; candidates it covers past them are flagged."""
+    from bamcp.analysis.evidence import mismatch_capped_spans, snv_evidence_capped
+    from bamcp.core.serialization import build_enhanced_variants
+
+    bam_path, ref_path = bam_and_ref
+    monkeypatch.setattr(parsers, "READ_MAX_MISMATCHES", 5)
+    data = fetch_region(bam_path, "chr1:1-2000", ref_path, min_vaf=0.0, min_depth=1)
+    spans = mismatch_capped_spans(data.reads)
+    assert len(spans) == len(data.reads) == 20
+    enhanced, evidence = build_enhanced_variants(data)
+    snvs = [v for v in enhanced if v.get("source") == "bamcp" and len(v["ref"]) == len(v["alt"])]
+    flagged = [v for v in snvs if v.get("evidence_incomplete")]
+    clean = [v for v in snvs if not v.get("evidence_incomplete")]
+    assert flagged and clean
+    for v in flagged:
+        assert snv_evidence_capped(spans, v)
+        assert evidence[f"{v['position']}:{v['ref']}>{v['alt']}"]["incomplete"] is True
+    for v in clean:
+        assert not snv_evidence_capped(spans, v)
+
+
+@pytest.mark.unit
+def test_uncapped_reads_flag_nothing(bam_and_ref):
+    from bamcp.core.serialization import build_enhanced_variants
+
+    bam_path, ref_path = bam_and_ref
+    data = fetch_region(bam_path, "chr1:1-2000", ref_path, min_vaf=0.0, min_depth=1)
+    enhanced, _ = build_enhanced_variants(data)
+    assert not any(v.get("evidence_incomplete") for v in enhanced)
+    assert tm._mismatch_truncation_filters(data) == {}
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_mismatch_cap_echoed_in_applied_filters(bam_and_ref, monkeypatch):
+    bam_path, ref_path = bam_and_ref
+    monkeypatch.setattr(parsers, "READ_MAX_MISMATCHES", 5)
+    monkeypatch.setattr(tm, "READ_MAX_MISMATCHES", 5)
+    tm._services_registry.clear()
+    config = BAMCPConfig(reference=ref_path)
+    args = {"file_path": bam_path, "region": "chr1:101-300", "min_vaf": 0, "min_depth": 1}
+
+    viewer = await tm.handle_visualize_region(args, config)
+    filters = viewer["_meta"]["ui/init"]["applied_filters"]
+    assert filters["mismatches_truncated"] is True
+    assert filters["mismatches_truncated_reads"] > 0
+    assert filters["read_max_mismatches"] == 5
+    assert "capped at 5 mismatches" in viewer["content"][0]["text"]
+
+    summary = (await tm.handle_get_region_summary(args, config))["content"][0]["text"]
+    assert "capped at 5 mismatches" in summary
+
+
+@pytest.mark.unit
 def test_read_payload_budget_sets_reads_truncated(bam_and_ref, monkeypatch):
     bam_path, ref_path = bam_and_ref
     # Budget below one read's estimate: the first read is kept, then extraction stops.
@@ -283,3 +338,65 @@ async def test_region_summary_listing_capped(bam_and_ref, monkeypatch):
     text = (await tm.handle_get_region_summary(args, config))["content"][0]["text"]
     assert "Variant listing TRUNCATED: 3 of" in text
     assert sum(1 for line in text.splitlines() if line.startswith("  chr1:")) == 3
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["visualize_region", "jump_to"])
+async def test_viewer_variants_capped(bam_and_ref, monkeypatch, tool):
+    """The viewer payload's variant list is capped like get_variants, and says so."""
+    bam_path, ref_path = bam_and_ref
+    config = BAMCPConfig(reference=ref_path, min_alt_count=1)
+    if tool == "visualize_region":
+        handler, args = tm.handle_visualize_region, {"region": "chr1:101-300"}
+    else:
+        handler, args = tm.handle_jump_to, {"contig": "chr1", "position": 200, "window": 200}
+    args.update(file_path=bam_path, min_vaf=0, min_depth=1)
+
+    full = (await handler(args, config))["_meta"]["ui/init"]
+    total = len(full["variants"])
+    assert total > 3
+    assert full["applied_filters"]["variants_truncated"] is False
+    assert full["applied_filters"]["total_candidates"] == total
+
+    monkeypatch.setattr(tm, "GET_VARIANTS_MAX_RESULTS", 3)
+    tm._services_registry.clear()
+    result = await handler(args, config)
+    payload = result["_meta"]["ui/init"]
+    filters = payload["applied_filters"]
+    assert len(payload["variants"]) == 3
+    assert filters["variants_truncated"] is True
+    assert filters["total_candidates"] == total
+    assert filters["max_results"] == 3
+    assert "truncation_note" in filters
+    assert f"variant list TRUNCATED to 3 of {total}" in result["content"][0]["text"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_curation_flags_mismatch_capped_site(bam_and_ref, monkeypatch):
+    from bamcp.analysis.curation import handle_get_variant_curation_summary
+    from bamcp.analysis.evidence import mismatch_capped_spans, snv_evidence_capped
+
+    bam_path, ref_path = bam_and_ref
+    monkeypatch.setattr(parsers, "READ_MAX_MISMATCHES", 5)
+    tm._services_registry.clear()
+    data = fetch_region(bam_path, "chr1:1-2000", ref_path, min_vaf=0.0, min_depth=1)
+    spans = mismatch_capped_spans(data.reads)
+    config = BAMCPConfig(reference=ref_path, min_vaf=0.0, min_depth=1, min_alt_count=1)
+
+    async def rubric(v):
+        args = {
+            "file_path": bam_path, "chrom": "chr1", "pos": v["position"] + 1,
+            "ref": v["ref"], "alt": v["alt"], "format": "rubric",
+        }  # fmt: skip
+        result = await handle_get_variant_curation_summary(args, config)
+        return json.loads(result["content"][0]["text"])
+
+    snvs = [v for v in data.variants if v.get("source") == "bamcp" and len(v["alt"]) == 1]
+    capped = next(v for v in snvs if snv_evidence_capped(spans, v))
+    clean = next(v for v in snvs if not snv_evidence_capped(spans, v))
+    flagged = await rubric(capped)
+    assert flagged["evidence_incomplete"] is True
+    assert flagged["applied_filters"]["mismatches_truncated"] is True
+    assert (await rubric(clean))["evidence_incomplete"] is False

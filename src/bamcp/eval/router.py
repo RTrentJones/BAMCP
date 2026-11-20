@@ -11,6 +11,7 @@ handler. Two implementations:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -137,3 +138,15 @@ def tool_descriptors(router: ToolRouter) -> list:
         )
         for name in names
     ]
+
+
+def tool_descriptors_hash(router: ToolRouter) -> str:
+    """A short, stable fingerprint of exactly what the eval model is shown as tools.
+
+    Results graded against different tool descriptions are different experiments (passes
+    recorded when the harness sent placeholder descriptions must not be reused), so each
+    result row and run config carries this and ``--cache`` only reuses a matching one.
+    """
+    payload = [[d.name, d.description, d.input_schema] for d in tool_descriptors(router)]
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]

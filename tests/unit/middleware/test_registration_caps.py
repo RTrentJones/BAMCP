@@ -10,6 +10,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from bamcp.middleware.auth import (
+    MAX_CLIENT_METADATA_BYTES,
     MAX_CLIENT_NAME_LENGTH,
     MAX_REDIRECT_URI_LENGTH,
     MAX_REDIRECT_URIS,
@@ -69,6 +70,44 @@ class TestRegistrationCaps:
                 )
             )
         assert exc.value.error == "invalid_client_metadata"
+
+    async def test_total_cap_is_4_kib(self, provider):
+        assert MAX_CLIENT_METADATA_BYTES == 4 * 1024
+        # ~5 KiB of individually in-bounds fields: accepted under the old 16 KiB cap.
+        with pytest.raises(RegistrationError) as exc:
+            await provider.register_client(
+                _client(
+                    redirect_uris=[
+                        AnyUrl(f"https://app.example/cb{i}/" + "r" * 1000) for i in range(5)
+                    ]
+                )
+            )
+        assert exc.value.error == "invalid_client_metadata"
+
+    async def test_realistic_hosted_client_fits(self, provider):
+        # A claude.ai / desktop-style registration with several callbacks and branding URIs.
+        client = _client(
+            client_id="x" * 43,
+            client_secret="s" * 43,
+            client_id_issued_at=1_760_000_000,
+            client_secret_expires_at=0,
+            client_name="Claude Desktop (bamcp)",
+            redirect_uris=[
+                AnyUrl("https://claude.ai/api/mcp/auth_callback"),
+                AnyUrl("https://claude.com/api/mcp/auth_callback"),
+                AnyUrl("http://localhost:6274/oauth/callback"),
+                AnyUrl("http://localhost:6274/oauth/callback/debug"),
+                AnyUrl("http://127.0.0.1:33418/callback"),
+            ],
+            token_endpoint_auth_method="client_secret_post",
+            scope="bamcp:read",
+            client_uri=AnyHttpUrl("https://claude.ai"),
+            logo_uri=AnyHttpUrl("https://claude.ai/images/claude_app_icon.png"),
+            software_id="claude-desktop",
+            software_version="1.0.0",
+        )
+        assert len(client.model_dump_json().encode()) < MAX_CLIENT_METADATA_BYTES // 2
+        await provider.register_client(client)
 
 
 @pytest.mark.unit

@@ -7,6 +7,7 @@ Lifecycle objects shared by every tool handler. This module must not import ``co
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import logging
 import os
@@ -70,10 +71,13 @@ async def _run_in_parse_pool(fn: Callable[..., _T], /, *args: Any, **kwargs: Any
     Drop-in awaitable for ``asyncio.to_thread`` (callers wrap it in their own ``wait_for``).
     run_in_executor takes no kwargs, so bind them with partial to keep the call sites unchanged.
     """
-    call = functools.partial(fn, **kwargs) if kwargs else fn
+    call = functools.partial(fn, *args, **kwargs)
+    # Run in a copy of the caller's context, as asyncio.to_thread does, so per-call ContextVars
+    # (the CRAM decode guard, parsers.guard_cram_decoding) reach the parse thread.
+    ctx = contextvars.copy_context()
     gate = _get_parse_gate()
     await gate.acquire()
-    fut = asyncio.get_running_loop().run_in_executor(_PARSE_EXECUTOR, call, *args)
+    fut = asyncio.get_running_loop().run_in_executor(_PARSE_EXECUTOR, ctx.run, call)
     # Release only when the thread actually completes — not when an outer wait_for cancels the
     # await — so hung parses keep holding their slot (real backpressure, bounded executor queue).
     fut.add_done_callback(lambda _f: gate.release())

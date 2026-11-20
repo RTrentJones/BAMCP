@@ -23,12 +23,14 @@ from ..analysis.evidence import (
     enhance_vcf_variants,
 )
 from ..clients.genes import GeneLookupError
+from ..clients.ncbi import redact_error
 from ..config import BAMCPConfig
 from ..constants import (
     BAM_PARSE_TIMEOUT_SECONDS,
     DEFAULT_CACHE_TTL_SECONDS,
     GET_VARIANTS_MAX_RESULTS,
     INDEL_DETECTION_MAX_REGION,
+    READ_MAX_MISMATCHES,
     REGION_TILE_SIZE,
     VCF_MAX_RECORDS,
     VIEWER_RESOURCE_URI,
@@ -59,6 +61,7 @@ from .lookups import (  # noqa: F401
     handle_lookup_gnomad,
 )
 from .parsers import (
+    CRAM_REFERENCE_REQUIRED_MESSAGE,
     EXCLUDED_READ_FLAGS,
     MAX_REGION_SIZE,
     OVERLAPPING_MATES_POLICY,
@@ -69,8 +72,8 @@ from .parsers import (
     fetch_reference_sequence,
     fetch_region,
     format_region,
+    guard_cram_decoding,
     load_vcf_variants,
-    open_fasta,
     parse_region,
     vcf_truncated,
 )
@@ -238,6 +241,22 @@ def _vcf_truncation_filters(data: RegionData) -> dict[str, Any]:
     return {"vcf_truncated": True, "vcf_max_records": VCF_MAX_RECORDS}
 
 
+def _mismatch_truncation_filters(data: RegionData) -> dict[str, Any]:
+    """applied_filters entries when any read hit READ_MAX_MISMATCHES (else empty).
+
+    Such a read lists only its first mismatches, so read-level SNV evidence past them is
+    incomplete (the affected candidates carry ``evidence_incomplete``).
+    """
+    capped = sum(1 for r in data.reads if r.mismatches_truncated)
+    if not capped:
+        return {}
+    return {
+        "mismatches_truncated": True,
+        "mismatches_truncated_reads": capped,
+        "read_max_mismatches": READ_MAX_MISMATCHES,
+    }
+
+
 def _format_filters_line(filters: dict[str, Any]) -> str:
     """Compact human-readable rendering of :func:`_applied_filters` for text summaries."""
     parts = [
@@ -255,6 +274,16 @@ def _format_filters_line(filters: dict[str, Any]) -> str:
     if filters.get("reads_truncated"):
         parts.append(
             "read list TRUNCATED at max_reads (SNV evidence from pileup; indel evidence incomplete)"
+        )
+    if filters.get("variants_truncated"):
+        parts.append(
+            f"variant list TRUNCATED to {filters.get('max_results')} of "
+            f"{filters.get('total_candidates')} (narrow the region)"
+        )
+    if filters.get("mismatches_truncated"):
+        parts.append(
+            f"{filters.get('mismatches_truncated_reads')} read(s) capped at "
+            f"{filters.get('read_max_mismatches')} mismatches (SNV read evidence incomplete there)"
         )
     if filters.get("vcf_truncated"):
         parts.append(
@@ -474,16 +503,43 @@ async def _fetch_region_with_timeout(
     unrelated per-tool bug. Re-raise with the context needed to tell "too slow" from
     "broken", and note that a retry is usually warm enough to succeed.
     """
-    # Every tool's alignment decode funnels through here (scan_variants requires a reference
-    # up front), so this is the one CRAM header-reference gate.
+    # The CRAM header-reference gate runs on every alignment open (by content) under
+    # guard_cram_decoding; server._run sets it per tool call, and it is set here too for the
+    # in-process callers (curation, fusion, the eval renderers). This check only fails a
+    # ``.cram``-named input early.
     _require_cram_reference(file_path, reference, config)
+    with guard_cram_decoding(not config.allow_local_files):
+        return await _fetch_region_guarded(
+            file_path,
+            region,
+            reference,
+            config,
+            min_vaf=min_vaf,
+            min_depth=min_depth,
+            mode=mode,
+            vcf_path=vcf_path,
+            vcf_primary=vcf_primary,
+        )
+
+
+async def _fetch_region_guarded(
+    file_path: str,
+    region: str,
+    reference: str | None,
+    config: BAMCPConfig,
+    min_vaf: float | None,
+    min_depth: int | None,
+    mode: str,
+    vcf_path: str | None,
+    vcf_primary: bool,
+) -> RegionData:
+    """:func:`_fetch_region_with_timeout`'s body, run under the CRAM decode guard."""
     # Cold start: fetch the index (never under a parse budget), then give a not-yet-seen remote
     # BAM/reference its one-off open under the separate cold budget, so the parse that follows
     # runs warm under the normal BAM_PARSE_TIMEOUT_SECONDS.
     if _is_remote(file_path) or _is_remote(reference):
         index_path = await _ensure_cached_index(file_path, config)
         await _warm_remote_inputs(file_path, reference, index_path, config)
-    await _check_cram_header_references(file_path, reference, config)
     try:
         return await _fetch_region_data(
             file_path,
@@ -712,7 +768,13 @@ def _format_variant_line(variant: dict[str, Any]) -> str:
             f"VAF={variant['vaf']:.1%} depth={variant['depth']}"
         )
 
-    genotypes = _format_genotypes(variant.get("samples") or {})
+    samples = variant.get("samples") or {}
+    genotypes = _format_genotypes(samples)
+    if variant.get("samples_truncated"):
+        # Only the first VCF_MAX_SAMPLES_DETAIL genotypes are kept; never hide the rest silently.
+        count = variant.get("sample_count")
+        hidden = count - len(samples) if isinstance(count, int) else None
+        genotypes.append(f"… +{hidden} more samples" if hidden else "… more samples")
     if genotypes:
         line += f" [{' '.join(genotypes)}]"
     return line
@@ -846,89 +908,19 @@ async def _resolve_reference_info(
     return ResolvedReference(None, None, REFERENCE_SOURCE_NONE)
 
 
-CRAM_REFERENCE_REQUIRED_MESSAGE = (
-    "CRAM decoding needs a reference on this server; pass reference=<indexed FASTA URL> "
-    "(list_contigs suggests one for the file's build)"
-)
-
-
 def _require_cram_reference(file_path: str, reference: str | None, config: BAMCPConfig) -> None:
-    """Refuse to decode a CRAM without a resolved reference on a remote-only server.
+    """Fast path: refuse a ``.cram``-named input with no reference on a remote-only server.
 
-    With no ``reference_filename``, htslib resolves each contig's reference from the CRAM
-    header itself — the ``@SQ UR:`` tag, a path or URL chosen by whoever wrote the file —
-    and decodes read bases against it. ``REF_PATH``/``REF_CACHE`` (pinned local at startup)
-    only govern the M5 lookup, not ``UR:``, so a caller-supplied CRAM could make the server
-    read a local file (its bytes come back as read sequence) or fetch an arbitrary URL
-    outside the host allow-list. When ``allow_local_files`` is off, require a reference
-    BAMCP resolved itself (caller-supplied and validated, the operator's configured one,
-    or the auto-selected registry FASTA). Header-only reads (list_contigs) never decode
-    a slice and do not go through here. No-op when local files are allowed.
+    Fails before any index download or open. It is judged on the name, so it is only an early
+    answer, not the gate: the gate is :func:`parsers.guard_cram_decoding`, which checks every
+    alignment open by its *content* (a CRAM named ``.bam`` decodes as CRAM) for a missing
+    reference and for header ``@SQ UR:`` contigs the reference does not cover. Header-only
+    reads (list_contigs) never decode a slice and are not gated. No-op when local files are
+    allowed.
     """
     if config.allow_local_files or reference or not is_cram(file_path):
         return
     raise ToolInputError(CRAM_REFERENCE_REQUIRED_MESSAGE)
-
-
-# (file_path, reference) -> header contigs htslib would resolve via @SQ UR: instead of the
-# given reference. Bounded LRU: a header verdict is re-checked after eviction, never trusted
-# beyond it. Only populated on remote-only servers.
-_CRAM_HEADER_REF_CHECKS: OrderedDict[tuple[str, str], tuple[str, ...]] = OrderedDict()
-_CRAM_HEADER_REF_CHECKS_MAX = 256
-
-
-def _cram_header_only_refs(
-    file_path: str, reference: str, index_path: str | None
-) -> tuple[str, ...]:
-    """Header contigs that carry a ``UR:`` tag but are absent from ``reference``.
-
-    htslib falls back to a contig's header ``UR:`` path/URL when the given reference FASTA
-    does not contain it (``cram_get_ref``: "Reference file given, but ref '…' not present"),
-    so a resolved reference alone does not keep decoding off caller-chosen files. Reads only
-    the header and the FASTA index — no slice is decoded. Runs in the parse pool.
-    """
-    from .parsers import _open_alignment
-
-    with _open_alignment(file_path, reference, index_path) as samfile:
-        sq = samfile.header.to_dict().get("SQ", [])
-    with open_fasta(reference) as fasta:
-        served = set(fasta.references)
-    return tuple(str(s["SN"]) for s in sq if s.get("UR") and s.get("SN") not in served)
-
-
-async def _check_cram_header_references(
-    file_path: str, reference: str | None, config: BAMCPConfig
-) -> None:
-    """On a remote-only server, refuse a CRAM whose header could redirect decoding.
-
-    Complements :func:`_require_cram_reference`: with a reference resolved, any header contig
-    the reference lacks but whose ``@SQ`` names a ``UR:`` would still be decoded against that
-    caller-chosen path or URL. No-op when local files are allowed or for BAM input.
-    """
-    if config.allow_local_files or not reference or not is_cram(file_path):
-        return
-    key = (file_path, reference)
-    unserved = _CRAM_HEADER_REF_CHECKS.get(key)
-    if unserved is None:
-        index_path = await _ensure_cached_index(file_path, config)
-        unserved = await asyncio.wait_for(
-            _run_in_parse_pool(_cram_header_only_refs, file_path, reference, index_path),
-            timeout=BAM_PARSE_TIMEOUT_SECONDS,
-        )
-        _CRAM_HEADER_REF_CHECKS[key] = unserved
-        while len(_CRAM_HEADER_REF_CHECKS) > _CRAM_HEADER_REF_CHECKS_MAX:
-            _CRAM_HEADER_REF_CHECKS.popitem(last=False)
-    else:
-        _CRAM_HEADER_REF_CHECKS.move_to_end(key)
-    if unserved:
-        shown = ", ".join(unserved[:3]) + (
-            f" (+{len(unserved) - 3} more)" if len(unserved) > 3 else ""
-        )
-        raise ToolInputError(
-            f"This CRAM's header points contigs the reference does not contain ({shown}) at "
-            "an external reference (@SQ UR:), which this server does not follow; pass a "
-            "reference FASTA that covers every contig in the header"
-        )
 
 
 async def _resolve_reference(
@@ -1448,6 +1440,7 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     )
     filters["per_site_evidence"] = evidence_summary
     filters.update(_vcf_truncation_filters(data))
+    filters.update(_mismatch_truncation_filters(data))
     filters["max_results"] = GET_VARIANTS_MAX_RESULTS
     filters["truncated"] = total_candidates > GET_VARIANTS_MAX_RESULTS
     filters["total_candidates"] = total_candidates
@@ -1724,7 +1717,7 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     except GeneLookupError as e:
         # NCBI unreachable / in-band error: the gene's existence is UNKNOWN, not disproven.
         # The upstream text is logged only; the caller gets a fixed reason, as the lookups do.
-        logger.warning("Gene lookup unavailable for %s: %s", symbol, e)
+        logger.warning("Gene lookup unavailable for %s: %s", symbol, redact_error(e))
         reason_code = (
             "network_error" if isinstance(e.__cause__, httpx.HTTPError) else "upstream_error"
         )
@@ -1894,6 +1887,11 @@ async def _viewer_response(
         file_path, region, reference, config, vcf_path=effective_vcf, vcf_primary=vcf_primary
     )
     data = _apply_alt_count(data, config.min_alt_count)
+    # A 1 Mbp window at permissive floors can pass a candidate at nearly every base; the viewer
+    # payload carries at most GET_VARIANTS_MAX_RESULTS of them, chosen as get_variants does.
+    total_variants = len(data.variants)
+    if total_variants > GET_VARIANTS_MAX_RESULTS:
+        data = replace(data, variants=_cap_variants(data.variants, GET_VARIANTS_MAX_RESULTS))
     filters = _applied_filters(
         config,
         args,
@@ -1904,6 +1902,12 @@ async def _viewer_response(
         reference_source=resolved.source,
     )
     filters.update(_vcf_truncation_filters(data))
+    filters.update(_mismatch_truncation_filters(data))
+    filters["max_results"] = GET_VARIANTS_MAX_RESULTS
+    filters["variants_truncated"] = total_variants > GET_VARIANTS_MAX_RESULTS
+    filters["total_candidates"] = total_variants
+    if filters["variants_truncated"]:
+        filters["truncation_note"] = _RESULTS_TRUNCATION_NOTE
     if resolved.note:
         filters["reference_note"] = resolved.note
     payload = serialize_region_data(data)
@@ -2024,6 +2028,7 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
         reference_source=resolved.source,
     )
     filters.update(_vcf_truncation_filters(data))
+    filters.update(_mismatch_truncation_filters(data))
     total_variants = len(data.variants)
     listed = data
     if total_variants > GET_VARIANTS_MAX_RESULTS:

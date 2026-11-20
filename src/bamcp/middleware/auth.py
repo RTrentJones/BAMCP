@@ -73,7 +73,9 @@ AUTH_CODE_LIFETIME = 300  # 5-minute code lifetime
 MAX_REDIRECT_URIS = 10
 MAX_REDIRECT_URI_LENGTH = 2048
 MAX_CLIENT_NAME_LENGTH = 256
-MAX_CLIENT_METADATA_BYTES = 16 * 1024
+# A real registration (a few redirect_uris, client_name, grant/response types, logo/client
+# URIs) serializes to well under 1 KiB; 4 KiB leaves headroom while keeping 10k clients small.
+MAX_CLIENT_METADATA_BYTES = 4 * 1024
 
 
 def check_client_metadata_size(client_info: OAuthClientInformationFull) -> None:

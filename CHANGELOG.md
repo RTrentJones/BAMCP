@@ -42,7 +42,8 @@ landed after that review.
   `Content-Length` and on streamed bytes; a malformed or conflicting `Content-Length` is a 400. It
   sits after `SecurityHeadersMiddleware` and before the rate limiter.
 - **Client-registration caps** — at most 10 `redirect_uris` of at most 2048 characters, a
-  `client_name` of at most 256 characters, and 16 KiB of metadata per client.
+  `client_name` of at most 256 characters, and 4 KiB of metadata per client (a real registration
+  is well under 1 KiB).
 - **IPv6 rate-limit buckets** — an IPv6 client is keyed by its /64 (IPv4-mapped addresses by the
   embedded IPv4), so rotating source addresses inside one /64 does not dodge the limit.
 - **CRAM reference lookup stays local** — at startup `REF_PATH` / `REF_CACHE` default to a
@@ -51,7 +52,21 @@ landed after that review.
 - **CRAM header references gated** — htslib decodes a contig against the path in its `@SQ UR:`
   tag when no reference is given or the given reference lacks that contig, so a caller-supplied
   CRAM could return a server file's bytes as read sequence. With `BAMCP_ALLOW_LOCAL_FILES=false`
-  a CRAM needs a resolved reference that covers every `UR:`-tagged contig in its header.
+  a CRAM needs a resolved reference that covers every `UR:`-tagged contig in its header. The
+  gate is applied on the opened file's detected format, not its name: a CRAM renamed `.bam`
+  (htslib detects CRAM from the bytes) used to skip it and decode against its `UR:` file.
+- **NCBI API key kept out of logs** — `str()` of an httpx error embeds the request URL, so a failed
+  ClinVar/gnomAD/gene lookup logged `api_key=…`, as did httpx's own per-request INFO line. Every
+  log site now goes through `redact_error` (type, status, URL with credential parameters
+  replaced), and a filter scrubs the `httpx` logger.
+- **`scan_variants` memory bounded while scanning** — every candidate of a scan (up to 250 Mbp,
+  at caller floors as low as `min_vaf=0`, `min_alt_count=1`) was held until the end and only then
+  capped at 500. The highest-VAF candidates are now kept as the scan goes (same selection, ties
+  included); `total_candidates` / `results_capped` still count everything seen.
+- **Viewer variant list capped** — `visualize_region` / `jump_to` put every passing candidate of
+  a window (up to 1 Mbp) into the viewer payload. They now keep `GET_VARIANTS_MAX_RESULTS`,
+  chosen as `get_variants` chooses, record `variants_truncated` / `total_candidates` /
+  `max_results` in `applied_filters`, and the viewer says how many are shown.
 - **`search_gene` symbol validation** — symbols must be 1–40 letters, digits, `.`, `_` or `-`
   before they are put into an NCBI Entrez query.
 - **`BAMCP_HOST` defaults to `127.0.0.1`** in code; the Docker image still sets `0.0.0.0`.
@@ -63,6 +78,11 @@ landed after that review.
 
 ### Fixed
 
+- **Mismatch-capped reads no longer weaken SNV evidence silently** — a read past
+  `READ_MAX_MISMATCHES` stops listing mismatches, so it stopped supporting later candidates
+  while the pileup alt count stayed the same. Responses that report variants now set
+  `applied_filters.mismatches_truncated` (+ `mismatches_truncated_reads`), and candidates such a
+  read covers past its kept mismatches are marked `evidence_incomplete`.
 - An indel in a homopolymer run was flagged from the run's reference length alone. With at
   least 8 reads spanning the whole run, the homopolymer risk now comes from the called
   length's share among those reads, which also give the allele fraction and a genotype hint;
@@ -92,7 +112,8 @@ landed after that review.
 - Per-call resource bounds: at most `VCF_MAX_RECORDS` (5,000) VCF records per call
   (`vcf_truncated` + `vcf_max_records` in `applied_filters`); records with more than
   `VCF_MAX_SAMPLES_DETAIL` (16) samples keep the GT of the first 16 (`samples_truncated`,
-  `sample_count`; the viewer shows the full count); at most `READ_MAX_MISMATCHES` (1,000)
+  `sample_count`; the viewer shows the full count and `get_region_summary` appends
+  `… +N more samples`); at most `READ_MAX_MISMATCHES` (1,000)
   mismatches per read (`mismatches_truncated`); read extraction stops past an estimated
   `READ_PAYLOAD_MAX_BYTES` (64 MiB, `reads_truncated`); `get_variants` returns at most
   `GET_VARIANTS_MAX_RESULTS` (1,000) variants (`truncated`, `total_candidates`, `max_results`),
@@ -109,10 +130,15 @@ landed after that review.
   resolution, as `classify_variant` now also does) and other failures take the `isError` envelope.
 - 10 of 13 tool descriptions in `tool_specs.py` had drifted from the registered text; the eval
   router sent placeholder descriptions to the eval model.
+- `--cache` could merge those placeholder-description passes into a run graded on the real
+  descriptions: it matched provider + model only. Each result row and `run_config.yaml` now
+  record a `tools_hash` of the descriptors the model saw, and the cache requires it to match.
 - `cleanup_cache` now also forgets which remote inputs are warm, so the next open of a remote
   input gets the cold-start budget again.
 - A candidate with an unknown `alt_count` was dropped by the viewer/region-summary floor and the
   site probe but kept by `get_variants`; all of them now keep it.
+- The curation summary's CALLING FILTERS block printed an unknown alt count as `None/20 alt reads`
+  (and an unknown VAF failed to format); both now read `unknown`.
 - pysam parses ran on the event loop's default executor, so a hung parse could starve unrelated
   async work — parsing is confined to a dedicated bounded pool.
 

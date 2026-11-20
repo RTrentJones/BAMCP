@@ -309,6 +309,7 @@ async def assemble_evidence(
     from ..core.tools import (
         _applied_filters,
         _fetch_region_with_timeout,
+        _mismatch_truncation_filters,
         probe_site,
         site_filter_check,
     )
@@ -417,9 +418,12 @@ async def assemble_evidence(
         "observation": _observation_from_variant(
             target,
             fetch_error=fetch_error,
-            applied_filters=_applied_filters(
-                config, {}, include_max_reads=True, min_alt_count=config.min_alt_count
-            ),
+            applied_filters={
+                **_applied_filters(
+                    config, {}, include_max_reads=True, min_alt_count=config.min_alt_count
+                ),
+                **(_mismatch_truncation_filters(data) if data is not None else {}),
+            },
             alt_reads_seen=alt_reads_seen,
             probe=probe,
         ),

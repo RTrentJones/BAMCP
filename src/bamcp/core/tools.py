@@ -30,6 +30,7 @@ from ..constants import (
     DEFAULT_CACHE_TTL_SECONDS,
     GET_VARIANTS_MAX_RESULTS,
     INDEL_DETECTION_MAX_REGION,
+    READ_MAX_MISMATCHES,
     REGION_TILE_SIZE,
     VCF_MAX_RECORDS,
     VIEWER_RESOURCE_URI,
@@ -240,6 +241,22 @@ def _vcf_truncation_filters(data: RegionData) -> dict[str, Any]:
     return {"vcf_truncated": True, "vcf_max_records": VCF_MAX_RECORDS}
 
 
+def _mismatch_truncation_filters(data: RegionData) -> dict[str, Any]:
+    """applied_filters entries when any read hit READ_MAX_MISMATCHES (else empty).
+
+    Such a read lists only its first mismatches, so read-level SNV evidence past them is
+    incomplete (the affected candidates carry ``evidence_incomplete``).
+    """
+    capped = sum(1 for r in data.reads if r.mismatches_truncated)
+    if not capped:
+        return {}
+    return {
+        "mismatches_truncated": True,
+        "mismatches_truncated_reads": capped,
+        "read_max_mismatches": READ_MAX_MISMATCHES,
+    }
+
+
 def _format_filters_line(filters: dict[str, Any]) -> str:
     """Compact human-readable rendering of :func:`_applied_filters` for text summaries."""
     parts = [
@@ -262,6 +279,11 @@ def _format_filters_line(filters: dict[str, Any]) -> str:
         parts.append(
             f"variant list TRUNCATED to {filters.get('max_results')} of "
             f"{filters.get('total_candidates')} (narrow the region)"
+        )
+    if filters.get("mismatches_truncated"):
+        parts.append(
+            f"{filters.get('mismatches_truncated_reads')} read(s) capped at "
+            f"{filters.get('read_max_mismatches')} mismatches (SNV read evidence incomplete there)"
         )
     if filters.get("vcf_truncated"):
         parts.append(
@@ -1418,6 +1440,7 @@ async def handle_get_variants(args: dict[str, Any], config: BAMCPConfig) -> dict
     )
     filters["per_site_evidence"] = evidence_summary
     filters.update(_vcf_truncation_filters(data))
+    filters.update(_mismatch_truncation_filters(data))
     filters["max_results"] = GET_VARIANTS_MAX_RESULTS
     filters["truncated"] = total_candidates > GET_VARIANTS_MAX_RESULTS
     filters["total_candidates"] = total_candidates
@@ -1879,6 +1902,7 @@ async def _viewer_response(
         reference_source=resolved.source,
     )
     filters.update(_vcf_truncation_filters(data))
+    filters.update(_mismatch_truncation_filters(data))
     filters["max_results"] = GET_VARIANTS_MAX_RESULTS
     filters["variants_truncated"] = total_variants > GET_VARIANTS_MAX_RESULTS
     filters["total_candidates"] = total_variants
@@ -2004,6 +2028,7 @@ async def handle_get_region_summary(args: dict[str, Any], config: BAMCPConfig) -
         reference_source=resolved.source,
     )
     filters.update(_vcf_truncation_filters(data))
+    filters.update(_mismatch_truncation_filters(data))
     total_variants = len(data.variants)
     listed = data
     if total_variants > GET_VARIANTS_MAX_RESULTS:

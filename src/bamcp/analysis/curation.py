@@ -30,6 +30,8 @@ from .evidence import (
     compute_variant_evidence,
     is_indel,
     is_read_position_biased,
+    mismatch_capped_spans,
+    snv_evidence_capped,
     zygosity_hint,
 )
 
@@ -416,6 +418,7 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
     from ..core.tools import (
         _applied_filters,
         _fetch_region_with_timeout,
+        _mismatch_truncation_filters,
         _resolve_reference_info,
         probe_site,
         site_filter_check,
@@ -469,6 +472,7 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
         min_alt_count=config.min_alt_count,
         reference_source=resolved.source,
     )
+    applied_filters.update(_mismatch_truncation_filters(data))
     filter_check = site_filter_check(target_variant, config) if target_variant else None
     if target_variant is not None and filter_check and filter_check["passes_filters"]:
         # Build the support index (mismatches for SNVs, CIGAR events for indels) and
@@ -477,6 +481,8 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
             evidence = compute_indel_evidence(build_indel_index(data.reads), target_variant)
         else:
             evidence = compute_variant_evidence(build_mismatch_index(data.reads), target_variant)
+            if snv_evidence_capped(mismatch_capped_spans(data.reads), target_variant):
+                evidence["incomplete"] = True
         artifact_risk = compute_artifact_risk(
             target_variant,
             evidence,
@@ -517,6 +523,8 @@ async def handle_get_variant_curation_summary(args: dict[str, Any], config: BAMC
             "alt_count": target_variant.get("alt_count", 0),
         },
         "read_evidence_computed": computed,
+        # True when a read past READ_MAX_MISMATCHES covers the site: support is undercounted.
+        "evidence_incomplete": bool(evidence.get("incomplete")),
         "quality_metrics": {
             "mean_quality": evidence["mean_quality"] if computed else None,
             "median_quality": evidence["median_quality"] if computed else None,

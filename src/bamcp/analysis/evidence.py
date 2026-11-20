@@ -328,6 +328,26 @@ def build_mismatch_index(
     return index
 
 
+def mismatch_capped_spans(reads: list[AlignedRead]) -> list[tuple[int, int]]:
+    """``[(first_unlisted_pos, end), …]`` for reads whose mismatch list hit READ_MAX_MISMATCHES.
+
+    A capped read keeps its first mismatches by reference position, so past its last kept one
+    it silently stops supporting any SNV candidate (the pileup alt_count is unaffected).
+    """
+    spans = []
+    for read in reads:
+        if read.mismatches_truncated:
+            last = read.mismatches[-1]["pos"] if read.mismatches else read.position - 1
+            spans.append((last + 1, read.end_position))
+    return spans
+
+
+def snv_evidence_capped(spans: list[tuple[int, int]], variant: dict) -> bool:
+    """Whether a capped read covers ``variant``'s position past its kept mismatches."""
+    pos = variant["position"]
+    return any(lo <= pos < hi for lo, hi in spans)
+
+
 _CIGAR_RE = re.compile(r"(\d+)([MIDNSHP=X])")
 
 
@@ -934,6 +954,7 @@ def enhance_variants_with_evidence(
     read set gets no spanning-read repeat evidence (see :func:`compute_artifact_risk`).
     """
     mismatch_index = build_mismatch_index(reads)
+    capped_spans = mismatch_capped_spans(reads)
     indel_index: dict | None = None
     variant_evidence: dict = {}
     enhanced_variants: list[dict] = []
@@ -985,6 +1006,11 @@ def enhance_variants_with_evidence(
         enhanced["confidence"] = confidence
         # Keep is_low_confidence for backwards compatibility
         enhanced["is_low_confidence"] = confidence == "low"
+        if not is_indel(variant) and snv_evidence_capped(capped_spans, variant):
+            # A read past its mismatch cap no longer lists this site: strand/quality evidence
+            # undercounts the pileup's alt reads, as with a max_reads-truncated read set.
+            enhanced["evidence_incomplete"] = True
+            evidence["incomplete"] = True
 
         enhanced_variants.append(enhanced)
 

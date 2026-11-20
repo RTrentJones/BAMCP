@@ -78,6 +78,11 @@ landed after that review.
 
 ### Fixed
 
+- **Mismatch-capped reads no longer weaken SNV evidence silently** — a read past
+  `READ_MAX_MISMATCHES` stops listing mismatches, so it stopped supporting later candidates
+  while the pileup alt count stayed the same. Responses that report variants now set
+  `applied_filters.mismatches_truncated` (+ `mismatches_truncated_reads`), and candidates such a
+  read covers past its kept mismatches are marked `evidence_incomplete`.
 - An indel in a homopolymer run was flagged from the run's reference length alone. With at
   least 8 reads spanning the whole run, the homopolymer risk now comes from the called
   length's share among those reads, which also give the allele fraction and a genotype hint;

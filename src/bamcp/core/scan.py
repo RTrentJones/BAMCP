@@ -7,6 +7,7 @@ lock-guarded :class:`_ScanProgress`, so a deadline yields a partial, self-descri
 from __future__ import annotations
 
 import asyncio
+import heapq
 import json
 import threading
 import time
@@ -38,15 +39,49 @@ if TYPE_CHECKING:
     from .tools import ResolvedReference
 
 
+class _TopCandidates:
+    """The ``cap`` highest-VAF candidates seen so far, plus how many were seen in all.
+
+    A scan may visit 250 Mbp at caller-chosen floors as low as min_vaf=0 / min_alt_count=1, so
+    holding every candidate until the end grows without bound; this keeps only the ones the
+    response can carry. The selection is exactly the old end-of-scan one — a stable sort by VAF
+    descending over arrival order, first ``cap`` kept — so among equal VAFs the earliest-seen
+    candidate wins: the heap orders by ``(vaf, -arrival)``, its root being the one to drop.
+    """
+
+    def __init__(self, cap: int) -> None:
+        self.cap = cap
+        self.total = 0
+        self._heap: list[tuple[float, int, dict]] = []
+
+    def add(self, variant: dict) -> None:
+        item = (variant["vaf"], -self.total, variant)
+        self.total += 1
+        if len(self._heap) < self.cap:
+            heapq.heappush(self._heap, item)
+        elif item[:2] > self._heap[0][:2]:
+            heapq.heapreplace(self._heap, item)
+
+    def by_vaf(self) -> list[dict]:
+        """The kept candidates, highest VAF first (ties: earliest seen first)."""
+        return [v for _, _, v in sorted(self._heap, key=lambda t: (-t[0], -t[1]))]
+
+    def in_arrival_order(self) -> list[dict]:
+        return [v for _, _, v in sorted(self._heap, key=lambda t: -t[1])]
+
+
 @dataclass
 class _ScanProgress:
     """Shared, lock-guarded state of a progressive contig scan (worker thread → handler).
 
     Coordinates are internal 0-based half-open. ``scanned_end`` advances only after a chunk's
-    candidates are appended, so ``[0, scanned_end)`` is exactly what ``variants`` covers.
+    candidates are added, so ``[0, scanned_end)`` is exactly what ``candidates`` covers.
+    ``candidates`` is bounded (the response cap); its ``total`` counts every candidate seen.
     """
 
-    variants: list[dict] = field(default_factory=list)
+    candidates: _TopCandidates = field(
+        default_factory=lambda: _TopCandidates(SCAN_VARIANTS_MAX_RESULTS)
+    )
     scan_start: int = 0
     scanned_end: int = 0
     scan_end: int = 0
@@ -57,6 +92,11 @@ class _ScanProgress:
     deadline_hit: bool = False
     stop: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
+
+    @property
+    def variants(self) -> list[dict]:
+        """The kept candidates in scan (arrival) order."""
+        return self.candidates.in_arrival_order()
 
 
 def _scan_chunk(
@@ -185,7 +225,8 @@ def _scan_contig_progressive(
                     min_alt_count,
                 )
                 with progress.lock:
-                    progress.variants.extend(found)
+                    for v in found:
+                        progress.candidates.add(v)
                     progress.scanned_end = chunk_end
                 chunk_start = chunk_end
                 if time.monotonic() - started < SCAN_VARIANTS_CHUNK_TARGET_SECONDS:
@@ -300,7 +341,8 @@ async def _scan_variants_guarded(
     # sanitizes it; the unknown-contig case already raised a caller-safe ToolInputError.
 
     with progress.lock:
-        all_variants = list(progress.variants)
+        kept = progress.candidates.by_vaf()
+        total_candidates = progress.candidates.total
         scan_start = progress.scan_start
         scanned_end = progress.scanned_end
         scan_end = progress.scan_end
@@ -345,9 +387,8 @@ async def _scan_variants_guarded(
             else "examined"
         )
 
-    # When capped, keep the highest-VAF candidates; report them in genomic order.
-    all_variants.sort(key=lambda v: v["vaf"], reverse=True)
-    variants = sorted(all_variants[:SCAN_VARIANTS_MAX_RESULTS], key=lambda v: v["position"])
+    # When capped, the highest-VAF candidates were kept while scanning; report in genomic order.
+    variants = sorted(kept, key=lambda v: v["position"])
     # 1-based inclusive; None when not a single chunk completed.
     scanned_region = (
         format_region(contig, scan_start, scanned_end) if scanned_end > scan_start else None
@@ -374,8 +415,8 @@ async def _scan_variants_guarded(
             "get_variants on a small window around a candidate for artifact_risk/confidence",
             "max_region": SCAN_VARIANTS_MAX_REGION,
             "truncated_by_deadline": truncated_by_deadline,
-            "total_candidates": len(all_variants),
-            "results_capped": len(all_variants) > SCAN_VARIANTS_MAX_RESULTS,
+            "total_candidates": total_candidates,
+            "results_capped": total_candidates > SCAN_VARIANTS_MAX_RESULTS,
             "max_results": SCAN_VARIANTS_MAX_RESULTS,
         }
     )

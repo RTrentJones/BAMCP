@@ -58,6 +58,10 @@ landed after that review.
   ClinVar/gnomAD/gene lookup logged `api_key=…`, as did httpx's own per-request INFO line. Every
   log site now goes through `redact_error` (type, status, URL with credential parameters
   replaced), and a filter scrubs the `httpx` logger.
+- **`scan_variants` memory bounded while scanning** — every candidate of a scan (up to 250 Mbp,
+  at caller floors as low as `min_vaf=0`, `min_alt_count=1`) was held until the end and only then
+  capped at 500. The highest-VAF candidates are now kept as the scan goes (same selection, ties
+  included); `total_candidates` / `results_capped` still count everything seen.
 - **`search_gene` symbol validation** — symbols must be 1–40 letters, digits, `.`, `_` or `-`
   before they are put into an NCBI Entrez query.
 - **`BAMCP_HOST` defaults to `127.0.0.1`** in code; the Docker image still sets `0.0.0.0`.

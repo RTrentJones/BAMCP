@@ -51,7 +51,9 @@ landed after that review.
 - **CRAM header references gated** — htslib decodes a contig against the path in its `@SQ UR:`
   tag when no reference is given or the given reference lacks that contig, so a caller-supplied
   CRAM could return a server file's bytes as read sequence. With `BAMCP_ALLOW_LOCAL_FILES=false`
-  a CRAM needs a resolved reference that covers every `UR:`-tagged contig in its header.
+  a CRAM needs a resolved reference that covers every `UR:`-tagged contig in its header. The
+  gate is applied on the opened file's detected format, not its name: a CRAM renamed `.bam`
+  (htslib detects CRAM from the bytes) used to skip it and decode against its `UR:` file.
 - **`search_gene` symbol validation** — symbols must be 1–40 letters, digits, `.`, `_` or `-`
   before they are put into an NCBI Entrez query.
 - **`BAMCP_HOST` defaults to `127.0.0.1`** in code; the Docker image still sets `0.0.0.0`.

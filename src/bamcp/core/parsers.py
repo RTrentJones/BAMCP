@@ -1,8 +1,11 @@
 """BAM/CRAM file parsing using pysam."""
 
+import contextvars
 import os
+import threading
 from collections import OrderedDict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,6 +18,7 @@ from ..constants import (
     VCF_MAX_RECORDS,
     VCF_MAX_SAMPLES_DETAIL,
 )
+from .errors import ToolInputError
 from .validation import is_cram
 
 
@@ -336,14 +340,104 @@ def _open_alignment(
     reference_path: str | None = None,
     index_filename: str | None = None,
 ) -> pysam.AlignmentFile:
-    """Open a BAM/CRAM with the correct mode and shared options."""
+    """Open a BAM/CRAM with the correct mode and shared options.
+
+    The mode is only a hint chosen from the name: htslib detects the real format from the
+    file's content, so a CRAM named ``.bam`` opens (and decodes) as CRAM. Under
+    :func:`guard_cram_decoding` the CRAM gate is therefore applied here, on the opened handle
+    — the one that will decode — rather than on the name.
+    """
     mode = "rc" if is_cram(bam_path) else "rb"
-    return pysam.AlignmentFile(
+    samfile = pysam.AlignmentFile(
         bam_path,
         mode,  # type: ignore[arg-type]
         reference_filename=reference_path,
         index_filename=index_filename,
     )
+    if _CRAM_DECODE_GUARD.get() and samfile.is_cram:
+        try:
+            _check_cram_decode(samfile, reference_path)
+        except BaseException:
+            samfile.close()
+            raise
+    return samfile
+
+
+CRAM_REFERENCE_REQUIRED_MESSAGE = (
+    "CRAM decoding needs a reference on this server; pass reference=<indexed FASTA URL> "
+    "(list_contigs suggests one for the file's build)"
+)
+
+# True while serving a remote-only server's tool call (``allow_local_files`` off): every
+# alignment open then refuses a CRAM that htslib would decode against a file named by its own
+# header. A ContextVar so concurrent calls from differently-configured servers stay separate;
+# ``services._run_in_parse_pool`` copies the context into the parse thread.
+_CRAM_DECODE_GUARD: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "bamcp_cram_decode_guard", default=False
+)
+
+
+@contextmanager
+def guard_cram_decoding(enabled: bool) -> Iterator[None]:
+    """Apply the CRAM header-reference gate to every alignment open in this context."""
+    token = _CRAM_DECODE_GUARD.set(enabled or _CRAM_DECODE_GUARD.get())
+    try:
+        yield
+    finally:
+        _CRAM_DECODE_GUARD.reset(token)
+
+
+# reference -> its FASTA contig names, for the header gate. Bounded LRU, shared by the parse
+# threads (hence the lock); keyed with the local fingerprint so a replaced FASTA is re-read.
+_REFERENCE_CONTIGS: OrderedDict[tuple, frozenset[str]] = OrderedDict()
+_REFERENCE_CONTIGS_MAX = 64
+_REFERENCE_CONTIGS_LOCK = threading.Lock()
+
+
+def _reference_contigs(reference_path: str) -> frozenset[str]:
+    from .services import _local_fingerprint
+
+    key = (reference_path, _local_fingerprint(reference_path))
+    with _REFERENCE_CONTIGS_LOCK:
+        cached = _REFERENCE_CONTIGS.get(key)
+        if cached is not None:
+            _REFERENCE_CONTIGS.move_to_end(key)
+            return cached
+    with open_fasta(reference_path) as fasta:
+        names = frozenset(fasta.references)
+    with _REFERENCE_CONTIGS_LOCK:
+        _REFERENCE_CONTIGS[key] = names
+        while len(_REFERENCE_CONTIGS) > _REFERENCE_CONTIGS_MAX:
+            _REFERENCE_CONTIGS.popitem(last=False)
+    return names
+
+
+def _check_cram_decode(samfile: pysam.AlignmentFile, reference_path: str | None) -> None:
+    """Refuse a CRAM whose decode could fall back to its header's ``@SQ UR:`` file.
+
+    With no ``reference_filename`` htslib resolves each contig's reference from the header's
+    ``UR:`` tag (a path chosen by whoever wrote the file) and returns those bytes as read
+    sequence; with a reference that lacks a contig, it falls back to that contig's ``UR:``
+    (``cram_get_ref``: "Reference file given, but ref '…' not present"). ``REF_PATH`` /
+    ``REF_CACHE`` (pinned local at startup) only govern the M5 lookup. Reads only the header
+    and the FASTA index; no slice is decoded.
+    """
+    if not reference_path:
+        raise ToolInputError(CRAM_REFERENCE_REQUIRED_MESSAGE)
+    ur_contigs = [str(sq["SN"]) for sq in samfile.header.to_dict().get("SQ", []) if sq.get("UR")]
+    if not ur_contigs:
+        return
+    served = _reference_contigs(reference_path)
+    unserved = [name for name in ur_contigs if name not in served]
+    if unserved:
+        shown = ", ".join(unserved[:3]) + (
+            f" (+{len(unserved) - 3} more)" if len(unserved) > 3 else ""
+        )
+        raise ToolInputError(
+            f"This CRAM's header points contigs the reference does not contain ({shown}) at "
+            "an external reference (@SQ UR:), which this server does not follow; pass a "
+            "reference FASTA that covers every contig in the header"
+        )
 
 
 # Locally cached .fai/.gzi for remote reference FASTAs (url -> (fai, gzi)), registered by

@@ -18,6 +18,7 @@ from .analysis.acmg import handle_classify_variant
 from .analysis.curation import handle_get_variant_curation_summary
 from .config import BAMCPConfig
 from .core.errors import format_argument_error, sanitize_tool_exception
+from .core.parsers import guard_cram_decoding
 from .core.tools import (
     handle_cleanup_cache,
     handle_get_coverage,
@@ -128,7 +129,9 @@ def create_server(config: BAMCPConfig | None = None) -> FastMCP:
         result (isError=true) with a sanitized message — never raw pysam/OS text that could
         carry operator paths (see core/errors.py)."""
         try:
-            return await handler(resolve_demo_alias(args), config)
+            # Gate every alignment open of this call on its content (see guard_cram_decoding).
+            with guard_cram_decoding(not config.allow_local_files):
+                return await handler(resolve_demo_alias(args), config)
         except Exception as e:  # noqa: BLE001 — every failure goes through the sanitizer
             raise sanitize_tool_exception(e, tool, config) from e
 

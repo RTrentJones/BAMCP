@@ -11,7 +11,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pysam
 
@@ -29,10 +29,13 @@ from ..constants import (
 from ..middleware.telemetry import telemetry_wrapper
 from .errors import ToolInputError
 from .filters import passes_candidate_filters
-from .parsers import format_region, open_fasta, parse_region
+from .parsers import format_region, guard_cram_decoding, open_fasta, parse_region
 from .remote import _ensure_cached_index, _warm_remote_inputs
 from .services import _run_in_parse_pool
 from .validation import validate_path, validate_region
+
+if TYPE_CHECKING:
+    from .tools import ResolvedReference
 
 
 @dataclass
@@ -208,24 +211,12 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
     """
     # The region tools' shared vocabulary lives in core.tools, which re-exports this module's
     # names; importing it lazily keeps the import graph acyclic at module load.
-    from .tools import (
-        _CANDIDATE_VARIANT_DISCLAIMER,
-        _FILTER_ABSENCE_NOTE,
-        _LLM_COORDINATE_SYSTEM,
-        _applied_filters,
-        _check_cram_header_references,
-        _first_contig,
-        _one_based,
-        _resolve_reference_info,
-    )
+    from .tools import _resolve_reference_info
 
     file_path = args["file_path"]
     await asyncio.to_thread(validate_path, file_path, config)
     resolved = await _resolve_reference_info(args, config)
     reference = resolved.effective
-    min_vaf = args.get("min_vaf", config.min_vaf)
-    min_depth = args.get("min_depth", config.min_depth)
-    min_alt_count = args.get("min_alt_count", config.min_alt_count)
 
     if not reference:
         raise ToolInputError(
@@ -233,10 +224,35 @@ async def handle_scan_variants(args: dict[str, Any], config: BAMCPConfig) -> dic
             "Use list_contigs to detect genome build and get a reference URL."
         )
 
+    # Every alignment open below is CRAM-gated by content (header @SQ UR: contigs the reference
+    # lacks); server._run sets the guard too, this covers in-process callers.
+    with guard_cram_decoding(not config.allow_local_files):
+        return await _scan_variants_guarded(args, config, file_path, resolved, reference)
+
+
+async def _scan_variants_guarded(
+    args: dict[str, Any],
+    config: BAMCPConfig,
+    file_path: str,
+    resolved: ResolvedReference,
+    reference: str,
+) -> dict:
+    """:func:`handle_scan_variants`' body, run under the CRAM decode guard."""
+    from .tools import (
+        _CANDIDATE_VARIANT_DISCLAIMER,
+        _FILTER_ABSENCE_NOTE,
+        _LLM_COORDINATE_SYSTEM,
+        _applied_filters,
+        _first_contig,
+        _one_based,
+    )
+
+    min_vaf = args.get("min_vaf", config.min_vaf)
+    min_depth = args.get("min_depth", config.min_depth)
+    min_alt_count = args.get("min_alt_count", config.min_alt_count)
     index_path = await _ensure_cached_index(file_path, config)
     # Cold remote inputs get their one-off open under the cold budget, not the scan deadline.
     await _warm_remote_inputs(file_path, reference, index_path, config)
-    await _check_cram_header_references(file_path, reference, config)
     scan_start, scan_stop = 0, None
     if args.get("region"):
         validate_region(args["region"])

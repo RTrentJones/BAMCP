@@ -23,6 +23,7 @@ from ..analysis.evidence import (
     enhance_vcf_variants,
 )
 from ..clients.genes import GeneLookupError
+from ..clients.ncbi import redact_error
 from ..config import BAMCPConfig
 from ..constants import (
     BAM_PARSE_TIMEOUT_SECONDS,
@@ -1682,7 +1683,7 @@ async def handle_search_gene(args: dict[str, Any], config: BAMCPConfig) -> dict:
     except GeneLookupError as e:
         # NCBI unreachable / in-band error: the gene's existence is UNKNOWN, not disproven.
         # The upstream text is logged only; the caller gets a fixed reason, as the lookups do.
-        logger.warning("Gene lookup unavailable for %s: %s", symbol, e)
+        logger.warning("Gene lookup unavailable for %s: %s", symbol, redact_error(e))
         reason_code = (
             "network_error" if isinstance(e.__cause__, httpx.HTTPError) else "upstream_error"
         )

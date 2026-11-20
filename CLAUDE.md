@@ -42,7 +42,7 @@ src/bamcp/
     fusion.py        — multi-source evidence fusion
   clients/
     clinvar.py, gnomad.py, genes.py — async NCBI / gnomAD GraphQL / NCBI gene clients
-    ncbi.py          — shared NCBI E-utilities rate limiting + error detection
+    ncbi.py          — shared NCBI E-utilities rate limiting + error detection, redact_error
     ttl_cache.py     — BoundedTTLCache (shared LRU + TTL)
   middleware/
     auth.py          — BAMCPAuthProvider (in-memory OAuth 2.0)
@@ -237,7 +237,9 @@ Input validation: regions against `REGION_PATTERN`, paths ≤2048 chars, regions
 only `.bam`/`.cram` for local files, gene symbols against `GENE_SYMBOL_PATTERN` (1–40 of letters,
 digits, `.`, `_`, `-`; they go into an Entrez query), error messages sanitized (never leak config).
 Unavailable lookups carry a fixed `reason_code` (`timeout`, `network_error`, `upstream_error`,
-`unsupported_build`) — upstream error text is logged, never returned.
+`unsupported_build`) — upstream error text is logged, never returned, and logged only through
+`clients/ncbi.py:redact_error` (an httpx error's text embeds the request URL, NCBI `api_key` and
+all); a filter on the `httpx` logger scrubs the same parameters from its per-request INFO line.
 
 **One error envelope.** Every tool runs through `_run()` in `server.py`, which maps any handler
 exception via `core/errors.py:sanitize_tool_exception` to an `isError=true` result with a

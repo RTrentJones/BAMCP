@@ -54,6 +54,10 @@ landed after that review.
   a CRAM needs a resolved reference that covers every `UR:`-tagged contig in its header. The
   gate is applied on the opened file's detected format, not its name: a CRAM renamed `.bam`
   (htslib detects CRAM from the bytes) used to skip it and decode against its `UR:` file.
+- **NCBI API key kept out of logs** — `str()` of an httpx error embeds the request URL, so a failed
+  ClinVar/gnomAD/gene lookup logged `api_key=…`, as did httpx's own per-request INFO line. Every
+  log site now goes through `redact_error` (type, status, URL with credential parameters
+  replaced), and a filter scrubs the `httpx` logger.
 - **`search_gene` symbol validation** — symbols must be 1–40 letters, digits, `.`, `_` or `-`
   before they are put into an NCBI Entrez query.
 - **`BAMCP_HOST` defaults to `127.0.0.1`** in code; the Docker image still sets `0.0.0.0`.

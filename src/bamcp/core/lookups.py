@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 
 from ..clients.gnomad import GnomadBuildError, GnomadQueryError
-from ..clients.ncbi import NCBIUnavailableError
+from ..clients.ncbi import NCBIUnavailableError, redact_error
 from ..config import BAMCPConfig
 from ..middleware.telemetry import telemetry_wrapper
 from .errors import ToolInputError
@@ -171,17 +171,17 @@ async def handle_lookup_clinvar(args: dict[str, Any], config: BAMCPConfig) -> di
         return _lookup_failure("ClinVar", "timeout", error="ClinVar lookup timed out", **common)
     except NCBIUnavailableError as e:
         # In-band NCBI error, truncated search, unsupported build: absence NOT established.
-        logger.warning("ClinVar lookup unavailable for %s: %s", variant, e)
+        logger.warning("ClinVar lookup unavailable for %s: %s", variant, redact_error(e))
         return _lookup_failure(
             "ClinVar", "upstream_error", error="ClinVar lookup unavailable", **common
         )
     except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
         # Network/HTTP failure — the lookup is UNAVAILABLE, not an authoritative not-found.
-        logger.warning("ClinVar lookup failed for %s: %s", variant, e)
+        logger.warning("ClinVar lookup failed for %s: %s", variant, redact_error(e))
         return _lookup_failure("ClinVar", "network_error", error="ClinVar lookup failed", **common)
     except ValueError as e:
         # An unparseable body.
-        logger.warning("ClinVar lookup failed for %s: %s", variant, e)
+        logger.warning("ClinVar lookup failed for %s: %s", variant, redact_error(e))
         return _lookup_failure("ClinVar", "upstream_error", error="ClinVar lookup failed", **common)
 
     if result is None:
@@ -217,21 +217,21 @@ async def handle_lookup_gnomad(args: dict[str, Any], config: BAMCPConfig) -> dic
         return _lookup_failure("gnomAD", "timeout", error="gnomAD lookup timed out", **common)
     except GnomadBuildError as e:
         # No gnomAD dataset for this build: unavailable, never a not-found.
-        logger.warning("gnomAD build refused for %s: %s", variant, e)
+        logger.warning("gnomAD build refused for %s: %s", variant, redact_error(e))
         return _lookup_failure(
             "gnomAD", "unsupported_build", error="gnomAD lookup failed", **common
         )
     except GnomadQueryError as e:
         # Transient GraphQL error — the client propagates it (rather than returning None) so we
         # report "unavailable" here instead of a misleading "not found in gnomAD".
-        logger.warning("gnomAD query error for %s: %s", variant, e)
+        logger.warning("gnomAD query error for %s: %s", variant, redact_error(e))
         return _lookup_failure("gnomAD", "upstream_error", error="gnomAD lookup failed", **common)
     except (httpx.HTTPStatusError, httpx.RequestError, ConnectionError, OSError) as e:
         # Network/HTTP failure — the lookup is UNAVAILABLE, not an authoritative not-found.
-        logger.warning("gnomAD lookup failed for %s: %s", variant, e)
+        logger.warning("gnomAD lookup failed for %s: %s", variant, redact_error(e))
         return _lookup_failure("gnomAD", "network_error", error="gnomAD lookup failed", **common)
     except ValueError as e:
-        logger.warning("gnomAD lookup failed for %s: %s", variant, e)
+        logger.warning("gnomAD lookup failed for %s: %s", variant, redact_error(e))
         return _lookup_failure("gnomAD", "upstream_error", error="gnomAD lookup failed", **common)
 
     if result is None:

@@ -21,6 +21,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from ..clients.ncbi import redact_error
 from ..config import BAMCPConfig
 from ..core.errors import ReferenceUnavailableError
 from ..core.serialization import build_enhanced_variants
@@ -110,7 +111,7 @@ async def _lookup_clinvar_safe(
     try:
         return await get_clinvar_client(config).lookup(chrom, pos, ref, alt, build=build)
     except Exception as e:  # noqa: BLE001 — degrade to "unavailable" rather than fail fusion
-        logger.warning("ClinVar lookup failed during fusion: %s", e)
+        logger.warning("ClinVar lookup failed during fusion: %s", redact_error(e))
         return UNAVAILABLE
 
 
@@ -124,7 +125,7 @@ async def _lookup_gnomad_safe(
     try:
         return await get_gnomad_client(config).lookup(chrom, pos, ref, alt, build=build)
     except Exception as e:  # noqa: BLE001 — degrade to "unavailable" rather than fail fusion
-        logger.warning("gnomAD lookup failed during fusion: %s", e)
+        logger.warning("gnomAD lookup failed during fusion: %s", redact_error(e))
         return UNAVAILABLE
 
 

@@ -100,11 +100,13 @@ class BAMIndexCache:
         Returns:
             True if cache exists and is within TTL.
         """
-        path = Path(cache_path)
-        if not path.exists():
+        # One stat, not exists()+stat(): a concurrent enforce_budget (both run in worker
+        # threads) can evict the file between the two calls. A file that vanished is a miss.
+        try:
+            mtime = Path(cache_path).stat().st_mtime
+        except OSError:
             return False
-        age = datetime.now().timestamp() - path.stat().st_mtime
-        return age < self.ttl_seconds
+        return datetime.now().timestamp() - mtime < self.ttl_seconds
 
     def enforce_budget(self, keep: str | None = None) -> int:
         """Bound this session's cache: drop expired files, then evict oldest-first.

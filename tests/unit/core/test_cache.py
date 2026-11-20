@@ -145,6 +145,19 @@ class TestBAMIndexCache:
         assert not cache.is_valid(str(tmp_path / "nonexistent.bai"))
 
     @pytest.mark.unit
+    def test_is_valid_file_evicted_mid_check(self, tmp_path: Path, monkeypatch):
+        """A file another thread evicts mid-check is a cache miss, never an exception.
+
+        Simulated as the old exists()-then-stat() window: exists() saw the file, but it is
+        gone by the time it is stat'ed (a concurrent enforce_budget in another thread).
+        """
+        cache = BAMIndexCache(str(tmp_path), ttl_seconds=3600)
+        gone = cache.cache_dir / "evicted.bai"
+        monkeypatch.setattr(Path, "exists", lambda self: True)
+
+        assert not cache.is_valid(str(gone))
+
+    @pytest.mark.unit
     def test_is_valid_fresh_file(self, tmp_path: Path):
         """Recently created files should be valid."""
         cache = BAMIndexCache(str(tmp_path), ttl_seconds=3600)

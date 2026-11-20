@@ -359,9 +359,14 @@ def validate_reference_path(reference_path: str, config: BAMCPConfig) -> None:
         raise ValueError(f"Reference path too long (max {MAX_FILE_PATH_LENGTH} characters)")
 
     ext_target = _ext_target(reference_path)
-    # The operator's own BAMCP_REFERENCE is trusted configuration, not a caller-chosen path:
-    # naming it explicitly must keep working when caller-supplied local files are disabled.
-    if config.reference and reference_path == config.reference:
+    # The operator's own local BAMCP_REFERENCE is trusted configuration, not a caller-chosen
+    # path: naming it explicitly must keep working when caller-supplied local files are
+    # disabled. A configured URL gets no exemption — it is validated like any remote reference.
+    if (
+        config.reference
+        and reference_path == config.reference
+        and not _URI_SCHEME_RE.match(reference_path)
+    ):
         if not Path(reference_path).is_file():
             raise FileNotFoundError("The server's configured reference file was not found")
         return

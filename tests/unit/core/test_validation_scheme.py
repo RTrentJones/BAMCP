@@ -149,6 +149,22 @@ class TestLocalFilesDisabled:
             validate_reference_path(str(other), config)
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("allow_local", [True, False])
+    def test_configured_reference_url_passed_explicitly(self, allow_local):
+        """A configured *URL* reference named by the caller goes through remote validation."""
+        url = "https://example.com/hg38.fa.gz"
+        config = BAMCPConfig(allow_local_files=allow_local, allow_remote_files=True, reference=url)
+        with patch("bamcp.core.validation.socket.getaddrinfo", return_value=_PUBLIC):
+            validate_reference_path(url, config)  # not "configured reference file not found"
+        # ...and is still SSRF-checked like any other remote reference.
+        private = [(2, 1, 6, "", ("10.0.0.5", 443))]
+        with (
+            patch("bamcp.core.validation.socket.getaddrinfo", return_value=private),
+            pytest.raises(ValueError),
+        ):
+            validate_reference_path(url, config)
+
+    @pytest.mark.unit
     async def test_config_reference_resolution_not_rejected(self, tmp_path):
         from bamcp.core.tools import _resolve_reference_info
 
